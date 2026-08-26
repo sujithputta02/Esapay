@@ -36,9 +36,15 @@ impl VitalsStore {
             return;
         }
 
-        let total_tps = workloads.iter().map(|w| w.metrics.rate_per_min / 60.0).sum();
-        let avg_p95 =
-            workloads.iter().map(|w| w.metrics.p95_latency_ms).sum::<f64>() / workloads.len() as f64;
+        let total_tps = workloads
+            .iter()
+            .map(|w| w.metrics.rate_per_min / 60.0)
+            .sum();
+        let avg_p95 = workloads
+            .iter()
+            .map(|w| w.metrics.p95_latency_ms)
+            .sum::<f64>()
+            / workloads.len() as f64;
         let avg_error =
             workloads.iter().map(|w| w.metrics.error_rate).sum::<f64>() / workloads.len() as f64;
         let total_queue = workloads.iter().map(|w| w.metrics.queue_depth).sum();

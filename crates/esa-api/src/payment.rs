@@ -70,7 +70,10 @@ pub fn apply_payment_event(
             );
         } else if workload.metrics.p95_latency_ms > 180.0 || workload.metrics.queue_depth > 400 {
             workload.state = WorkloadState::Overloaded;
-            info!("Workload {} OVERLOADED from transactions", workload.workload_id);
+            info!(
+                "Workload {} OVERLOADED from transactions",
+                workload.workload_id
+            );
         }
 
         workload_id = Some(workload.workload_id.clone());
@@ -94,7 +97,9 @@ pub fn apply_payment_event(
         workload_updated,
         workload_id: workload_id.clone(),
         workload: if workload_updated {
-            workload_id.as_ref().and_then(|id| state_fabric.get_workload(id))
+            workload_id
+                .as_ref()
+                .and_then(|id| state_fabric.get_workload(id))
         } else {
             None
         },

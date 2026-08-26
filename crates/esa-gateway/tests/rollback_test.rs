@@ -51,8 +51,10 @@ async fn rollback_restores_snapshot_state() {
     fabric.upsert_workload(workload).unwrap();
 
     let intent_manager = Arc::new(IntentManager::new());
-    let policy_engine =
-        Arc::new(PolicyEngine::new(Arc::clone(&fabric), Arc::clone(&intent_manager)));
+    let policy_engine = Arc::new(PolicyEngine::new(
+        Arc::clone(&fabric),
+        Arc::clone(&intent_manager),
+    ));
     let decision_verifier = Arc::new(DecisionVerifier::new(Arc::clone(&fabric)));
     let audit_store = Arc::new(AuditStore::new());
 

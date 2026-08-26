@@ -1,6 +1,4 @@
-use esa_core::{
-    AuditRecord, AuditOutcome, EffectStatus, ActionType,
-};
+use esa_core::{ActionType, AuditOutcome, AuditRecord, EffectStatus};
 
 pub fn verdict_label_from_audit(record: &AuditRecord) -> String {
     if let Some(verdict) = record.policy_result.get("verdict") {
@@ -182,7 +180,14 @@ pub fn action_record_from_audit(record: &AuditRecord) -> serde_json::Value {
         .as_ref()
         .and_then(|e| e.effect_measurement.as_ref())
         .map(|em| em.expected.description.clone())
-        .unwrap_or_else(|| record.policy_result.get("explanation").and_then(|v| v.as_str()).unwrap_or("Action processed").to_string());
+        .unwrap_or_else(|| {
+            record
+                .policy_result
+                .get("explanation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Action processed")
+                .to_string()
+        });
 
     serde_json::json!({
         "action_id": execution.map(|e| e.execution_id.clone()).unwrap_or_else(|| record.audit_id.clone()),

@@ -1,11 +1,11 @@
 use esa_agents::*;
 use esa_core::{IntentManager, *};
 use esa_gateway::ActionGateway;
-use esa_policy::{PolicyEngine, DecisionVerifier};
+use esa_policy::{DecisionVerifier, PolicyEngine};
 use esa_state::StateFabric;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::events::{RuntimeEvent, RuntimeEventHandler};
 
@@ -31,8 +31,14 @@ impl EsaOrchestrator {
         event_handler: Option<RuntimeEventHandler>,
     ) -> Self {
         let intent_manager = Arc::new(IntentManager::new());
-        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&state_fabric), Arc::clone(&intent_manager)));
-        let planning_agent = Arc::new(PlanningAgent::new(Arc::clone(&state_fabric), Arc::clone(&intent_manager)));
+        let policy_engine = Arc::new(PolicyEngine::new(
+            Arc::clone(&state_fabric),
+            Arc::clone(&intent_manager),
+        ));
+        let planning_agent = Arc::new(PlanningAgent::new(
+            Arc::clone(&state_fabric),
+            Arc::clone(&intent_manager),
+        ));
         let decision_verifier = Arc::new(DecisionVerifier::new(Arc::clone(&state_fabric)));
 
         Self {
@@ -87,7 +93,10 @@ impl EsaOrchestrator {
             });
         }
 
-        info!("⚠️  Detected {} degraded conditions - initiating autonomous recovery", conditions.len());
+        info!(
+            "⚠️  Detected {} degraded conditions - initiating autonomous recovery",
+            conditions.len()
+        );
 
         for condition in &conditions {
             self.emit(RuntimeEvent::ConditionDetected {
@@ -98,7 +107,8 @@ impl EsaOrchestrator {
             });
         }
 
-        let mut workload_conditions: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+        let mut workload_conditions: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
         for condition in &conditions {
             workload_conditions
                 .entry(condition.workload_id.clone())
@@ -106,7 +116,10 @@ impl EsaOrchestrator {
                 .push(condition.clone());
         }
 
-        info!("📊 Found {} unique degraded workloads to recover", workload_conditions.len());
+        info!(
+            "📊 Found {} unique degraded workloads to recover",
+            workload_conditions.len()
+        );
 
         let mut total_executions = 0;
         let mut last_diagnosis = None;
@@ -118,7 +131,11 @@ impl EsaOrchestrator {
 
             self.emit(RuntimeEvent::AgentActivity {
                 agent_id: "monitor".to_string(),
-                activity: format!("Escalating {} degraded conditions for {}", workload_conditions.len(), workload_id),
+                activity: format!(
+                    "Escalating {} degraded conditions for {}",
+                    workload_conditions.len(),
+                    workload_id
+                ),
             });
 
             self.rate_limiter.wait().await;
@@ -129,7 +146,10 @@ impl EsaOrchestrator {
             });
 
             let diagnosis = self.diagnosis_agent.diagnose(&workload_conditions).await?;
-            info!("🧠 AI Diagnosis for {}: {:?}", workload_id, diagnosis.hypothesis);
+            info!(
+                "🧠 AI Diagnosis for {}: {:?}",
+                workload_id, diagnosis.hypothesis
+            );
             last_diagnosis = Some(diagnosis.clone());
 
             self.emit(RuntimeEvent::AgentActivity {
@@ -137,7 +157,11 @@ impl EsaOrchestrator {
                 activity: format!("Generating recovery proposal for {}", workload_id),
             });
 
-            let proposal = match self.planning_agent.plan(&diagnosis, &workload_conditions).await {
+            let proposal = match self
+                .planning_agent
+                .plan(&diagnosis, &workload_conditions)
+                .await
+            {
                 Some(p) => p,
                 None => {
                     info!("⏸️  No action proposed for workload {}", workload_id);
@@ -146,7 +170,10 @@ impl EsaOrchestrator {
             };
 
             let action_type = action_type_name(&proposal.action);
-            info!("📋 Proposal generated for {}: {} - {:?}", workload_id, proposal.proposal_id, proposal.action);
+            info!(
+                "📋 Proposal generated for {}: {} - {:?}",
+                workload_id, proposal.proposal_id, proposal.action
+            );
             last_proposal = Some(proposal.clone());
 
             self.emit(RuntimeEvent::ActionProposed {
@@ -169,7 +196,10 @@ impl EsaOrchestrator {
                     .filter(|c| !c.passed)
                     .map(|c| c.reason.as_str())
                     .collect();
-                error!("🛑 Safety review FAILED for {} - blocking execution: {:?}", workload_id, failed_checks);
+                error!(
+                    "🛑 Safety review FAILED for {} - blocking execution: {:?}",
+                    workload_id, failed_checks
+                );
                 self.emit(RuntimeEvent::AgentActivity {
                     agent_id: "safety".to_string(),
                     activity: format!("Blocked unsafe proposal for {}", workload_id),
@@ -179,9 +209,15 @@ impl EsaOrchestrator {
 
             info!("✅ Safety review PASSED for {}", workload_id);
 
-            info!("🚀 EXECUTING autonomous recovery action for {}: {:?}", workload_id, proposal.action);
+            info!(
+                "🚀 EXECUTING autonomous recovery action for {}: {:?}",
+                workload_id, proposal.action
+            );
             let result = self.action_gateway.execute_with_verdict(&proposal).await?;
-            info!("✅ Autonomous recovery COMPLETED for {}: verdict={:?}", workload_id, result.verdict);
+            info!(
+                "✅ Autonomous recovery COMPLETED for {}: verdict={:?}",
+                workload_id, result.verdict
+            );
 
             let verdict_label = policy_verdict_label(&result.verdict);
             self.emit(RuntimeEvent::PolicyDecision {

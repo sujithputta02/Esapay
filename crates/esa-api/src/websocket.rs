@@ -106,7 +106,7 @@ async fn handle_socket(socket: WebSocket, broadcaster: Arc<TelemetryBroadcaster>
         activity: "WebSocket connected".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    
+
     if let Ok(json) = serde_json::to_string(&welcome) {
         if let Err(e) = sender.send(Message::Text(json)).await {
             info!("Failed to send welcome message: {:?}", e);

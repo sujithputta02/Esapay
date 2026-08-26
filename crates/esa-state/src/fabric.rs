@@ -1,7 +1,7 @@
-use dashmap::DashMap;
-use esa_core::{EsaResult, WorkloadEntity, WorkloadMetrics, StateSnapshot};
-use std::sync::Arc;
 use chrono::Utc;
+use dashmap::DashMap;
+use esa_core::{EsaResult, StateSnapshot, WorkloadEntity, WorkloadMetrics};
+use std::sync::Arc;
 
 /// State Fabric - In-memory state management with version tracking
 
@@ -31,7 +31,8 @@ impl StateFabric {
     }
 
     pub fn upsert_workload(&self, workload: WorkloadEntity) -> EsaResult<()> {
-        self.workloads.insert(workload.workload_id.clone(), workload);
+        self.workloads
+            .insert(workload.workload_id.clone(), workload);
         self.increment_version();
         Ok(())
     }
@@ -73,7 +74,7 @@ impl StateFabric {
             timestamp: Utc::now(),
             version,
         };
-        
+
         self.snapshots.insert(version, snapshot.clone());
         Ok(snapshot)
     }
@@ -123,7 +124,7 @@ mod tests {
     fn test_version_increment() {
         let fabric = StateFabric::new();
         assert_eq!(fabric.current_version(), 0);
-        
+
         let v1 = fabric.increment_version();
         assert_eq!(v1, 1);
         assert_eq!(fabric.current_version(), 1);
@@ -132,7 +133,7 @@ mod tests {
     #[test]
     fn test_workload_operations() {
         let fabric = StateFabric::new();
-        
+
         let workload = WorkloadEntity {
             workload_id: "w_001".to_string(),
             shard_id: "s_001".to_string(),
@@ -163,7 +164,7 @@ mod tests {
         };
 
         fabric.upsert_workload(workload.clone()).unwrap();
-        
+
         let retrieved = fabric.get_workload("w_001");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().workload_id, "w_001");

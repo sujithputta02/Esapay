@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Region, ConsistencyMode};
+use crate::types::{ConsistencyMode, Region};
 
 /// Intent and Constraints system for ESA - PRD sections #6.1 and #8
 
@@ -40,20 +40,20 @@ pub struct Constraints {
     pub min_replicas: Option<u32>,
     pub allowed_regions: Vec<Region>,
     pub forbidden_regions: Vec<Region>,
-    
+
     // Quality constraints
     pub consistency_requirement: Option<ConsistencyMode>,
     pub availability_requirement: Option<f64>, // 0.0 to 1.0
-    
+
     // Cost constraints
     pub max_cost_increase_percent: Option<f64>,
     pub budget_limit_usd: Option<f64>,
-    
+
     // Safety constraints
     pub require_approval_for_high_risk: bool,
     pub require_rollback_capability: bool,
     pub max_concurrent_actions: Option<u32>,
-    
+
     // Time constraints
     pub max_action_duration_seconds: Option<u64>,
     pub maintenance_windows: Vec<MaintenanceWindow>,
@@ -140,11 +140,7 @@ impl Default for Constraints {
         Self {
             max_replicas: Some(10),
             min_replicas: Some(2),
-            allowed_regions: vec![
-                Region::IndiaSouth,
-                Region::IndiaWest,
-                Region::IndiaNorth,
-            ],
+            allowed_regions: vec![Region::IndiaSouth, Region::IndiaWest, Region::IndiaNorth],
             forbidden_regions: Vec::new(),
             consistency_requirement: Some(ConsistencyMode::Strong),
             availability_requirement: Some(0.99),
@@ -223,7 +219,8 @@ impl IntentManager {
     }
 
     pub fn cleanup_expired(&self) -> usize {
-        let expired_ids: Vec<String> = self.intents
+        let expired_ids: Vec<String> = self
+            .intents
             .iter()
             .filter(|entry| entry.value().is_expired())
             .map(|entry| entry.key().clone())
@@ -259,7 +256,9 @@ impl ConstraintValidator {
         action: &crate::actions::ActionProposal,
     ) -> Result<Vec<IntentViolation>, crate::errors::EsaError> {
         let workload_id = self.extract_workload_id(&action.action);
-        let intents = self.intent_manager.get_active_intents_for_workload(&workload_id);
+        let intents = self
+            .intent_manager
+            .get_active_intents_for_workload(&workload_id);
 
         let mut violations = Vec::new();
 
@@ -278,7 +277,9 @@ impl ConstraintValidator {
             crate::actions::ActionType::MigratePartition { workload_id, .. } => workload_id.clone(),
             crate::actions::ActionType::ThrottleWorkload { workload_id, .. } => workload_id.clone(),
             crate::actions::ActionType::RestartWorkload { workload_id, .. } => workload_id.clone(),
-            crate::actions::ActionType::Rollback { original_action_id, .. } => original_action_id.clone(),
+            crate::actions::ActionType::Rollback {
+                original_action_id, ..
+            } => original_action_id.clone(),
         }
     }
 
@@ -292,14 +293,18 @@ impl ConstraintValidator {
 
         // Validate region constraints
         if let Some(target_region) = self.extract_target_region(&action.action) {
-            if !constraints.allowed_regions.is_empty() 
-                && !constraints.allowed_regions.contains(&target_region) {
+            if !constraints.allowed_regions.is_empty()
+                && !constraints.allowed_regions.contains(&target_region)
+            {
                 violations.push(IntentViolation {
                     constraint_type: "allowed_regions".to_string(),
                     current_value: serde_json::to_value(&target_region)?,
                     constraint_value: serde_json::to_value(&constraints.allowed_regions)?,
                     severity: ViolationSeverity::Violation,
-                    description: format!("Target region {:?} not in allowed regions", target_region),
+                    description: format!(
+                        "Target region {:?} not in allowed regions",
+                        target_region
+                    ),
                 });
             }
 
@@ -316,8 +321,12 @@ impl ConstraintValidator {
 
         // Validate risk constraints
         let risk_level = self.extract_risk_level(&action.action);
-        if constraints.require_approval_for_high_risk 
-            && matches!(risk_level, Some(crate::types::RiskLevel::High | crate::types::RiskLevel::Critical)) {
+        if constraints.require_approval_for_high_risk
+            && matches!(
+                risk_level,
+                Some(crate::types::RiskLevel::High | crate::types::RiskLevel::Critical)
+            )
+        {
             violations.push(IntentViolation {
                 constraint_type: "require_approval_for_high_risk".to_string(),
                 current_value: serde_json::to_value(&risk_level)?,
@@ -346,14 +355,21 @@ impl ConstraintValidator {
 
     fn extract_target_region(&self, action: &crate::actions::ActionType) -> Option<Region> {
         match action {
-            crate::actions::ActionType::CreateReplica { target_region, .. } => Some(target_region.clone()),
+            crate::actions::ActionType::CreateReplica { target_region, .. } => {
+                Some(target_region.clone())
+            }
             crate::actions::ActionType::ShiftRoute { to_region, .. } => Some(to_region.clone()),
-            crate::actions::ActionType::MigratePartition { target_region, .. } => Some(target_region.clone()),
+            crate::actions::ActionType::MigratePartition { target_region, .. } => {
+                Some(target_region.clone())
+            }
             _ => None,
         }
     }
 
-    fn extract_risk_level(&self, action: &crate::actions::ActionType) -> Option<crate::types::RiskLevel> {
+    fn extract_risk_level(
+        &self,
+        action: &crate::actions::ActionType,
+    ) -> Option<crate::types::RiskLevel> {
         match action {
             crate::actions::ActionType::CreateReplica { risk, .. } => Some(risk.clone()),
             crate::actions::ActionType::ShiftRoute { risk, .. } => Some(risk.clone()),
@@ -366,10 +382,18 @@ impl ConstraintValidator {
 
     fn extract_rollback_enabled(&self, action: &crate::actions::ActionType) -> bool {
         match action {
-            crate::actions::ActionType::CreateReplica { rollback_enabled, .. } => *rollback_enabled,
-            crate::actions::ActionType::ShiftRoute { rollback_enabled, .. } => *rollback_enabled,
-            crate::actions::ActionType::MigratePartition { rollback_enabled, .. } => *rollback_enabled,
-            crate::actions::ActionType::ThrottleWorkload { rollback_enabled, .. } => *rollback_enabled,
+            crate::actions::ActionType::CreateReplica {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            crate::actions::ActionType::ShiftRoute {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            crate::actions::ActionType::MigratePartition {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            crate::actions::ActionType::ThrottleWorkload {
+                rollback_enabled, ..
+            } => *rollback_enabled,
             crate::actions::ActionType::RestartWorkload { .. } => true,
             crate::actions::ActionType::Rollback { .. } => true,
         }
@@ -448,9 +472,11 @@ mod tests {
 
         let violations = validator.validate_action(&proposal).unwrap();
         assert!(!violations.is_empty());
-        
+
         // Should have region violation
-        let region_violation = violations.iter().find(|v| v.constraint_type == "allowed_regions");
+        let region_violation = violations
+            .iter()
+            .find(|v| v.constraint_type == "allowed_regions");
         assert!(region_violation.is_some());
     }
 }

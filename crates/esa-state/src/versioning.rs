@@ -47,11 +47,11 @@ mod tests {
     fn test_version_increment() {
         let tracker = VersionTracker::new();
         assert_eq!(tracker.current(), 0);
-        
+
         let v1 = tracker.increment();
         assert_eq!(v1, 1);
         assert_eq!(tracker.current(), 1);
-        
+
         let v2 = tracker.increment();
         assert_eq!(v2, 2);
     }
@@ -60,7 +60,7 @@ mod tests {
     fn test_stale_detection() {
         let tracker = VersionTracker::new();
         tracker.set(10);
-        
+
         assert!(!tracker.is_stale(9, 2));
         assert!(!tracker.is_stale(8, 2));
         assert!(tracker.is_stale(7, 2));

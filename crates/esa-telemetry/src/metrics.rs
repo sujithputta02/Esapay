@@ -5,11 +5,13 @@ pub fn record_action_executed(action_type: &str) {
 }
 
 pub fn record_action_latency(action_type: &str, latency_ms: f64) {
-    histogram!("esa_action_latency_ms", "action_type" => action_type.to_string()).record(latency_ms);
+    histogram!("esa_action_latency_ms", "action_type" => action_type.to_string())
+        .record(latency_ms);
 }
 
 pub fn record_workload_metric(workload_id: &str, metric_name: &str, value: f64) {
-    gauge!(format!("esa_workload_{}", metric_name), "workload_id" => workload_id.to_string()).set(value);
+    gauge!(format!("esa_workload_{}", metric_name), "workload_id" => workload_id.to_string())
+        .set(value);
 }
 
 pub fn record_agent_invocation(agent_id: &str) {

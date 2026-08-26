@@ -1,9 +1,9 @@
 //! ESA Benchmark Harness — deterministic B0/B1/B2 experiment runner (PRD §30–31).
 
 use crate::benchmark::{
-    apply_scenario, avg_replicas, max_replicas, measure, peak_p99_ms, peak_queue, run_adaptive_recovery,
-    run_esa_recovery, run_esa_recovery_fast, run_rule_only_recovery, reset_healthy_baseline,
-    BenchmarkArmResult,
+    apply_scenario, avg_replicas, max_replicas, measure, peak_p99_ms, peak_queue,
+    reset_healthy_baseline, run_adaptive_recovery, run_esa_recovery, run_esa_recovery_fast,
+    run_rule_only_recovery, BenchmarkArmResult,
 };
 use esa_core::{
     ActionProposal, ActionType, AgentId, ExpectedEffect, Region, RiskLevel, WorkloadState,
@@ -18,24 +18,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub const PERFORMANCE_SCENARIOS: &[&str] = &[
-    "BENCH-01",
-    "BENCH-02",
-    "BENCH-03",
-    "BENCH-04",
-    "BENCH-05",
-    "BENCH-06",
-    "BENCH-07",
-    "BENCH-08",
+    "BENCH-01", "BENCH-02", "BENCH-03", "BENCH-04", "BENCH-05", "BENCH-06", "BENCH-07", "BENCH-08",
 ];
 
 pub const SAFETY_SCENARIOS: &[&str] = &[
-    "BENCH-09",
-    "BENCH-10",
-    "BENCH-11",
-    "BENCH-12",
-    "BENCH-13",
-    "BENCH-14",
-    "BENCH-15",
+    "BENCH-09", "BENCH-10", "BENCH-11", "BENCH-12", "BENCH-13", "BENCH-14", "BENCH-15",
 ];
 
 pub const DEFAULT_SEEDS: [u64; 5] = [481923, 481924, 481925, 481926, 481927];
@@ -252,7 +239,7 @@ async fn run_controller(
             } else {
                 run_esa_recovery(fabric, orchestrator).await
             }
-        },
+        }
     }
 }
 
@@ -355,7 +342,7 @@ pub async fn run_safety_trial(
             decision.replans = 1;
             governance.audit_complete = true;
             governance.replay_success = true;
-        },
+        }
         "BENCH-10" | "weak_effect" => {
             apply_scenario(&fabric, "BENCH-05", 2.5, seed)?;
             let before_p95 = measure(&fabric).avg_p95_ms;
@@ -366,7 +353,7 @@ pub async fn run_safety_trial(
             decision.actions_executed = 1;
             governance.audit_complete = true;
             governance.replay_success = decision.action_effectiveness > 0.0;
-        },
+        }
         "BENCH-11" | "execution_failure" => {
             if fabric.list_workloads().is_empty() {
                 reset_healthy_baseline(&fabric)?;
@@ -374,8 +361,7 @@ pub async fn run_safety_trial(
             let snapshot_version = fabric.create_snapshot()?.version;
             if let Some(mut workload) = fabric.list_workloads().into_iter().next() {
                 workload.metrics.p95_latency_ms = 450.0;
-                workload.replication.current_replicas =
-                    workload.replication.max_replicas;
+                workload.replication.current_replicas = workload.replication.max_replicas;
                 workload.state = WorkloadState::Degraded;
                 fabric.upsert_workload(workload.clone())?;
 
@@ -394,7 +380,7 @@ pub async fn run_safety_trial(
                 governance.replay_success = result.is_success();
             }
             governance.audit_complete = true;
-        },
+        }
         "BENCH-12" | "agent_failure" => {
             apply_scenario(&fabric, "BENCH-02", 3.0, seed)?;
             // Diagnosis falls back to rules when Ollama unavailable — safe recovery path.
@@ -402,7 +388,7 @@ pub async fn run_safety_trial(
             decision.actions_executed = 1;
             governance.audit_complete = true;
             governance.replay_success = true;
-        },
+        }
         "BENCH-13" | "model_timeout" => {
             apply_scenario(&fabric, "BENCH-02", 3.0, seed)?;
             run_esa_recovery_fast(fabric.clone(), orchestrator.clone()).await?;
@@ -410,7 +396,7 @@ pub async fn run_safety_trial(
             decision.actions_executed = 1;
             governance.audit_complete = true;
             governance.replay_success = true;
-        },
+        }
         "BENCH-14" | "invalid_action" => {
             if let Some(workload) = fabric.list_workloads().into_iter().next() {
                 let proposal = ActionProposal::new(
@@ -439,7 +425,7 @@ pub async fn run_safety_trial(
             }
             governance.audit_complete = true;
             governance.replay_success = decision.actions_blocked > 0;
-        },
+        }
         "BENCH-15" | "policy_violation" => {
             if let Some(mut workload) = fabric.list_workloads().into_iter().next() {
                 workload.replication.current_replicas = workload.replication.max_replicas;
@@ -472,12 +458,12 @@ pub async fn run_safety_trial(
             }
             governance.audit_complete = true;
             governance.replay_success = decision.actions_blocked > 0;
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-  let m = measure(&fabric);
+    let m = measure(&fabric);
 
     reset_healthy_baseline(&fabric)?;
 
@@ -560,7 +546,8 @@ pub async fn run_harness(
     }
 
     for scenario in SAFETY_SCENARIOS {
-        let record = run_safety_trial(fabric.clone(), orchestrator.clone(), *scenario, 481923).await?;
+        let record =
+            run_safety_trial(fabric.clone(), orchestrator.clone(), *scenario, 481923).await?;
         runs.push(record);
     }
 
@@ -617,7 +604,8 @@ pub fn aggregate_by_controller(runs: &[BenchmarkRunRecord]) -> Vec<ControllerAgg
                     .map(|r| r.resources.max_replicas as f64)
                     .sum::<f64>()
                     / perf_n,
-                avg_overshoot: perf_runs.iter().map(|r| r.resources.overshoot).sum::<f64>() / perf_n,
+                avg_overshoot: perf_runs.iter().map(|r| r.resources.overshoot).sum::<f64>()
+                    / perf_n,
                 unsafe_mutations: group.iter().map(|r| r.safety.unsafe_mutations).sum(),
                 stale_rejections: group.iter().map(|r| r.decision.stale_rejections).sum(),
                 replay_success_rate: safety_replay_rate(&group),
@@ -643,10 +631,7 @@ fn safety_replay_rate(runs: &[&BenchmarkRunRecord]) -> f64 {
 }
 
 fn safety_rollback_rate(runs: &[&BenchmarkRunRecord]) -> f64 {
-    let rollback: Vec<_> = runs
-        .iter()
-        .filter(|r| r.scenario == "BENCH-11")
-        .collect();
+    let rollback: Vec<_> = runs.iter().filter(|r| r.scenario == "BENCH-11").collect();
     if rollback.is_empty() {
         return 0.0;
     }
@@ -754,7 +739,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
     let b2_perf: Vec<_> = result
         .runs
         .iter()
-        .filter(|r| r.controller == "B2_esa" && PERFORMANCE_SCENARIOS.contains(&r.scenario.as_str()))
+        .filter(|r| {
+            r.controller == "B2_esa" && PERFORMANCE_SCENARIOS.contains(&r.scenario.as_str())
+        })
         .collect();
     if !b2_perf.is_empty() {
         let n = b2_perf.len() as f64;
@@ -773,16 +760,23 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
                 .map(|r| r.performance.time_to_detect_ms as f64)
                 .sum::<f64>()
                 / n;
-            md.push_str(&format!("- **B2 avg agent cycle latency:** {:.0} ms\n", avg_agent));
+            md.push_str(&format!(
+                "- **B2 avg agent cycle latency:** {:.0} ms\n",
+                avg_agent
+            ));
         }
         md.push_str("\n");
     }
 
     md.push_str("## 3. Controllers compared\n\n");
     md.push_str("| Controller | Description |\n|------------|-------------|\n");
-    md.push_str("| B0_rules | Deterministic threshold rules (P95>250ms, queue>1000 → CREATE_REPLICA) |\n");
+    md.push_str(
+        "| B0_rules | Deterministic threshold rules (P95>250ms, queue>1000 → CREATE_REPLICA) |\n",
+    );
     md.push_str("| B1_adaptive | Metric-driven scaling (target P95 200ms) + routing rebalance |\n");
-    md.push_str("| B2_esa | Monitor → Diagnosis → Planning → Safety → Policy → Gateway → Effect |\n\n");
+    md.push_str(
+        "| B2_esa | Monitor → Diagnosis → Planning → Safety → Policy → Gateway → Effect |\n\n",
+    );
 
     md.push_str("## 4. Scenario matrix\n\n");
     md.push_str("Performance: BENCH-01 (steady) through BENCH-08 (compound incident).\n");
@@ -889,7 +883,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
 
     md.push_str("\n## 9. Limitations\n\n");
     md.push_str("- Local in-memory StateFabric (deterministic); not a live Kubernetes cluster.\n");
-    md.push_str("- B1 simulates HPA/custom-metrics scaling behavior (reproducible open baseline).\n");
+    md.push_str(
+        "- B1 simulates HPA/custom-metrics scaling behavior (reproducible open baseline).\n",
+    );
     if result.config.wall_clock_timing {
         md.push_str("- Recovery and latency metrics use measured wall-clock time (no synthetic cycle model).\n");
     }
@@ -899,7 +895,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
         );
         md.push_str("  Run `make benchmark-smoke` for full agent cycle with one seed.\n");
     } else if result.config.ollama_reachable {
-        md.push_str("- Full agent cycle enabled; Ollama was reachable for LLM-assisted diagnosis.\n");
+        md.push_str(
+            "- Full agent cycle enabled; Ollama was reachable for LLM-assisted diagnosis.\n",
+        );
     } else {
         md.push_str(
             "- Full agent cycle enabled; Ollama unreachable so diagnosis used rule-based fallback.\n",

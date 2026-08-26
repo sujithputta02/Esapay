@@ -51,7 +51,10 @@ fn test_policy_requires_approval_for_high_risk() {
     );
     let result = engine.evaluate(&proposal).unwrap();
 
-    assert!(matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }));
+    assert!(matches!(
+        result.verdict,
+        PolicyVerdict::RequiresApproval { .. }
+    ));
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn test_policy_requires_approval_for_low_confidence() {
     );
     let result = engine.evaluate(&proposal).unwrap();
 
-    assert!(matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }));
+    assert!(matches!(
+        result.verdict,
+        PolicyVerdict::RequiresApproval { .. }
+    ));
 }
 
 #[test]

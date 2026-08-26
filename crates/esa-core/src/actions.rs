@@ -117,21 +117,27 @@ impl EffectMeasurement {
         let mut effectiveness_scores = Vec::new();
 
         // Calculate effectiveness for each metric
-        if let (Some(exp_lat), Some(obs_lat)) = (expected.latency_delta_ms, observed.latency_delta_ms) {
+        if let (Some(exp_lat), Some(obs_lat)) =
+            (expected.latency_delta_ms, observed.latency_delta_ms)
+        {
             if exp_lat != 0.0 {
                 let score = (obs_lat / exp_lat).min(1.0).max(0.0);
                 effectiveness_scores.push(score);
             }
         }
 
-        if let (Some(exp_thr), Some(obs_thr)) = (expected.throughput_delta_pct, observed.throughput_delta_pct) {
+        if let (Some(exp_thr), Some(obs_thr)) =
+            (expected.throughput_delta_pct, observed.throughput_delta_pct)
+        {
             if exp_thr != 0.0 {
                 let score = (obs_thr / exp_thr).min(1.0).max(0.0);
                 effectiveness_scores.push(score);
             }
         }
 
-        if let (Some(exp_err), Some(obs_err)) = (expected.error_rate_delta, observed.error_rate_delta) {
+        if let (Some(exp_err), Some(obs_err)) =
+            (expected.error_rate_delta, observed.error_rate_delta)
+        {
             if exp_err != 0.0 {
                 let score = (obs_err / exp_err).min(1.0).max(0.0);
                 effectiveness_scores.push(score);
@@ -277,11 +283,7 @@ impl ActionExecution {
         }
     }
 
-    pub fn complete(
-        mut self,
-        outcome: ActionOutcome,
-        after_metrics: serde_json::Value,
-    ) -> Self {
+    pub fn complete(mut self, outcome: ActionOutcome, after_metrics: serde_json::Value) -> Self {
         self.completed_at = Some(Utc::now());
         self.outcome = Some(outcome);
         self.after_metrics = Some(after_metrics);

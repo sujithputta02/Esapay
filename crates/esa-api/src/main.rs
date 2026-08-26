@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{Path, State, ws::WebSocketUpgrade},
+    extract::{ws::WebSocketUpgrade, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
-use tracing::{info, error, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber;
 
 mod benchmark;
@@ -29,7 +29,7 @@ use live_data::{
     verdict_record_json,
 };
 use vitals::VitalsStore;
-use websocket::{TelemetryBroadcaster, TelemetryMessage, websocket_handler};
+use websocket::{websocket_handler, TelemetryBroadcaster, TelemetryMessage};
 
 fn publish_metrics_telemetry(state: &AppState) {
     let workloads = state.state_fabric.list_workloads();
@@ -66,9 +66,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     info!("Starting ESA API Server");
 
@@ -78,8 +76,10 @@ async fn main() -> anyhow::Result<()> {
     let broadcaster = Arc::new(TelemetryBroadcaster::new());
 
     // Initialize Ollama client
-    let ollama_url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let ollama_model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "mistral:latest".to_string());
+    let ollama_url =
+        std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let ollama_model =
+        std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "mistral:latest".to_string());
     let ollama_client = OllamaClient::new(ollama_url, ollama_model);
 
     let agent_status = Arc::new(std::sync::RwLock::new(AgentStatusState::default()));
@@ -406,7 +406,7 @@ async fn razorpay_webhook(
                 "status": "duplicate",
                 "message": "Event already processed"
             }))
-                .into_response();
+            .into_response();
         }
         Err(WebhookError::InvalidSignature | WebhookError::MissingSignature) => {
             return (
@@ -458,17 +458,15 @@ async fn razorpay_status(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn razorpay_verify_keys(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+async fn razorpay_verify_keys(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let adapter = state
         .razorpay
         .as_ref()
         .ok_or_else(|| AppError::Internal("Razorpay adapter not configured".into()))?;
 
-    let api_ok = adapter
-        .client()
-        .health_check()
-        .await
-        .unwrap_or(false);
+    let api_ok = adapter.client().health_check().await.unwrap_or(false);
 
     Ok(Json(serde_json::json!({
         "api_keys_valid": api_ok,
@@ -494,15 +492,13 @@ async fn razorpay_create_order(
         .ok_or_else(|| AppError::Internal("Razorpay adapter not configured".into()))?;
 
     if req.amount_cents < 100 {
-        return Err(AppError::Internal("Minimum amount is 100 paise (₹1)".into()));
+        return Err(AppError::Internal(
+            "Minimum amount is 100 paise (₹1)".into(),
+        ));
     }
 
-    let region = req
-        .region
-        .unwrap_or_else(|| "IN-SOUTH".to_string());
-    let method = req
-        .payment_method
-        .unwrap_or_else(|| "upi".to_string());
+    let region = req.region.unwrap_or_else(|| "IN-SOUTH".to_string());
+    let method = req.payment_method.unwrap_or_else(|| "upi".to_string());
 
     let notes = serde_json::json!({
         "region": region,
@@ -518,10 +514,7 @@ async fn razorpay_create_order(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let order_id = order
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let order_id = order.get("id").and_then(|v| v.as_str()).unwrap_or_default();
 
     Ok(Json(serde_json::json!({
         "order_id": order_id,
@@ -582,9 +575,9 @@ struct TriggerSpikeRequest {
 
 async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     info!("Seeding demo data");
-    
+
     use chrono::Utc;
-    
+
     // Create sample workloads for different payment methods and regions
     let workloads = vec![
         WorkloadEntity {
@@ -672,11 +665,11 @@ async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoRespon
             updated_at: Utc::now(),
         },
     ];
-    
+
     for workload in workloads {
         state.state_fabric.upsert_workload(workload)?;
     }
-    
+
     info!("Demo data seeded: 3 workloads created");
     publish_metrics_telemetry(&state);
 
@@ -691,20 +684,25 @@ async fn trigger_spike(
     State(state): State<AppState>,
     Json(req): Json<TriggerSpikeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    info!("🧪 Manual spike test triggered with multiplier {}", req.multiplier);
+    info!(
+        "🧪 Manual spike test triggered with multiplier {}",
+        req.multiplier
+    );
     info!("ℹ️  Note: In production, spikes occur automatically from payment transaction volume");
-    
+
     // Get ALL workloads and apply spike to all of them
     let all_workloads = state.state_fabric.list_workloads();
     let mut affected_count = 0;
-    
+
     for mut workload in all_workloads {
         // Increase metrics to simulate spike
         workload.metrics.rate_per_min *= req.multiplier;
         workload.metrics.p95_latency_ms *= req.multiplier * 0.8;
         workload.metrics.p99_latency_ms *= req.multiplier * 0.9;
-        workload.metrics.queue_depth = (workload.metrics.queue_depth as f64 * req.multiplier) as u64;
-        workload.metrics.error_rate = (workload.metrics.error_rate * req.multiplier * 1.5).min(0.99); // Cap at 99%
+        workload.metrics.queue_depth =
+            (workload.metrics.queue_depth as f64 * req.multiplier) as u64;
+        workload.metrics.error_rate =
+            (workload.metrics.error_rate * req.multiplier * 1.5).min(0.99); // Cap at 99%
         workload.state = if req.multiplier >= 2.5 {
             WorkloadState::Degraded
         } else if req.multiplier >= 1.5 {
@@ -712,12 +710,15 @@ async fn trigger_spike(
         } else {
             workload.state
         };
-        
+
         state.state_fabric.upsert_workload(workload)?;
         affected_count += 1;
     }
-    
-    info!("📊 Manual test spike applied to {} workloads with {}x multiplier", affected_count, req.multiplier);
+
+    info!(
+        "📊 Manual test spike applied to {} workloads with {}x multiplier",
+        affected_count, req.multiplier
+    );
     info!("⚡ Autonomous recovery will detect and fix degraded workloads within 5 seconds");
 
     publish_metrics_telemetry(&state);
@@ -771,20 +772,27 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
         .map(|s| s.clone())
         .unwrap_or_default();
     let workloads = state.state_fabric.list_workloads();
-    let degraded_count = workloads.iter()
+    let degraded_count = workloads
+        .iter()
         .filter(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
         .count();
-    
+
     // Determine current tasks based on system state
     let (monitor_task, monitor_status) = if degraded_count > 0 {
         (
-            format!("⚠️ Detecting {} degraded workload(s) - conditions found!", degraded_count),
-            "active"
+            format!(
+                "⚠️ Detecting {} degraded workload(s) - conditions found!",
+                degraded_count
+            ),
+            "active",
         )
     } else {
-        ("✅ Monitoring all workloads - all healthy".to_string(), "idle")
+        (
+            "✅ Monitoring all workloads - all healthy".to_string(),
+            "idle",
+        )
     };
-    
+
     let diagnosis_task = if !agent_status.diagnosis_task.is_empty() {
         agent_status.diagnosis_task.clone()
     } else if degraded_count > 0 {
@@ -800,7 +808,7 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         "Waiting for diagnosis results".to_string()
     };
-    
+
     let safety_task = if !agent_status.safety_task.is_empty() {
         agent_status.safety_task.clone()
     } else if degraded_count > 0 {
@@ -808,7 +816,7 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         "Waiting for proposals to review".to_string()
     };
-    
+
     Json(serde_json::json!({
         "agents": [
             {
@@ -871,10 +879,7 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn get_recent_actions(State(state): State<AppState>) -> impl IntoResponse {
     let records = state.audit_store.list_recent(50);
-    let actions: Vec<serde_json::Value> = records
-        .iter()
-        .map(action_record_from_audit)
-        .collect();
+    let actions: Vec<serde_json::Value> = records.iter().map(action_record_from_audit).collect();
 
     Json(serde_json::json!({
         "actions": actions
@@ -921,7 +926,10 @@ async fn get_decision_detail(
             "replayable": true
         })))
     } else {
-        Err(AppError::NotFound(format!("Decision {} not found", decision_id)))
+        Err(AppError::NotFound(format!(
+            "Decision {} not found",
+            decision_id
+        )))
     }
 }
 
@@ -963,16 +971,17 @@ async fn replay_decision(
         }
     }
 
-    Err(AppError::NotFound(format!("Decision {} not found", decision_id)))
+    Err(AppError::NotFound(format!(
+        "Decision {} not found",
+        decision_id
+    )))
 }
 
 // Effect Measurement Endpoints
 async fn get_effect_measurements(State(state): State<AppState>) -> impl IntoResponse {
     let records = state.audit_store.list_recent(50);
-    let measurements: Vec<serde_json::Value> = records
-        .iter()
-        .filter_map(effect_measurement_json)
-        .collect();
+    let measurements: Vec<serde_json::Value> =
+        records.iter().filter_map(effect_measurement_json).collect();
 
     let avg_effectiveness = if measurements.is_empty() {
         0.0
@@ -1018,7 +1027,7 @@ async fn get_recent_effects(State(state): State<AppState>) -> impl IntoResponse 
 async fn get_ai_costs(State(state): State<AppState>) -> impl IntoResponse {
     let cost_tracker = state.ollama_client.get_cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
-    
+
     Json(serde_json::json!({
         "total_tokens": aggregated.total_tokens,
         "total_requests": aggregated.total_requests,
@@ -1035,16 +1044,20 @@ async fn get_ai_costs(State(state): State<AppState>) -> impl IntoResponse {
 async fn get_costs_per_agent(State(state): State<AppState>) -> impl IntoResponse {
     let cost_tracker = state.ollama_client.get_cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
-    
+
     // Get per-agent stats from aggregated metrics
-    let agent_costs: Vec<_> = aggregated.cost_per_agent.iter().map(|(agent, cost)| {
-        serde_json::json!({
-            "agent": agent,
-            "total_cost": cost,
-            "requests": aggregated.requests_per_agent.get(agent).copied().unwrap_or(0),
+    let agent_costs: Vec<_> = aggregated
+        .cost_per_agent
+        .iter()
+        .map(|(agent, cost)| {
+            serde_json::json!({
+                "agent": agent,
+                "total_cost": cost,
+                "requests": aggregated.requests_per_agent.get(agent).copied().unwrap_or(0),
+            })
         })
-    }).collect();
-    
+        .collect();
+
     Json(serde_json::json!({
         "per_agent": agent_costs,
         "total_agents": aggregated.requests_per_agent.len(),
@@ -1119,7 +1132,7 @@ async fn get_active_intents(State(_state): State<AppState>) -> impl IntoResponse
 
 async fn get_constraint_violations(State(_state): State<AppState>) -> impl IntoResponse {
     use chrono::Utc;
-    
+
     Json(serde_json::json!({
         "violations": [
             {
@@ -1158,9 +1171,9 @@ async fn trigger_scenario(
     Json(req): Json<ScenarioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     use chrono::Utc;
-    
+
     let intensity = req.intensity.unwrap_or(1.0);
-    
+
     match scenario.as_str() {
         "healthy-baseline" => {
             // Reset all workloads to healthy state
@@ -1186,8 +1199,10 @@ async fn trigger_scenario(
             for mut workload in workloads {
                 workload.metrics.rate_per_min *= multiplier;
                 workload.metrics.p95_latency_ms *= multiplier * 0.9;
-                workload.metrics.error_rate = (workload.metrics.error_rate * multiplier * 1.5).min(0.15);
-                workload.metrics.queue_depth = (workload.metrics.queue_depth as f64 * multiplier) as u64;
+                workload.metrics.error_rate =
+                    (workload.metrics.error_rate * multiplier * 1.5).min(0.15);
+                workload.metrics.queue_depth =
+                    (workload.metrics.queue_depth as f64 * multiplier) as u64;
                 workload.state = WorkloadState::Degraded;
                 workload.metrics.timestamp = Utc::now();
                 state.state_fabric.upsert_workload(workload)?;
@@ -1260,8 +1275,8 @@ async fn trigger_scenario(
                 let before_replicas = workload.replication.current_replicas;
                 workload.metrics.p95_latency_ms = 420.0;
                 workload.metrics.queue_depth = 1400;
-                let mutated_replicas =
-                    (workload.replication.current_replicas + 2).min(workload.replication.max_replicas);
+                let mutated_replicas = (workload.replication.current_replicas + 2)
+                    .min(workload.replication.max_replicas);
                 workload.replication.current_replicas = mutated_replicas;
                 workload.state = WorkloadState::Degraded;
                 workload.metrics.timestamp = Utc::now();
@@ -1308,12 +1323,10 @@ async fn trigger_scenario(
                 })))
             }
         }
-        _ => {
-            Ok(Json(serde_json::json!({
-                "status": "unknown_scenario",
-                "message": format!("Unknown scenario: {}", scenario)
-            })))
-        }
+        _ => Ok(Json(serde_json::json!({
+            "status": "unknown_scenario",
+            "message": format!("Unknown scenario: {}", scenario)
+        }))),
     }
 }
 

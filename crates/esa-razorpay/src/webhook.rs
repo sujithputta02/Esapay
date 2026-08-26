@@ -31,11 +31,19 @@ pub fn verify_signature(body: &[u8], signature: &str, webhook_secret: &str) -> b
 
     let computed = compute_signature_hex(body, webhook_secret);
     constant_time_eq(computed.as_bytes(), normalized_sig.as_bytes())
-        || constant_time_eq(computed.to_uppercase().as_bytes(), normalized_sig.to_uppercase().as_bytes())
+        || constant_time_eq(
+            computed.to_uppercase().as_bytes(),
+            normalized_sig.to_uppercase().as_bytes(),
+        )
 }
 
 /// Test-mode fallback when webhook secret was misconfigured as API secret.
-pub fn verify_signature_any(body: &[u8], signature: &str, webhook_secret: &str, key_secret: &str) -> bool {
+pub fn verify_signature_any(
+    body: &[u8],
+    signature: &str,
+    webhook_secret: &str,
+    key_secret: &str,
+) -> bool {
     verify_signature(body, signature, webhook_secret)
         || (!key_secret.is_empty() && verify_signature(body, signature, key_secret))
 }
@@ -71,10 +79,7 @@ pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> 
     let root: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| WebhookError::InvalidJson(e.to_string()))?;
 
-    let event_name = root
-        .get("event")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let event_name = root.get("event").and_then(|v| v.as_str()).unwrap_or("");
 
     let event_type = map_event_type(event_name)?;
 
@@ -109,14 +114,16 @@ pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> 
         .and_then(|v| v.as_str())
         .unwrap_or("created");
 
-    let success = matches!(event_type, PaymentEventType::PaymentCaptured | PaymentEventType::OrderPaid)
-        || status == "captured"
+    let success = matches!(
+        event_type,
+        PaymentEventType::PaymentCaptured | PaymentEventType::OrderPaid
+    ) || status == "captured"
         || status == "authorized";
 
     let region = map_region(entity);
     let method_class = map_payment_method(method);
 
-  // Pseudonymous reference only — never store PAN, card number, or customer PII
+    // Pseudonymous reference only — never store PAN, card number, or customer PII
     let pseudo_ref = format!(
         "RZP-{}",
         payment_id.chars().rev().take(8).collect::<String>()

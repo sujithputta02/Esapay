@@ -29,7 +29,11 @@ impl OllamaClient {
         }
     }
 
-    pub fn with_cost_tracker(base_url: String, model: String, cost_tracker: Arc<AICostTracker>) -> Self {
+    pub fn with_cost_tracker(
+        base_url: String,
+        model: String,
+        cost_tracker: Arc<AICostTracker>,
+    ) -> Self {
         Self {
             base_url,
             model,
@@ -43,9 +47,13 @@ impl OllamaClient {
         self.generate_with_agent("unknown", prompt).await
     }
 
-    pub async fn generate_with_agent(&self, agent_id: &str, prompt: String) -> Result<OllamaResponse> {
+    pub async fn generate_with_agent(
+        &self,
+        agent_id: &str,
+        prompt: String,
+    ) -> Result<OllamaResponse> {
         let start_time = std::time::Instant::now();
-        
+
         let request = OllamaRequest {
             model: self.model.clone(),
             prompt: prompt.clone(),
@@ -58,8 +66,11 @@ impl OllamaClient {
             }),
         };
 
-        info!("🤖 Ollama request to model: {} for agent: {}", self.model, agent_id);
-        
+        info!(
+            "🤖 Ollama request to model: {} for agent: {}",
+            self.model, agent_id
+        );
+
         let response_result = self
             .client
             .post(format!("{}/api/generate", self.base_url))
@@ -75,7 +86,7 @@ impl OllamaClient {
                 if !status.is_success() {
                     let error_text = response.text().await?;
                     warn!("Ollama error response: {}", error_text);
-                    
+
                     // Record failed request
                     self.cost_tracker.record_inference(
                         &self.model,
@@ -85,7 +96,7 @@ impl OllamaClient {
                         latency_ms,
                         Some(format!("HTTP {}: {}", status, error_text)),
                     );
-                    
+
                     return Err(anyhow::anyhow!("Ollama request failed: {}", error_text));
                 }
 
@@ -94,10 +105,10 @@ impl OllamaClient {
                 // Estimate token usage
                 let input_tokens = self.estimate_tokens(&prompt);
                 let output_tokens = self.estimate_tokens(&ollama_response.response);
-                
+
                 // Update legacy token counter
                 self.token_counter.add_request(input_tokens, output_tokens);
-                
+
                 // Record comprehensive metrics
                 self.cost_tracker.record_inference(
                     &self.model,
@@ -107,17 +118,20 @@ impl OllamaClient {
                     latency_ms,
                     None,
                 );
-                
+
                 info!(
                     "✅ Ollama response received. Tokens: {}+{}={}, Latency: {}ms",
-                    input_tokens, output_tokens, input_tokens + output_tokens, latency_ms
+                    input_tokens,
+                    output_tokens,
+                    input_tokens + output_tokens,
+                    latency_ms
                 );
 
                 Ok(ollama_response)
             }
             Err(e) => {
                 warn!("Ollama request failed: {}", e);
-                
+
                 // Record failed request
                 self.cost_tracker.record_inference(
                     &self.model,
@@ -127,7 +141,7 @@ impl OllamaClient {
                     latency_ms,
                     Some(e.to_string()),
                 );
-                
+
                 Err(e.into())
             }
         }
@@ -146,7 +160,10 @@ impl OllamaClient {
         self.cost_tracker.clone()
     }
 
-    pub fn get_aggregated_cost_metrics(&self, time_window_hours: Option<i64>) -> AggregatedCostMetrics {
+    pub fn get_aggregated_cost_metrics(
+        &self,
+        time_window_hours: Option<i64>,
+    ) -> AggregatedCostMetrics {
         self.cost_tracker.get_aggregated_metrics(time_window_hours)
     }
 
@@ -320,7 +337,7 @@ impl AICostTracker {
     ) -> String {
         let request_id = Uuid::new_v4().to_string();
         let prompt_hash = self.hash_prompt(prompt);
-        
+
         let cache_hit = if error.is_none() {
             let mut cache = self.cache.lock().unwrap();
             if let Some((cached_response, _)) = cache.get(&prompt_hash) {
@@ -334,7 +351,11 @@ impl AICostTracker {
         };
 
         let input_tokens = self.estimate_tokens(prompt);
-        let output_tokens = if error.is_none() { self.estimate_tokens(response) } else { 0 };
+        let output_tokens = if error.is_none() {
+            self.estimate_tokens(response)
+        } else {
+            0
+        };
 
         let metric = InferenceMetrics {
             request_id: request_id.clone(),
@@ -368,9 +389,7 @@ impl AICostTracker {
         let now = Utc::now();
         let window_start = time_window_hours
             .map(|hours| now - chrono::Duration::hours(hours))
-            .unwrap_or_else(|| {
-                metrics.first().map(|m| m.timestamp).unwrap_or(now)
-            });
+            .unwrap_or_else(|| metrics.first().map(|m| m.timestamp).unwrap_or(now));
 
         let filtered_metrics: Vec<&InferenceMetrics> = metrics
             .iter()
@@ -378,14 +397,24 @@ impl AICostTracker {
             .collect();
 
         let total_requests = filtered_metrics.len();
-        let successful_requests = filtered_metrics.iter().filter(|m| m.error.is_none()).count();
+        let successful_requests = filtered_metrics
+            .iter()
+            .filter(|m| m.error.is_none())
+            .count();
         let failed_requests = total_requests - successful_requests;
-        
+
         let total_tokens: usize = filtered_metrics.iter().map(|m| m.total_tokens()).sum();
-        let total_cost_usd: f64 = filtered_metrics.iter().map(|m| m.estimated_cost_usd()).sum();
-        
+        let total_cost_usd: f64 = filtered_metrics
+            .iter()
+            .map(|m| m.estimated_cost_usd())
+            .sum();
+
         let average_latency_ms = if total_requests > 0 {
-            filtered_metrics.iter().map(|m| m.latency_ms as f64).sum::<f64>() / total_requests as f64
+            filtered_metrics
+                .iter()
+                .map(|m| m.latency_ms as f64)
+                .sum::<f64>()
+                / total_requests as f64
         } else {
             0.0
         };
@@ -399,10 +428,13 @@ impl AICostTracker {
 
         let mut requests_per_agent = HashMap::new();
         let mut cost_per_agent = HashMap::new();
-        
+
         for metric in &filtered_metrics {
-            *requests_per_agent.entry(metric.agent_id.clone()).or_insert(0) += 1;
-            *cost_per_agent.entry(metric.agent_id.clone()).or_insert(0.0) += metric.estimated_cost_usd();
+            *requests_per_agent
+                .entry(metric.agent_id.clone())
+                .or_insert(0) += 1;
+            *cost_per_agent.entry(metric.agent_id.clone()).or_insert(0.0) +=
+                metric.estimated_cost_usd();
         }
 
         AggregatedCostMetrics {
@@ -439,7 +471,7 @@ impl AICostTracker {
     fn hash_prompt(&self, prompt: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         prompt.hash(&mut hasher);
         format!("{:x}", hasher.finish())
@@ -477,7 +509,7 @@ mod tests {
     #[test]
     fn test_cost_tracker_basic() {
         let tracker = AICostTracker::new();
-        
+
         tracker.record_inference(
             "llama2",
             "monitor",
@@ -497,30 +529,16 @@ mod tests {
     #[test]
     fn test_cost_tracker_cache() {
         let tracker = AICostTracker::new();
-        
+
         // First request
-        tracker.record_inference(
-            "llama2",
-            "planning",
-            "same prompt",
-            "response",
-            100,
-            None,
-        );
+        tracker.record_inference("llama2", "planning", "same prompt", "response", 100, None);
 
         // Second request with same prompt
-        tracker.record_inference(
-            "llama2",
-            "planning",
-            "same prompt",
-            "response",
-            50,
-            None,
-        );
+        tracker.record_inference("llama2", "planning", "same prompt", "response", 50, None);
 
         let metrics = tracker.get_aggregated_metrics(None);
         assert_eq!(metrics.total_requests, 2);
-        
+
         // Second request should be cache hit
         let recent = tracker.get_recent_metrics(2);
         assert!(recent.iter().any(|m| m.cache_hit));
@@ -529,7 +547,7 @@ mod tests {
     #[test]
     fn test_cost_tracker_per_agent() {
         let tracker = AICostTracker::new();
-        
+
         tracker.record_inference("llama2", "monitor", "test1", "resp1", 100, None);
         tracker.record_inference("llama2", "monitor", "test2", "resp2", 100, None);
         tracker.record_inference("llama2", "planning", "test3", "resp3", 100, None);
@@ -544,7 +562,7 @@ mod tests {
     #[test]
     fn test_cost_tracker_failures() {
         let tracker = AICostTracker::new();
-        
+
         tracker.record_inference(
             "llama2",
             "diagnosis",
@@ -563,12 +581,12 @@ mod tests {
     #[test]
     fn test_cache_operations() {
         let tracker = AICostTracker::new();
-        
+
         tracker.record_inference("llama2", "safety", "prompt1", "resp1", 100, None);
         tracker.record_inference("llama2", "safety", "prompt2", "resp2", 100, None);
-        
+
         assert_eq!(tracker.cache_size(), 2);
-        
+
         let cleared = tracker.clear_cache();
         assert_eq!(cleared, 2);
         assert_eq!(tracker.cache_size(), 0);
@@ -599,7 +617,7 @@ mod tests {
     #[test]
     fn test_aggregated_metrics_calculations() {
         let tracker = AICostTracker::new();
-        
+
         // Add multiple requests with varying latencies
         for i in 0..5 {
             tracker.record_inference(

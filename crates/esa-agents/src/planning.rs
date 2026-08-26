@@ -1,7 +1,7 @@
 use crate::diagnosis::Diagnosis;
 use crate::monitor::Condition;
-use esa_core::{ActionProposal, ActionType, AgentId, ExpectedEffect, RiskLevel, Region};
-use esa_core::{IntentManager, Intent, IntentGoal, TargetMetrics, Constraints, IntentPriority};
+use esa_core::{ActionProposal, ActionType, AgentId, ExpectedEffect, Region, RiskLevel};
+use esa_core::{Constraints, Intent, IntentGoal, IntentManager, IntentPriority, TargetMetrics};
 use esa_state::StateFabric;
 use std::sync::Arc;
 use tracing::info;
@@ -15,7 +15,7 @@ pub struct PlanningAgent {
 
 impl PlanningAgent {
     pub fn new(state_fabric: Arc<StateFabric>, intent_manager: Arc<IntentManager>) -> Self {
-        Self { 
+        Self {
             state_fabric,
             intent_manager,
         }
@@ -35,12 +35,15 @@ impl PlanningAgent {
         };
 
         let constraints = Constraints::default();
-        
+
         let intent = Intent::new(workload_id.to_string(), goal, constraints)
             .with_priority(IntentPriority::Normal);
-        
+
         let intent_id = self.intent_manager.register_intent(intent);
-        info!("📋 Created default intent {} for workload {}", intent_id, workload_id);
+        info!(
+            "📋 Created default intent {} for workload {}",
+            intent_id, workload_id
+        );
         intent_id
     }
 
@@ -63,15 +66,18 @@ impl PlanningAgent {
         let current_version = self.state_fabric.current_version();
 
         // Get active intents for the workload
-        let active_intents = self.intent_manager.get_active_intents_for_workload(&workload_id);
-        
+        let active_intents = self
+            .intent_manager
+            .get_active_intents_for_workload(&workload_id);
+
         // If no intents exist, create a default one
         if active_intents.is_empty() {
             self.create_default_intent(&workload_id);
         }
 
         // Get the highest priority intent for guidance
-        let guiding_intent = self.intent_manager
+        let guiding_intent = self
+            .intent_manager
             .get_active_intents_for_workload(&workload_id)
             .into_iter()
             .max_by_key(|i| match i.priority {
@@ -83,19 +89,24 @@ impl PlanningAgent {
 
         let action = match diagnosis.recommended_action.as_deref() {
             Some("CREATE_REPLICA") => {
-                info!("Planning agent proposing CREATE_REPLICA for {}", workload_id);
-                
+                info!(
+                    "Planning agent proposing CREATE_REPLICA for {}",
+                    workload_id
+                );
+
                 // Consider intent constraints
                 let target_region = if let Some(intent) = &guiding_intent {
                     // Prefer allowed regions from intent
-                    intent.constraints.allowed_regions
+                    intent
+                        .constraints
+                        .allowed_regions
                         .first()
                         .cloned()
                         .unwrap_or_else(|| workload.region.clone())
                 } else {
                     workload.region.clone()
                 };
-                
+
                 ActionType::CreateReplica {
                     workload_id: workload_id.clone(),
                     target_region,
@@ -118,10 +129,12 @@ impl PlanningAgent {
             }
             Some("SHIFT_ROUTE") => {
                 info!("Planning agent proposing SHIFT_ROUTE for {}", workload_id);
-                
+
                 // Find a fallback region from workload or intent
                 let target_region = if let Some(intent) = &guiding_intent {
-                    intent.constraints.allowed_regions
+                    intent
+                        .constraints
+                        .allowed_regions
                         .iter()
                         .find(|&&ref r| r != &workload.region)
                         .cloned()
@@ -161,14 +174,16 @@ impl PlanningAgent {
             _ => return None,
         };
 
-        let proposal = ActionProposal::new(
-            action,
-            AgentId::Planning,
-            diagnosis.evidence_refs.clone(),
-        );
+        let proposal =
+            ActionProposal::new(action, AgentId::Planning, diagnosis.evidence_refs.clone());
 
-        info!("📝 Planning agent created proposal with intent guidance: {}", 
-              guiding_intent.as_ref().map(|i| i.goal.objective.as_str()).unwrap_or("default"));
+        info!(
+            "📝 Planning agent created proposal with intent guidance: {}",
+            guiding_intent
+                .as_ref()
+                .map(|i| i.goal.objective.as_str())
+                .unwrap_or("default")
+        );
 
         Some(proposal)
     }

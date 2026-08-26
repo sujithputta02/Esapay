@@ -25,10 +25,18 @@ impl SafetyAgent {
 
         // Check 2: Rollback enabled for risky actions
         let rollback_enabled = match &proposal.action {
-            esa_core::ActionType::CreateReplica { rollback_enabled, .. } => *rollback_enabled,
-            esa_core::ActionType::ShiftRoute { rollback_enabled, .. } => *rollback_enabled,
-            esa_core::ActionType::MigratePartition { rollback_enabled, .. } => *rollback_enabled,
-            esa_core::ActionType::ThrottleWorkload { rollback_enabled, .. } => *rollback_enabled,
+            esa_core::ActionType::CreateReplica {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            esa_core::ActionType::ShiftRoute {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            esa_core::ActionType::MigratePartition {
+                rollback_enabled, ..
+            } => *rollback_enabled,
+            esa_core::ActionType::ThrottleWorkload {
+                rollback_enabled, ..
+            } => *rollback_enabled,
             esa_core::ActionType::Rollback { .. } => true,
             esa_core::ActionType::RestartWorkload { .. } => true, // Restart can always be rolled back
         };

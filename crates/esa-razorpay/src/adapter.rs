@@ -17,8 +17,7 @@ pub struct RazorpayAdapter {
 impl RazorpayAdapter {
     pub fn try_from_env() -> Result<Self, RazorpayConfigError> {
         let config = RazorpayConfig::from_env()?;
-        let webhook_limiter =
-            RazorpayRateLimiter::per_second(config.webhook_rate_limit_per_sec);
+        let webhook_limiter = RazorpayRateLimiter::per_second(config.webhook_rate_limit_per_sec);
         let client = RazorpayClient::new(config.clone());
 
         Ok(Self {
@@ -82,8 +81,7 @@ impl RazorpayAdapter {
 
         info!(
             "Razorpay webhook accepted: {} ({:?})",
-            event.event_id,
-            event.event_type
+            event.event_id, event.event_type
         );
 
         Ok(event)

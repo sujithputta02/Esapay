@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use esa_core::{
-    ActionProposal, ActionType, AgentId, ExpectedEffect, RiskLevel, WorkloadEntity, WorkloadMetrics,
-    WorkloadState,
+    ActionProposal, ActionType, AgentId, ExpectedEffect, RiskLevel, WorkloadEntity,
+    WorkloadMetrics, WorkloadState,
 };
 use esa_runtime::EsaOrchestrator;
 use esa_state::StateFabric;
@@ -99,10 +99,13 @@ pub fn measure(fabric: &StateFabric) -> BenchmarkMetrics {
         };
     }
 
-    let avg_p95 =
-        workloads.iter().map(|w| w.metrics.p95_latency_ms).sum::<f64>() / workloads.len() as f64;
-    let avg_queue =
-        workloads.iter().map(|w| w.metrics.queue_depth).sum::<u64>() as f64 / workloads.len() as f64;
+    let avg_p95 = workloads
+        .iter()
+        .map(|w| w.metrics.p95_latency_ms)
+        .sum::<f64>()
+        / workloads.len() as f64;
+    let avg_queue = workloads.iter().map(|w| w.metrics.queue_depth).sum::<u64>() as f64
+        / workloads.len() as f64;
     let healthy = workloads
         .iter()
         .filter(|w| w.state == WorkloadState::Healthy)
@@ -118,7 +121,9 @@ pub fn measure(fabric: &StateFabric) -> BenchmarkMetrics {
 }
 
 /// Deterministic threshold rules without agent reasoning (PRD baseline A).
-pub fn run_rule_only_recovery(fabric: &StateFabric) -> Result<BenchmarkArmResult, esa_core::EsaError> {
+pub fn run_rule_only_recovery(
+    fabric: &StateFabric,
+) -> Result<BenchmarkArmResult, esa_core::EsaError> {
     let start = std::time::Instant::now();
     let before = measure(fabric);
     let mut actions = 0u32;
@@ -132,7 +137,8 @@ pub fn run_rule_only_recovery(fabric: &StateFabric) -> Result<BenchmarkArmResult
                 workload.replication.current_replicas += 1;
             }
             workload.metrics.p95_latency_ms = (workload.metrics.p95_latency_ms * 0.65).max(80.0);
-            workload.metrics.queue_depth = (workload.metrics.queue_depth as f64 * 0.4).round() as u64;
+            workload.metrics.queue_depth =
+                (workload.metrics.queue_depth as f64 * 0.4).round() as u64;
             workload.metrics.error_rate = (workload.metrics.error_rate * 0.8).max(0.01);
             workload.state = WorkloadState::Healthy;
             workload.metrics.timestamp = Utc::now();
@@ -164,7 +170,9 @@ fn wall_clock_ms(elapsed_ms: u64) -> u64 {
 }
 
 /// B1 — metric-driven adaptive controller (HPA-style scaling + routing).
-pub fn run_adaptive_recovery(fabric: &StateFabric) -> Result<BenchmarkArmResult, esa_core::EsaError> {
+pub fn run_adaptive_recovery(
+    fabric: &StateFabric,
+) -> Result<BenchmarkArmResult, esa_core::EsaError> {
     const TARGET_P95_MS: f64 = 200.0;
     const SCALE_THRESHOLD: f64 = 1.15;
 
@@ -174,11 +182,13 @@ pub fn run_adaptive_recovery(fabric: &StateFabric) -> Result<BenchmarkArmResult,
 
     for mut workload in fabric.list_workloads() {
         let p95_ratio = workload.metrics.p95_latency_ms / TARGET_P95_MS;
-        let needs_scale =
-            p95_ratio > SCALE_THRESHOLD || workload.metrics.queue_depth > 800 || workload.state != WorkloadState::Healthy;
+        let needs_scale = p95_ratio > SCALE_THRESHOLD
+            || workload.metrics.queue_depth > 800
+            || workload.state != WorkloadState::Healthy;
 
         if needs_scale {
-            let desired = ((workload.replication.current_replicas as f64) * p95_ratio).ceil() as u32;
+            let desired =
+                ((workload.replication.current_replicas as f64) * p95_ratio).ceil() as u32;
             let capped = desired.min(workload.replication.max_replicas);
             if capped > workload.replication.current_replicas {
                 // HPA-style: one replica step per evaluation cycle
@@ -381,22 +391,24 @@ pub fn apply_scenario(
     match scenario {
         "BENCH-01" | "steady" => Ok(()),
         "BENCH-02" | "burst" | "burst-spike" => apply_burst_spike(fabric, mult.max(2.0)),
-        "BENCH-03" | "regional-skew" | "regional_skew" => apply_regional_skew(fabric, mult.max(2.5)),
+        "BENCH-03" | "regional-skew" | "regional_skew" => {
+            apply_regional_skew(fabric, mult.max(2.5))
+        }
         "BENCH-04" | "node_failure" => apply_node_failure(fabric, seed),
         "BENCH-05" | "queue_buildup" => apply_queue_buildup(fabric, mult),
         "BENCH-06" | "burst_plus_skew" => {
             apply_burst_spike(fabric, mult.max(2.5))?;
             apply_regional_skew(fabric, mult.max(2.0))
-        },
+        }
         "BENCH-07" | "skew_plus_node_failure" => {
             apply_regional_skew(fabric, mult.max(2.5))?;
             apply_node_failure(fabric, seed)
-        },
+        }
         "BENCH-08" | "compound_incident" => {
             apply_burst_spike(fabric, mult.max(3.0))?;
             apply_regional_skew(fabric, mult.max(2.0))?;
             apply_node_failure(fabric, seed)
-        },
+        }
         _ => {
             if mult > 1.0 {
                 apply_burst_spike(fabric, mult)?;
@@ -447,7 +459,7 @@ pub async fn run_comparison(
 
     let esa_assisted = run_esa_recovery(fabric.clone(), orchestrator).await?;
 
-  // Restore demo-friendly baseline after benchmark
+    // Restore demo-friendly baseline after benchmark
     reset_healthy_baseline(&fabric)?;
 
     let esa_p95_advantage_ms = esa_assisted.p95_improvement_ms - rule_only.p95_improvement_ms;
@@ -506,7 +518,10 @@ pub fn apply_node_failure(fabric: &StateFabric, seed: u64) -> Result<(), esa_cor
     Ok(())
 }
 
-pub fn apply_queue_buildup(fabric: &StateFabric, multiplier: f64) -> Result<(), esa_core::EsaError> {
+pub fn apply_queue_buildup(
+    fabric: &StateFabric,
+    multiplier: f64,
+) -> Result<(), esa_core::EsaError> {
     for mut workload in fabric.list_workloads() {
         workload.metrics.rate_per_min *= multiplier * 1.2;
         workload.metrics.queue_depth =
@@ -523,7 +538,10 @@ fn seed_default_workloads(fabric: &StateFabric) -> Result<(), esa_core::EsaError
     let ids = [
         ("payment-upi-india-south", esa_core::Region::IndiaSouth),
         ("payment-cards-india-west", esa_core::Region::IndiaWest),
-        ("payment-netbanking-india-north", esa_core::Region::IndiaNorth),
+        (
+            "payment-netbanking-india-north",
+            esa_core::Region::IndiaNorth,
+        ),
     ];
 
     for (id, region) in ids {

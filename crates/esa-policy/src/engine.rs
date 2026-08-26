@@ -1,4 +1,6 @@
-use esa_core::{ActionProposal, ActionType, EsaResult, RiskLevel, IntentManager, ConstraintValidator};
+use esa_core::{
+    ActionProposal, ActionType, ConstraintValidator, EsaResult, IntentManager, RiskLevel,
+};
 use esa_state::StateFabric;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,10 +18,10 @@ pub enum PolicyVerdict {
     #[serde(rename = "REQUIRES_APPROVAL")]
     RequiresApproval { reason: String },
     #[serde(rename = "STALE_STATE")]
-    StaleState { 
-        current_version: u64, 
-        proposed_version: u64, 
-        drift: u64 
+    StaleState {
+        current_version: u64,
+        proposed_version: u64,
+        drift: u64,
     },
 }
 
@@ -44,7 +46,7 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     pub fn new(state_fabric: Arc<StateFabric>, intent_manager: Arc<IntentManager>) -> Self {
         let constraint_validator = ConstraintValidator::new(intent_manager.clone());
-        
+
         Self {
             state_fabric,
             _intent_manager: intent_manager,
@@ -60,7 +62,9 @@ impl PolicyEngine {
                 check: Box::new(|proposal, state| {
                     if let ActionType::CreateReplica { workload_id, .. } = &proposal.action {
                         if let Some(workload) = state.get_workload(workload_id) {
-                            if workload.replication.current_replicas >= workload.replication.max_replicas {
+                            if workload.replication.current_replicas
+                                >= workload.replication.max_replicas
+                            {
                                 return Ok(PolicyVerdict::Denied {
                                     reason: format!(
                                         "Replica count {} already at max {}",
@@ -165,8 +169,11 @@ impl PolicyEngine {
                             return Ok(PolicyResult {
                                 decision_id: uuid::Uuid::new_v4().to_string(),
                                 proposal_id: proposal.proposal_id.clone(),
-                                verdict: PolicyVerdict::Denied { 
-                                    reason: format!("Intent constraint violation: {}", violation.description) 
+                                verdict: PolicyVerdict::Denied {
+                                    reason: format!(
+                                        "Intent constraint violation: {}",
+                                        violation.description
+                                    ),
                                 },
                                 rule_ids: vec!["INTENT_CONSTRAINT".to_string()],
                                 risk_score: 1.0,
@@ -175,13 +182,15 @@ impl PolicyEngine {
                             });
                         }
                         esa_core::ViolationSeverity::Violation => {
-                            explanations.push(format!("Constraint violation: {}", violation.description));
-                            final_verdict = PolicyVerdict::RequiresApproval { 
-                                reason: violation.description 
+                            explanations
+                                .push(format!("Constraint violation: {}", violation.description));
+                            final_verdict = PolicyVerdict::RequiresApproval {
+                                reason: violation.description,
                             };
                         }
                         esa_core::ViolationSeverity::Warning => {
-                            explanations.push(format!("Constraint warning: {}", violation.description));
+                            explanations
+                                .push(format!("Constraint warning: {}", violation.description));
                         }
                     }
                 }
@@ -201,14 +210,20 @@ impl PolicyEngine {
                     return Ok(PolicyResult {
                         decision_id: uuid::Uuid::new_v4().to_string(),
                         proposal_id: proposal.proposal_id.clone(),
-                        verdict: PolicyVerdict::Denied { reason: reason.clone() },
+                        verdict: PolicyVerdict::Denied {
+                            reason: reason.clone(),
+                        },
                         rule_ids: applied_rules,
                         risk_score: self.calculate_risk_score(proposal),
                         modifications: Vec::new(),
                         explanation: reason,
                     });
                 }
-                PolicyVerdict::StaleState { current_version, proposed_version, drift } => {
+                PolicyVerdict::StaleState {
+                    current_version,
+                    proposed_version,
+                    drift,
+                } => {
                     let reason = format!(
                         "STALE_STATE: Action planned against version {}, current version is {} (drift: {})",
                         proposed_version, current_version, drift
@@ -216,7 +231,11 @@ impl PolicyEngine {
                     return Ok(PolicyResult {
                         decision_id: uuid::Uuid::new_v4().to_string(),
                         proposal_id: proposal.proposal_id.clone(),
-                        verdict: PolicyVerdict::StaleState { current_version, proposed_version, drift },
+                        verdict: PolicyVerdict::StaleState {
+                            current_version,
+                            proposed_version,
+                            drift,
+                        },
                         rule_ids: applied_rules,
                         risk_score: 0.0, // Stale state is not about risk
                         modifications: Vec::new(),
@@ -224,10 +243,14 @@ impl PolicyEngine {
                     });
                 }
                 PolicyVerdict::RequiresApproval { reason } => {
-                    final_verdict = PolicyVerdict::RequiresApproval { reason: reason.clone() };
+                    final_verdict = PolicyVerdict::RequiresApproval {
+                        reason: reason.clone(),
+                    };
                     explanations.push(reason);
                 }
-                PolicyVerdict::Modified { modifications: mods } => {
+                PolicyVerdict::Modified {
+                    modifications: mods,
+                } => {
                     modifications.extend(mods.clone());
                     final_verdict = PolicyVerdict::Modified {
                         modifications: modifications.clone(),
@@ -256,7 +279,9 @@ impl PolicyEngine {
 
     fn calculate_risk_score(&self, proposal: &ActionProposal) -> f64 {
         let base_risk = match &proposal.action {
-            ActionType::CreateReplica { risk, confidence, .. } => {
+            ActionType::CreateReplica {
+                risk, confidence, ..
+            } => {
                 let risk_val = match risk {
                     RiskLevel::Low => 0.2,
                     RiskLevel::Medium => 0.5,
@@ -265,7 +290,9 @@ impl PolicyEngine {
                 };
                 risk_val * (1.0 - confidence * 0.5)
             }
-            ActionType::ShiftRoute { risk, confidence, .. } => {
+            ActionType::ShiftRoute {
+                risk, confidence, ..
+            } => {
                 let risk_val = match risk {
                     RiskLevel::Low => 0.3,
                     RiskLevel::Medium => 0.6,

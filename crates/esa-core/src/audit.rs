@@ -12,29 +12,29 @@ pub struct AuditRecord {
     pub audit_id: String,
     pub trace_id: String,
     pub decision_id: String,
-    
+
     // Context
     pub workload_id: String,
     pub state_version: u64,
     pub policy_version: String,
-    
+
     // Decision lineage
     pub proposal: ActionProposal,
     pub policy_result: serde_json::Value,
     pub verification_result: serde_json::Value,
     pub execution: Option<ActionExecution>,
-    
+
     // State snapshots
     pub before_state: serde_json::Value,
     pub after_state: Option<serde_json::Value>,
-    
+
     // Effect tracking
     pub effect_measurement: Option<EffectMeasurement>,
-    
+
     // Outcome
     pub final_outcome: AuditOutcome,
     pub rollback_status: Option<RollbackStatus>,
-    
+
     // Metadata
     pub timestamp: DateTime<Utc>,
     pub agent_reasoning: AgentReasoningTrace,
@@ -223,7 +223,7 @@ impl AuditStore {
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        
+
         records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         records.truncate(limit);
         records
@@ -248,19 +248,19 @@ pub struct ReplayResult {
     pub decision_id: String,
     pub can_replay: bool,
     pub replay_timestamp: DateTime<Utc>,
-    
+
     // Reconstructed decision flow
     pub original_proposal: ActionProposal,
     pub original_state_version: u64,
     pub policy_decision: PolicyReplayDecision,
     pub verification_decision: VerificationReplayDecision,
     pub execution_outcome: Option<String>,
-    
+
     // Deterministic replay checks
     pub state_version_valid: bool,
     pub policy_would_allow: bool,
     pub verification_would_pass: bool,
-    
+
     // Context
     pub evidence: Vec<String>,
     pub reasoning_summary: String,
@@ -293,17 +293,16 @@ impl DecisionReplayer {
     /// Replay a decision from audit record without calling LLM
     pub fn replay(&self, audit_id: &str) -> Option<ReplayResult> {
         let record = self.audit_store.get(audit_id)?;
-        
+
         // Extract policy decision
         let policy_decision = self.reconstruct_policy_decision(&record);
-        
+
         // Extract verification decision
         let verification_decision = self.reconstruct_verification_decision(&record);
-        
+
         // Determine if the decision could be replayed deterministically
-        let can_replay = !record.policy_result.is_null() 
-            && !record.verification_result.is_null();
-        
+        let can_replay = !record.policy_result.is_null() && !record.verification_result.is_null();
+
         // Extract execution outcome
         let execution_outcome = record.execution.as_ref().map(|exec| {
             if let Some(outcome) = &exec.outcome {
@@ -312,10 +311,10 @@ impl DecisionReplayer {
                 "PENDING".to_string()
             }
         });
-        
+
         // Build reasoning summary from agent traces
         let reasoning_summary = self.build_reasoning_summary(&record);
-        
+
         Some(ReplayResult {
             audit_id: record.audit_id.clone(),
             trace_id: record.trace_id.clone(),
@@ -337,29 +336,37 @@ impl DecisionReplayer {
 
     fn reconstruct_policy_decision(&self, record: &AuditRecord) -> PolicyReplayDecision {
         // Extract policy result from stored JSON
-        let verdict = record.policy_result
+        let verdict = record
+            .policy_result
             .get("verdict")
             .and_then(|v| v.as_str())
             .unwrap_or("UNKNOWN")
             .to_string();
-        
-        let rule_ids = record.policy_result
+
+        let rule_ids = record
+            .policy_result
             .get("rule_ids")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        
-        let risk_score = record.policy_result
+
+        let risk_score = record
+            .policy_result
             .get("risk_score")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-        
-        let explanation = record.policy_result
+
+        let explanation = record
+            .policy_result
             .get("explanation")
             .and_then(|v| v.as_str())
             .unwrap_or("No explanation available")
             .to_string();
-        
+
         PolicyReplayDecision {
             verdict,
             rule_ids,
@@ -368,30 +375,40 @@ impl DecisionReplayer {
         }
     }
 
-    fn reconstruct_verification_decision(&self, record: &AuditRecord) -> VerificationReplayDecision {
-        let passed = record.verification_result
+    fn reconstruct_verification_decision(
+        &self,
+        record: &AuditRecord,
+    ) -> VerificationReplayDecision {
+        let passed = record
+            .verification_result
             .get("passed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
-        let failures = record.verification_result
+
+        let failures = record
+            .verification_result
             .get("failures")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        
-        let current_version = record.verification_result
+
+        let current_version = record
+            .verification_result
             .get("current_state_version")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        
+
         let state_version_check = format!(
             "Proposal version: {}, Current version: {}, Drift: {}",
             record.state_version,
             current_version,
             current_version.saturating_sub(record.state_version)
         );
-        
+
         VerificationReplayDecision {
             passed,
             failures,
@@ -410,7 +427,8 @@ impl DecisionReplayer {
     }
 
     fn would_verification_pass(&self, record: &AuditRecord) -> bool {
-        record.verification_result
+        record
+            .verification_result
             .get("passed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
@@ -418,35 +436,41 @@ impl DecisionReplayer {
 
     fn build_reasoning_summary(&self, record: &AuditRecord) -> String {
         let mut summary = Vec::new();
-        
+
         if let Some(monitor) = &record.agent_reasoning.monitor_output {
             if let Some(condition) = monitor.get("condition") {
                 summary.push(format!("Monitor detected: {}", condition));
             }
         }
-        
+
         if let Some(diagnosis) = &record.agent_reasoning.diagnosis_output {
             if let Some(hypothesis) = diagnosis.get("hypothesis") {
                 summary.push(format!("Diagnosis: {}", hypothesis));
             }
         }
-        
+
         if let Some(planning) = &record.agent_reasoning.planning_output {
             if let Some(action) = planning.get("action") {
                 summary.push(format!("Planned action: {}", action));
             }
         }
-        
+
         if let Some(safety) = &record.agent_reasoning.safety_output {
             if let Some(assessment) = safety.get("assessment") {
                 summary.push(format!("Safety assessment: {}", assessment));
             }
         }
-        
+
         if summary.is_empty() {
-            format!("Action: {:?}, Confidence: {:.2}", 
-                    record.proposal.action, 
-                    record.agent_reasoning.confidence_scores.first().unwrap_or(&0.0))
+            format!(
+                "Action: {:?}, Confidence: {:.2}",
+                record.proposal.action,
+                record
+                    .agent_reasoning
+                    .confidence_scores
+                    .first()
+                    .unwrap_or(&0.0)
+            )
         } else {
             summary.join(" → ")
         }
@@ -465,15 +489,17 @@ impl DecisionReplayer {
     pub fn replay_stats(&self) -> ReplayStats {
         let total = self.audit_store.count();
         let recent = self.audit_store.list_recent(100);
-        
-        let replayable = recent.iter()
+
+        let replayable = recent
+            .iter()
             .filter(|r| !r.policy_result.is_null() && !r.verification_result.is_null())
             .count();
-        
-        let successful = recent.iter()
+
+        let successful = recent
+            .iter()
             .filter(|r| matches!(r.final_outcome, AuditOutcome::Success))
             .count();
-        
+
         ReplayStats {
             total_decisions: total,
             replayable_decisions: replayable,
@@ -501,7 +527,7 @@ mod tests {
     #[test]
     fn test_audit_store() {
         let store = AuditStore::new();
-        
+
         let proposal = ActionProposal::new(
             ActionType::CreateReplica {
                 workload_id: "w_001".to_string(),
@@ -543,7 +569,7 @@ mod tests {
     fn test_decision_replay() {
         let store = std::sync::Arc::new(AuditStore::new());
         let replayer = DecisionReplayer::new(store.clone());
-        
+
         let proposal = ActionProposal::new(
             ActionType::CreateReplica {
                 workload_id: "w_001".to_string(),
@@ -586,7 +612,7 @@ mod tests {
 
         let replay_result = replayer.replay(&audit_id);
         assert!(replay_result.is_some());
-        
+
         let result = replay_result.unwrap();
         assert_eq!(result.policy_decision.verdict, "ALLOWED");
         assert!(result.can_replay);

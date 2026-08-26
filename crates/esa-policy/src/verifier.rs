@@ -15,7 +15,7 @@ impl DecisionVerifier {
 
     pub fn verify(&self, proposal: &ActionProposal) -> EsaResult<VerificationResult> {
         let current_version = self.state_fabric.current_version();
-        
+
         let checks = vec![
             self.verify_state_version(proposal, current_version),
             self.verify_workload_exists(proposal),
@@ -41,7 +41,7 @@ impl DecisionVerifier {
 
     fn verify_state_version(&self, proposal: &ActionProposal, current: u64) -> EsaResult<()> {
         use esa_core::ActionType;
-        
+
         let proposed_version = match &proposal.action {
             ActionType::CreateReplica { state_version, .. } => *state_version,
             ActionType::ShiftRoute { state_version, .. } => *state_version,
@@ -63,7 +63,7 @@ impl DecisionVerifier {
 
     fn verify_workload_exists(&self, proposal: &ActionProposal) -> EsaResult<()> {
         use esa_core::ActionType;
-        
+
         let workload_id = match &proposal.action {
             ActionType::CreateReplica { workload_id, .. } => workload_id,
             ActionType::ShiftRoute { workload_id, .. } => workload_id,

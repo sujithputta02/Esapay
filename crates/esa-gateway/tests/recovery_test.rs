@@ -43,8 +43,10 @@ async fn create_replica_mutates_state_and_restores_health() {
         .unwrap();
 
     let intent_manager = Arc::new(IntentManager::new());
-    let policy_engine =
-        Arc::new(PolicyEngine::new(Arc::clone(&fabric), Arc::clone(&intent_manager)));
+    let policy_engine = Arc::new(PolicyEngine::new(
+        Arc::clone(&fabric),
+        Arc::clone(&intent_manager),
+    ));
     let decision_verifier = Arc::new(DecisionVerifier::new(Arc::clone(&fabric)));
     let audit_store = Arc::new(AuditStore::new());
 

@@ -1,13 +1,13 @@
-use esa_core::{
-    ActionExecution, ActionOutcome, ActionProposal, ActionType, EsaResult, Region,
-    WorkloadMetrics, WorkloadState,
-};
-use esa_core::{
-    AuditRecord, AuditStore, AuditOutcome, ExpectedEffect, ObservedEffect, EffectMeasurement,
-};
-use esa_policy::{PolicyEngine, PolicyVerdict, DecisionVerifier};
-use esa_state::StateFabric;
 use chrono::Utc;
+use esa_core::{
+    ActionExecution, ActionOutcome, ActionProposal, ActionType, EsaResult, Region, WorkloadMetrics,
+    WorkloadState,
+};
+use esa_core::{
+    AuditOutcome, AuditRecord, AuditStore, EffectMeasurement, ExpectedEffect, ObservedEffect,
+};
+use esa_policy::{DecisionVerifier, PolicyEngine, PolicyVerdict};
+use esa_state::StateFabric;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -58,7 +58,9 @@ impl GatewayResult {
     pub fn is_blocked(&self) -> bool {
         matches!(
             self.verdict,
-            PolicyVerdict::Denied { .. } | PolicyVerdict::StaleState { .. } | PolicyVerdict::RequiresApproval { .. }
+            PolicyVerdict::Denied { .. }
+                | PolicyVerdict::StaleState { .. }
+                | PolicyVerdict::RequiresApproval { .. }
         )
     }
 }
@@ -86,14 +88,17 @@ impl ActionGateway {
     }
 
     /// Execute action with policy verdict tracking
-    pub async fn execute_with_verdict(&self, proposal: &ActionProposal) -> EsaResult<GatewayResult> {
+    pub async fn execute_with_verdict(
+        &self,
+        proposal: &ActionProposal,
+    ) -> EsaResult<GatewayResult> {
         let start_time = std::time::Instant::now();
         let trace_id = Uuid::new_v4().to_string();
         let decision_id = Uuid::new_v4().to_string();
 
         // Extract workload from action
         let workload_id = self.extract_workload_id(&proposal.action);
-        
+
         // Capture before state
         let before_state = self.capture_state_snapshot(&workload_id)?;
 
@@ -127,7 +132,11 @@ impl ActionGateway {
                     explanation: reason.clone(),
                 });
             }
-            PolicyVerdict::StaleState { current_version, proposed_version, drift } => {
+            PolicyVerdict::StaleState {
+                current_version,
+                proposed_version,
+                drift,
+            } => {
                 let reason = format!(
                     "State version mismatch: proposed={}, current={}, drift={}",
                     proposed_version, current_version, drift
@@ -233,7 +242,11 @@ impl ActionGateway {
                 );
 
                 let execution = ActionExecution::new(proposal, before_metrics)
-                    .complete_with_effect(ActionOutcome::Success, after_metrics.clone(), effect_measurement);
+                    .complete_with_effect(
+                        ActionOutcome::Success,
+                        after_metrics.clone(),
+                        effect_measurement,
+                    );
 
                 audit = audit
                     .with_outcome(AuditOutcome::Success)
@@ -309,9 +322,7 @@ impl ActionGateway {
                 target_region,
                 expected_effect,
                 ..
-            } => {
-                self.apply_shift_route(workload_id, target_region.clone(), expected_effect)
-            }
+            } => self.apply_shift_route(workload_id, target_region.clone(), expected_effect),
             ActionType::Rollback {
                 original_action_id,
                 reason,
@@ -325,12 +336,11 @@ impl ActionGateway {
         workload_id: &str,
         expected: &ExpectedEffect,
     ) -> EsaResult<(serde_json::Value, EffectMeasurement)> {
-        let workload = self
-            .state_fabric
-            .get_workload(workload_id)
-            .ok_or_else(|| esa_core::EsaError::ResourceNotFound {
+        let workload = self.state_fabric.get_workload(workload_id).ok_or_else(|| {
+            esa_core::EsaError::ResourceNotFound {
                 resource: format!("workload {}", workload_id),
-            })?;
+            }
+        })?;
 
         let before = workload.metrics.clone();
         let mut workload = workload;
@@ -362,11 +372,12 @@ impl ActionGateway {
         target_snapshot: &str,
         reason: &str,
     ) -> EsaResult<(serde_json::Value, EffectMeasurement)> {
-        let version = target_snapshot.parse::<u64>().map_err(|_| {
-            esa_core::EsaError::InvalidAction {
-                reason: "target_snapshot must be a numeric snapshot version".to_string(),
-            }
-        })?;
+        let version =
+            target_snapshot
+                .parse::<u64>()
+                .map_err(|_| esa_core::EsaError::InvalidAction {
+                    reason: "target_snapshot must be a numeric snapshot version".to_string(),
+                })?;
 
         let _before_summary = self.summarize_workloads();
         self.state_fabric.restore_snapshot(version)?;
@@ -402,7 +413,10 @@ impl ActionGateway {
         let avg_p95 = if workloads.is_empty() {
             0.0
         } else {
-            workloads.iter().map(|w| w.metrics.p95_latency_ms).sum::<f64>()
+            workloads
+                .iter()
+                .map(|w| w.metrics.p95_latency_ms)
+                .sum::<f64>()
                 / workloads.len() as f64
         };
         let total_queue = workloads.iter().map(|w| w.metrics.queue_depth).sum::<u64>();
@@ -426,12 +440,11 @@ impl ActionGateway {
         to_region: Region,
         expected: &ExpectedEffect,
     ) -> EsaResult<(serde_json::Value, EffectMeasurement)> {
-        let workload = self
-            .state_fabric
-            .get_workload(workload_id)
-            .ok_or_else(|| esa_core::EsaError::ResourceNotFound {
+        let workload = self.state_fabric.get_workload(workload_id).ok_or_else(|| {
+            esa_core::EsaError::ResourceNotFound {
                 resource: format!("workload {}", workload_id),
-            })?;
+            }
+        })?;
 
         let before = workload.metrics.clone();
         let mut workload = workload;
@@ -447,12 +460,11 @@ impl ActionGateway {
         expected: &ExpectedEffect,
         full_reset: bool,
     ) -> EsaResult<(serde_json::Value, EffectMeasurement)> {
-        let workload = self
-            .state_fabric
-            .get_workload(workload_id)
-            .ok_or_else(|| esa_core::EsaError::ResourceNotFound {
+        let workload = self.state_fabric.get_workload(workload_id).ok_or_else(|| {
+            esa_core::EsaError::ResourceNotFound {
                 resource: format!("workload {}", workload_id),
-            })?;
+            }
+        })?;
 
         let before = workload.metrics.clone();
         let mut workload = workload;
@@ -527,7 +539,9 @@ impl ActionGateway {
             ActionType::MigratePartition { workload_id, .. } => workload_id.clone(),
             ActionType::ThrottleWorkload { workload_id, .. } => workload_id.clone(),
             ActionType::RestartWorkload { workload_id, .. } => workload_id.clone(),
-            ActionType::Rollback { original_action_id, .. } => {
+            ActionType::Rollback {
+                original_action_id, ..
+            } => {
                 if let Some(record) = self.audit_store.get_by_decision_id(original_action_id) {
                     record.workload_id
                 } else if let Some(record) = self.audit_store.get(original_action_id) {
@@ -544,9 +558,7 @@ impl ActionGateway {
     }
 
     fn compute_workload_state(metrics: &WorkloadMetrics) -> WorkloadState {
-        if metrics.p95_latency_ms > 250.0
-            || metrics.queue_depth > 1000
-            || metrics.error_rate > 0.05
+        if metrics.p95_latency_ms > 250.0 || metrics.queue_depth > 1000 || metrics.error_rate > 0.05
         {
             if metrics.p95_latency_ms > 300.0
                 || metrics.queue_depth > 1500

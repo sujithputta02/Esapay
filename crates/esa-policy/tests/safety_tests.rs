@@ -37,12 +37,12 @@ async fn test_01_unknown_action_denied() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should be denied due to invalid parameters
     assert!(
-        matches!(result.verdict, PolicyVerdict::Denied { .. }) ||
-        matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
-        "Invalid action should be denied or require approval, got: {:?}", 
+        matches!(result.verdict, PolicyVerdict::Denied { .. })
+            || matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
+        "Invalid action should be denied or require approval, got: {:?}",
         result.verdict
     );
 }
@@ -52,7 +52,7 @@ async fn test_02_out_of_bounds_replicas_denied() {
     // Test 2: Out-of-Bounds Replicas
     let state_fabric = Arc::new(StateFabric::new());
     let intent_manager = Arc::new(IntentManager::new());
-    
+
     // Create intent with strict replica limits
     let goal = IntentGoal {
         objective: "Test replica limits".to_string(),
@@ -68,10 +68,10 @@ async fn test_02_out_of_bounds_replicas_denied() {
 
     let mut constraints = Constraints::default();
     constraints.max_replicas = Some(2); // Very low limit
-    
+
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);
-    
+
     let policy_engine = PolicyEngine::new(state_fabric.clone(), intent_manager);
 
     // Create workload at max replicas
@@ -129,12 +129,12 @@ async fn test_02_out_of_bounds_replicas_denied() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should be denied or require approval due to replica limit constraint
     assert!(
-        matches!(result.verdict, PolicyVerdict::Denied { .. }) ||
-        matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
-        "Out-of-bounds replica creation should be denied/require approval, got: {:?}", 
+        matches!(result.verdict, PolicyVerdict::Denied { .. })
+            || matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
+        "Out-of-bounds replica creation should be denied/require approval, got: {:?}",
         result.verdict
     );
 }
@@ -144,7 +144,7 @@ async fn test_03_unauthorized_region_denied() {
     // Test 3: Unauthorized Region
     let state_fabric = Arc::new(StateFabric::new());
     let intent_manager = Arc::new(IntentManager::new());
-    
+
     // Create intent with restricted regions
     let goal = IntentGoal {
         objective: "Test region restrictions".to_string(),
@@ -161,10 +161,10 @@ async fn test_03_unauthorized_region_denied() {
     let mut constraints = Constraints::default();
     constraints.allowed_regions = vec![Region::IndiaSouth]; // Only one region allowed
     constraints.forbidden_regions = vec![Region::UsEast, Region::EuWest]; // Explicitly forbidden
-    
+
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);
-    
+
     let policy_engine = PolicyEngine::new(state_fabric.clone(), intent_manager);
 
     // Try to create replica in forbidden region
@@ -190,11 +190,11 @@ async fn test_03_unauthorized_region_denied() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should be denied due to forbidden region constraint
     assert!(
         matches!(result.verdict, PolicyVerdict::Denied { .. }),
-        "Action in forbidden region should be denied, got: {:?}", 
+        "Action in forbidden region should be denied, got: {:?}",
         result.verdict
     );
 }
@@ -235,10 +235,14 @@ async fn test_04_stale_state_rejected() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should return STALE_STATE verdict
     match result.verdict {
-        PolicyVerdict::StaleState { current_version: cv, proposed_version: pv, drift } => {
+        PolicyVerdict::StaleState {
+            current_version: cv,
+            proposed_version: pv,
+            drift,
+        } => {
             assert_eq!(cv, current_version);
             assert_eq!(pv, 1);
             assert_eq!(drift, current_version - 1);
@@ -252,7 +256,7 @@ async fn test_05_missing_approval_blocked() {
     // Test 5: Missing Approval for High Risk
     let state_fabric = Arc::new(StateFabric::new());
     let intent_manager = Arc::new(IntentManager::new());
-    
+
     // Create intent requiring approval for high risk
     let goal = IntentGoal {
         objective: "Test approval requirements".to_string(),
@@ -268,10 +272,10 @@ async fn test_05_missing_approval_blocked() {
 
     let mut constraints = Constraints::default();
     constraints.require_approval_for_high_risk = true;
-    
+
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);
-    
+
     let policy_engine = PolicyEngine::new(state_fabric.clone(), intent_manager);
 
     // High risk action without approval
@@ -297,11 +301,11 @@ async fn test_05_missing_approval_blocked() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should require approval due to high risk
     assert!(
         matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
-        "High risk action should require approval, got: {:?}", 
+        "High risk action should require approval, got: {:?}",
         result.verdict
     );
 }
@@ -336,11 +340,11 @@ async fn test_06_invalid_model_output_no_execution() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should require approval due to low confidence (< 0.75 threshold)
     assert!(
         matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }),
-        "Low confidence action should require approval, got: {:?}", 
+        "Low confidence action should require approval, got: {:?}",
         result.verdict
     );
 }
@@ -349,7 +353,7 @@ async fn test_06_invalid_model_output_no_execution() {
 async fn test_07_agent_failure_safe_operation() {
     // Test 7: Agent Failure
     // This test simulates what happens when agent services are unavailable
-    
+
     let state_fabric = Arc::new(StateFabric::new());
     let intent_manager = Arc::new(IntentManager::new());
     let policy_engine = PolicyEngine::new(state_fabric.clone(), intent_manager);
@@ -377,12 +381,15 @@ async fn test_07_agent_failure_safe_operation() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Even with empty evidence, policy engine should still function safely
     // This tests that the system doesn't crash and maintains safe operation
     assert!(
-        matches!(result.verdict, PolicyVerdict::Allowed | PolicyVerdict::RequiresApproval { .. }),
-        "System should handle agent failure gracefully, got: {:?}", 
+        matches!(
+            result.verdict,
+            PolicyVerdict::Allowed | PolicyVerdict::RequiresApproval { .. }
+        ),
+        "System should handle agent failure gracefully, got: {:?}",
         result.verdict
     );
 }
@@ -393,13 +400,13 @@ async fn test_08_runtime_failure_rollback() {
     // This test verifies the system can handle execution failures
     use esa_gateway::ActionGateway;
     use esa_policy::DecisionVerifier;
-    
+
     let state_fabric = Arc::new(StateFabric::new());
     let intent_manager = Arc::new(IntentManager::new());
     let policy_engine = Arc::new(PolicyEngine::new(state_fabric.clone(), intent_manager));
     let verifier = Arc::new(DecisionVerifier::new(state_fabric.clone()));
     let audit_store = Arc::new(AuditStore::new());
-    
+
     let gateway = ActionGateway::new(
         state_fabric.clone(),
         policy_engine,
@@ -437,9 +444,12 @@ async fn test_08_runtime_failure_rollback() {
         "Runtime failure should be blocked safely, got verdict: {:?}",
         result.verdict
     );
-    
+
     // Verify audit record was created
-    assert!(audit_store.count() > 0, "Audit record should be created even on failure");
+    assert!(
+        audit_store.count() > 0,
+        "Audit record should be created even on failure"
+    );
 }
 
 #[tokio::test]
@@ -504,11 +514,11 @@ async fn test_policy_allows_valid_action() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should be allowed
     assert!(
         matches!(result.verdict, PolicyVerdict::Allowed),
-        "Valid action should be allowed, got: {:?}", 
+        "Valid action should be allowed, got: {:?}",
         result.verdict
     );
 }
@@ -543,12 +553,12 @@ async fn test_policy_blocks_unsafe_action() {
     );
 
     let result = policy_engine.evaluate(&proposal).unwrap();
-    
+
     // Should require approval or be denied due to critical risk without rollback
     assert!(
-        matches!(result.verdict, PolicyVerdict::RequiresApproval { .. }) ||
-        matches!(result.verdict, PolicyVerdict::Denied { .. }),
-        "Unsafe action should require approval or be denied, got: {:?}", 
+        matches!(result.verdict, PolicyVerdict::RequiresApproval { .. })
+            || matches!(result.verdict, PolicyVerdict::Denied { .. }),
+        "Unsafe action should require approval or be denied, got: {:?}",
         result.verdict
     );
 }

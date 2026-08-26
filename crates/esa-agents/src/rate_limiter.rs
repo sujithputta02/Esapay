@@ -1,6 +1,6 @@
-use governor::{Quota, RateLimiter as GovRateLimiter};
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota, RateLimiter as GovRateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ impl AgentRateLimiter {
     pub fn new(requests_per_second: u32) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
         let limiter = GovRateLimiter::direct(quota);
-        
+
         Self {
             limiter: Arc::new(limiter),
         }

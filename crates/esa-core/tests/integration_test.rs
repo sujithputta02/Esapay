@@ -55,11 +55,7 @@ fn test_action_proposal_creation() {
         rollback_enabled: true,
     };
 
-    let proposal = ActionProposal::new(
-        action,
-        AgentId::Planning,
-        vec!["evidence_1".to_string()],
-    );
+    let proposal = ActionProposal::new(action, AgentId::Planning, vec!["evidence_1".to_string()]);
 
     assert_eq!(proposal.proposed_by, AgentId::Planning);
     assert_eq!(proposal.evidence_refs.len(), 1);
@@ -106,13 +102,13 @@ fn test_action_execution_lifecycle() {
 
     let proposal = ActionProposal::new(action, AgentId::Planning, vec![]);
     let before_metrics = serde_json::json!({ "p95_latency_ms": 250.0 });
-    
+
     let mut execution = ActionExecution::new(&proposal, before_metrics);
     assert!(execution.outcome.is_none());
 
     let after_metrics = serde_json::json!({ "p95_latency_ms": 120.0 });
     execution = execution.complete(ActionOutcome::Success, after_metrics);
-    
+
     assert_eq!(execution.outcome, Some(ActionOutcome::Success));
     assert!(execution.completed_at.is_some());
 }

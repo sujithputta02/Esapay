@@ -32,13 +32,20 @@ impl DiagnosisAgent {
         info!("Diagnosis agent analyzing {} conditions", conditions.len());
 
         // For MVP, use rule-based diagnosis if Ollama is unavailable
-        match self.ollama_client.generate_with_agent("diagnosis", prompt).await {
+        match self
+            .ollama_client
+            .generate_with_agent("diagnosis", prompt)
+            .await
+        {
             Ok(response) => {
                 // Parse LLM response
                 match self.parse_diagnosis_response(&response.response, conditions) {
                     Ok(diagnosis) => Ok(diagnosis),
                     Err(e) => {
-                        warn!("Failed to parse LLM diagnosis, falling back to rules: {}", e);
+                        warn!(
+                            "Failed to parse LLM diagnosis, falling back to rules: {}",
+                            e
+                        );
                         Ok(self.rule_based_diagnosis(conditions))
                     }
                 }
@@ -52,7 +59,7 @@ impl DiagnosisAgent {
 
     fn build_diagnosis_prompt(&self, conditions: &[Condition]) -> String {
         let conditions_json = serde_json::to_string_pretty(conditions).unwrap();
-        
+
         format!(
             r#"You are a payment infrastructure diagnosis agent. Analyze the following conditions and identify the root cause.
 
@@ -96,8 +103,7 @@ Be concise and focus on observable metrics."#,
             coerce_diagnosis_json_fields(obj);
         }
 
-        serde_json::from_value(value)
-            .map_err(|e| format!("Failed to parse diagnosis JSON: {}", e))
+        serde_json::from_value(value).map_err(|e| format!("Failed to parse diagnosis JSON: {}", e))
     }
 
     fn rule_based_diagnosis(&self, conditions: &[Condition]) -> Diagnosis {

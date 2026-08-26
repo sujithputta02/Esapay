@@ -1,6 +1,6 @@
-use esa_core::{EsaResult, WorkloadEntity, PaymentEvent};
-use sqlx::{PgPool, Row};
+use esa_core::{EsaResult, PaymentEvent, WorkloadEntity};
 use serde_json;
+use sqlx::{PgPool, Row};
 
 /// Persistent state store using PostgreSQL
 
@@ -73,7 +73,7 @@ impl StateStore {
 
     pub async fn save_workload(&self, workload: &WorkloadEntity) -> EsaResult<()> {
         let state_json = serde_json::to_value(workload)?;
-        
+
         sqlx::query(
             r#"
             INSERT INTO workload_entities (workload_id, shard_id, state, version, updated_at)
@@ -83,7 +83,7 @@ impl StateStore {
                 state = EXCLUDED.state,
                 version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at
-            "#
+            "#,
         )
         .bind(&workload.workload_id)
         .bind(&workload.shard_id)
@@ -100,7 +100,7 @@ impl StateStore {
         let row = sqlx::query(
             r#"
             SELECT state FROM workload_entities WHERE workload_id = $1
-            "#
+            "#,
         )
         .bind(workload_id)
         .fetch_optional(&self.pool)
@@ -117,13 +117,13 @@ impl StateStore {
 
     pub async fn save_payment_event(&self, event: &PaymentEvent) -> EsaResult<()> {
         let event_json = serde_json::to_value(event)?;
-        
+
         sqlx::query(
             r#"
             INSERT INTO payment_events (event_id, event_type, event_data, region, timestamp)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (event_id) DO NOTHING
-            "#
+            "#,
         )
         .bind(&event.event_id)
         .bind(format!("{:?}", event.event_type))
@@ -142,7 +142,7 @@ impl StateStore {
             SELECT event_data FROM payment_events
             ORDER BY timestamp DESC
             LIMIT $1
-            "#
+            "#,
         )
         .bind(limit)
         .fetch_all(&self.pool)

@@ -14,8 +14,7 @@ pub struct RazorpayClient {
 
 impl RazorpayClient {
     pub fn new(config: RazorpayConfig) -> Self {
-        let rate_limiter =
-            RazorpayRateLimiter::per_second(config.api_rate_limit_per_sec);
+        let rate_limiter = RazorpayRateLimiter::per_second(config.api_rate_limit_per_sec);
 
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
