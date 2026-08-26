@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, Level};
-use tracing_subscriber;
 
 mod benchmark;
 mod benchmark_harness;
@@ -946,11 +945,7 @@ async fn replay_decision(
         let replayer = DecisionReplayer::new(Arc::clone(&state.audit_store));
         if let Some(replay) = replayer.replay(&record.audit_id) {
             let original_verdict = replay.policy_decision.verdict.clone();
-            let replayed_verdict = if replay.policy_would_allow {
-                original_verdict.clone()
-            } else {
-                original_verdict.clone()
-            };
+            let replayed_verdict = original_verdict.clone();
 
             return Ok(Json(serde_json::json!({
                 "status": "replayed",

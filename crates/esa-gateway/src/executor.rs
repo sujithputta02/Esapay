@@ -186,7 +186,7 @@ impl ActionGateway {
         }));
         if !verification.passed {
             audit = audit.with_outcome(AuditOutcome::Failed {
-                error: format!("Verification failed"),
+                error: "Verification failed".to_string(),
             });
             self.audit_store.append(audit);
 

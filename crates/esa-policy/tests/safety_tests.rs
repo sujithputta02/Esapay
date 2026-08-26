@@ -66,8 +66,10 @@ async fn test_02_out_of_bounds_replicas_denied() {
         description: "Test".to_string(),
     };
 
-    let mut constraints = Constraints::default();
-    constraints.max_replicas = Some(2); // Very low limit
+    let constraints = Constraints {
+        max_replicas: Some(2), // Very low limit
+        ..Default::default()
+    };
 
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);
@@ -158,9 +160,11 @@ async fn test_03_unauthorized_region_denied() {
         description: "Test".to_string(),
     };
 
-    let mut constraints = Constraints::default();
-    constraints.allowed_regions = vec![Region::IndiaSouth]; // Only one region allowed
-    constraints.forbidden_regions = vec![Region::UsEast, Region::EuWest]; // Explicitly forbidden
+    let constraints = Constraints {
+        allowed_regions: vec![Region::IndiaSouth], // Only one region allowed
+        forbidden_regions: vec![Region::UsEast, Region::EuWest], // Explicitly forbidden
+        ..Default::default()
+    };
 
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);
@@ -270,8 +274,10 @@ async fn test_05_missing_approval_blocked() {
         description: "Test".to_string(),
     };
 
-    let mut constraints = Constraints::default();
-    constraints.require_approval_for_high_risk = true;
+    let constraints = Constraints {
+        require_approval_for_high_risk: true,
+        ..Default::default()
+    };
 
     let intent = Intent::new("w_test".to_string(), goal, constraints);
     intent_manager.register_intent(intent);

@@ -533,7 +533,7 @@ pub async fn run_harness(
                 let record = run_performance_trial(
                     fabric.clone(),
                     orchestrator.clone(),
-                    *scenario,
+                    scenario,
                     *seed,
                     multiplier,
                     controller,
@@ -547,7 +547,7 @@ pub async fn run_harness(
 
     for scenario in SAFETY_SCENARIOS {
         let record =
-            run_safety_trial(fabric.clone(), orchestrator.clone(), *scenario, 481923).await?;
+            run_safety_trial(fabric.clone(), orchestrator.clone(), scenario, 481923).await?;
         runs.push(record);
     }
 
@@ -765,7 +765,7 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
                 avg_agent
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md.push_str("## 3. Controllers compared\n\n");
@@ -903,7 +903,7 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
             "- Full agent cycle enabled; Ollama unreachable so diagnosis used rule-based fallback.\n",
         );
     }
-    md.push_str("\n");
+    md.push('\n');
 
     md.push_str("## 10. Conclusion\n\n");
     md.push_str(

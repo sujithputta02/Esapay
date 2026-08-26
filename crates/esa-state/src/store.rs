@@ -3,7 +3,6 @@ use serde_json;
 use sqlx::{PgPool, Row};
 
 /// Persistent state store using PostgreSQL
-
 pub struct StateStore {
     pool: PgPool,
 }

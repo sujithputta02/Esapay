@@ -121,7 +121,7 @@ impl EffectMeasurement {
             (expected.latency_delta_ms, observed.latency_delta_ms)
         {
             if exp_lat != 0.0 {
-                let score = (obs_lat / exp_lat).min(1.0).max(0.0);
+                let score = (obs_lat / exp_lat).clamp(0.0, 1.0);
                 effectiveness_scores.push(score);
             }
         }
@@ -130,7 +130,7 @@ impl EffectMeasurement {
             (expected.throughput_delta_pct, observed.throughput_delta_pct)
         {
             if exp_thr != 0.0 {
-                let score = (obs_thr / exp_thr).min(1.0).max(0.0);
+                let score = (obs_thr / exp_thr).clamp(0.0, 1.0);
                 effectiveness_scores.push(score);
             }
         }
@@ -139,14 +139,14 @@ impl EffectMeasurement {
             (expected.error_rate_delta, observed.error_rate_delta)
         {
             if exp_err != 0.0 {
-                let score = (obs_err / exp_err).min(1.0).max(0.0);
+                let score = (obs_err / exp_err).clamp(0.0, 1.0);
                 effectiveness_scores.push(score);
             }
         }
 
         if let (Some(exp_queue), Some(obs_queue)) = (expected.queue_delta, observed.queue_delta) {
             if exp_queue != 0 {
-                let score = (obs_queue as f64 / exp_queue as f64).min(1.0).max(0.0);
+                let score = (obs_queue as f64 / exp_queue as f64).clamp(0.0, 1.0);
                 effectiveness_scores.push(score);
             }
         }

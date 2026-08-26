@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Diagnosis Agent - Analyzes conditions and identifies root causes
-
 pub struct DiagnosisAgent {
     ollama_client: OllamaClient,
 }

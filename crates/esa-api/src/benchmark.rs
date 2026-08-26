@@ -40,6 +40,7 @@ pub struct BenchmarkArmResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct BenchmarkComparison {
     pub scenario: String,
     pub seed: u64,
@@ -314,11 +315,7 @@ async fn run_esa_recovery_inner(
     let after = measure(&fabric);
     let p95_improvement_ms = before.avg_p95_ms - after.avg_p95_ms;
     let queue_drain = before.avg_queue_depth - after.avg_queue_depth;
-    let cycle_actions = if after.healthy_count > before.healthy_count {
-        after.healthy_count - before.healthy_count
-    } else {
-        0
-    };
+    let cycle_actions = after.healthy_count.saturating_sub(before.healthy_count);
 
     let actions = cycle_actions + extra_actions;
     let gateway_latency_ms = wall_clock_ms(gateway_start.elapsed().as_millis() as u64);
@@ -418,6 +415,7 @@ pub fn apply_scenario(
     }
 }
 
+#[allow(dead_code)]
 pub async fn run_comparison(
     fabric: Arc<StateFabric>,
     orchestrator: Arc<EsaOrchestrator>,

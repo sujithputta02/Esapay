@@ -3,7 +3,6 @@ use esa_state::StateFabric;
 use std::sync::Arc;
 
 /// Decision Verifier - Validates proposals against current runtime state
-
 pub struct DecisionVerifier {
     state_fabric: Arc<StateFabric>,
 }

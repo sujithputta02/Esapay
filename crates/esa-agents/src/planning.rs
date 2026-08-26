@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Planning Agent - Generates typed action proposals from diagnosis
-
 pub struct PlanningAgent {
     state_fabric: Arc<StateFabric>,
     intent_manager: Arc<IntentManager>,
@@ -52,15 +51,9 @@ impl PlanningAgent {
         diagnosis: &Diagnosis,
         conditions: &[Condition],
     ) -> Option<ActionProposal> {
-        if diagnosis.recommended_action.is_none() {
-            return None;
-        }
+        diagnosis.recommended_action.as_ref()?;
 
-        let workload_id = if let Some(condition) = conditions.first() {
-            condition.workload_id.clone()
-        } else {
-            return None;
-        };
+        let workload_id = conditions.first()?.workload_id.clone();
 
         let workload = self.state_fabric.get_workload(&workload_id)?;
         let current_version = self.state_fabric.current_version();
@@ -136,7 +129,7 @@ impl PlanningAgent {
                         .constraints
                         .allowed_regions
                         .iter()
-                        .find(|&&ref r| r != &workload.region)
+                        .find(|&r| r != &workload.region)
                         .cloned()
                         .or_else(|| workload.locality.fallback_regions.first().cloned())
                         .unwrap_or(Region::IndiaWest)

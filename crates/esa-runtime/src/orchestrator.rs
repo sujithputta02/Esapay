@@ -10,7 +10,6 @@ use tracing::{error, info};
 use crate::events::{RuntimeEvent, RuntimeEventHandler};
 
 /// Main ESA Runtime Orchestrator
-
 pub struct EsaOrchestrator {
     _state_fabric: Arc<StateFabric>,
     monitor_agent: Arc<MonitorAgent>,
@@ -145,7 +144,7 @@ impl EsaOrchestrator {
                 activity: format!("Analyzing root cause for {}", workload_id),
             });
 
-            let diagnosis = self.diagnosis_agent.diagnose(&workload_conditions).await?;
+            let diagnosis = self.diagnosis_agent.diagnose(workload_conditions).await?;
             info!(
                 "🧠 AI Diagnosis for {}: {:?}",
                 workload_id, diagnosis.hypothesis
@@ -159,7 +158,7 @@ impl EsaOrchestrator {
 
             let proposal = match self
                 .planning_agent
-                .plan(&diagnosis, &workload_conditions)
+                .plan(&diagnosis, workload_conditions)
                 .await
             {
                 Some(p) => p,

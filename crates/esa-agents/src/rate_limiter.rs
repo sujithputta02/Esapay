@@ -5,7 +5,6 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 /// Rate limiter for AI agent requests
-
 pub struct AgentRateLimiter {
     limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
 }

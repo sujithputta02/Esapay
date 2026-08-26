@@ -310,13 +310,12 @@ impl PolicyEngine {
             ActionType::ThrottleWorkload { .. } => 0.85,
             ActionType::RestartWorkload { graceful, risk, .. } => {
                 let base = if *graceful { 0.3 } else { 0.6 };
-                let risk_val = match risk {
+                match risk {
                     RiskLevel::Low => base,
                     RiskLevel::Medium => base + 0.2,
                     RiskLevel::High => base + 0.3,
                     RiskLevel::Critical => 1.0,
-                };
-                risk_val
+                }
             }
             ActionType::Rollback { .. } => 0.75,
         };
@@ -327,6 +326,7 @@ impl PolicyEngine {
 
 struct PolicyRule {
     id: String,
+    #[allow(clippy::type_complexity)]
     check: Box<dyn Fn(&ActionProposal, &StateFabric) -> EsaResult<PolicyVerdict> + Send + Sync>,
 }
 

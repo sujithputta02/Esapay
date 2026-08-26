@@ -4,7 +4,6 @@ use esa_core::{EsaResult, StateSnapshot, WorkloadEntity, WorkloadMetrics};
 use std::sync::Arc;
 
 /// State Fabric - In-memory state management with version tracking
-
 pub struct StateFabric {
     workloads: Arc<DashMap<String, WorkloadEntity>>,
     version: Arc<parking_lot::RwLock<u64>>,

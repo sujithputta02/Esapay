@@ -9,6 +9,12 @@ pub struct EventDeduper {
     seen: Arc<DashMap<String, DateTime<Utc>>>,
 }
 
+impl Default for EventDeduper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventDeduper {
     pub fn new() -> Self {
         Self {

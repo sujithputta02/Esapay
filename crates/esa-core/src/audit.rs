@@ -174,13 +174,13 @@ impl AuditStore {
         // Index by trace_id
         self.by_trace
             .entry(trace_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(audit_id.clone());
 
         // Index by workload_id
         self.by_workload
             .entry(workload_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(audit_id);
     }
 
@@ -224,7 +224,7 @@ impl AuditStore {
             .map(|entry| entry.value().clone())
             .collect();
 
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
         records.truncate(limit);
         records
     }

@@ -217,6 +217,12 @@ pub struct TokenCounter {
     total_output_tokens: AtomicUsize,
 }
 
+impl Default for TokenCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TokenCounter {
     pub fn new() -> Self {
         Self {
@@ -315,6 +321,7 @@ pub struct AggregatedCostMetrics {
 /// AI Cost Tracker - Comprehensive tracking of AI inference costs
 pub struct AICostTracker {
     metrics: Arc<Mutex<Vec<InferenceMetrics>>>,
+    #[allow(clippy::type_complexity)]
     cache: Arc<Mutex<HashMap<String, (String, DateTime<Utc>)>>>, // prompt_hash -> (response, timestamp)
 }
 

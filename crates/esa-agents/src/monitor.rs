@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Monitor Agent - Detects workload conditions and anomalies
-
 pub struct MonitorAgent {
     state_fabric: Arc<StateFabric>,
 }

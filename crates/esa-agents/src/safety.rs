@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 /// Safety Agent - Constitutional review of action proposals
-
 pub struct SafetyAgent;
 
 impl SafetyAgent {

@@ -178,7 +178,7 @@ impl IntentManager {
         // Index by workload
         self.by_workload
             .entry(workload_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(intent_id.clone());
 
         intent_id
@@ -443,8 +443,10 @@ mod tests {
             description: "Test".to_string(),
         };
 
-        let mut constraints = Constraints::default();
-        constraints.allowed_regions = vec![Region::IndiaSouth];
+        let constraints = Constraints {
+            allowed_regions: vec![Region::IndiaSouth],
+            ..Default::default()
+        };
 
         let intent = Intent::new("w_001".to_string(), goal, constraints);
         manager.register_intent(intent);
