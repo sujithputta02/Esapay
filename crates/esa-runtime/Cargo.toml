@@ -1,0 +1,17 @@
+[package]
+name = "esa-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+esa-core = { path = "../esa-core" }
+esa-state = { path = "../esa-state" }
+esa-agents = { path = "../esa-agents" }
+esa-policy = { path = "../esa-policy" }
+esa-gateway = { path = "../esa-gateway" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

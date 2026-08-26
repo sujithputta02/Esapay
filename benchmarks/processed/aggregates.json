@@ -1,0 +1,41 @@
+[
+  {
+    "controller": "B2_esa",
+    "run_count": 15,
+    "avg_p95_ms": 169.78413002666665,
+    "avg_recovery_ms": 1.0,
+    "avg_queue_drain_ms": 1.0,
+    "avg_max_replicas": 3.625,
+    "avg_overshoot": 0.27435064935064934,
+    "unsafe_mutations": 0,
+    "stale_rejections": 1,
+    "replay_success_rate": 1.0,
+    "rollback_success_rate": 1.0
+  },
+  {
+    "controller": "B0_rules",
+    "run_count": 8,
+    "avg_p95_ms": 254.30570796000003,
+    "avg_recovery_ms": 1.0,
+    "avg_queue_drain_ms": 1.0,
+    "avg_max_replicas": 2.875,
+    "avg_overshoot": 0.2202380952380952,
+    "unsafe_mutations": 0,
+    "stale_rejections": 0,
+    "replay_success_rate": 0.0,
+    "rollback_success_rate": 0.0
+  },
+  {
+    "controller": "B1_adaptive",
+    "run_count": 8,
+    "avg_p95_ms": 276.630938048,
+    "avg_recovery_ms": 1.0,
+    "avg_queue_drain_ms": 1.0,
+    "avg_max_replicas": 2.75,
+    "avg_overshoot": 0.17857142857142858,
+    "unsafe_mutations": 0,
+    "stale_rejections": 0,
+    "replay_success_rate": 0.0,
+    "rollback_success_rate": 0.0
+  }
+]

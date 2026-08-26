@@ -1,0 +1,22 @@
+[package]
+name = "esa-razorpay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+esa-core = { path = "../esa-core" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+governor.workspace = true
+dashmap.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"

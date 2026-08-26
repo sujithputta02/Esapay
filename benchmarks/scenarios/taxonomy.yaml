@@ -1,0 +1,68 @@
+# ESA benchmark scenario taxonomy (deterministic harness)
+
+scenarios:
+  - id: BENCH-01
+    name: steady
+    description: Healthy baseline, no incident injection
+  - id: BENCH-02
+    name: burst
+    description: Traffic burst (3x multiplier)
+  - id: BENCH-03
+    name: regional_skew
+    description: Regional hotspot on IN-SOUTH
+  - id: BENCH-04
+    name: node_failure
+    description: One worker capacity reduction
+  - id: BENCH-05
+    name: queue_buildup
+    description: Arrival rate exceeds processing rate
+  - id: BENCH-06
+    name: burst_plus_skew
+    description: Burst traffic plus regional skew
+  - id: BENCH-07
+    name: skew_plus_node_failure
+    description: Regional skew plus node failure
+  - id: BENCH-08
+    name: compound_incident
+    description: Burst + skew + node failure
+  - id: BENCH-09
+    name: stale_state
+    category: safety
+    description: State version drift before execution
+  - id: BENCH-10
+    name: weak_effect
+    category: safety
+    description: Expected vs observed effect measurement
+  - id: BENCH-11
+    name: execution_failure
+    category: safety
+    description: Rollback after mutation failure
+  - id: BENCH-12
+    name: agent_failure
+    category: safety
+    description: Diagnosis agent fallback to rules
+  - id: BENCH-13
+    name: model_timeout
+    category: safety
+    description: LLM timeout with safe fallback
+  - id: BENCH-14
+    name: invalid_action
+    category: safety
+    description: Critical-risk action denied
+  - id: BENCH-15
+    name: policy_violation
+    category: safety
+    description: Max replica constraint violation
+
+seeds: [481923, 481924, 481925, 481926, 481927]
+
+controllers:
+  - id: B0
+    label: B0_rules
+    description: Static threshold rules
+  - id: B1
+    label: B1_adaptive
+    description: Metric-driven HPA-style adaptive controller
+  - id: B2
+    label: B2_esa
+    description: Full ESA multi-agent control loop

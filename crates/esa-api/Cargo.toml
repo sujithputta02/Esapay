@@ -1,0 +1,38 @@
+[package]
+name = "esa-api"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "esa-api"
+path = "src/main.rs"
+
+[[bin]]
+name = "esa-benchmark"
+path = "src/bin/esa-benchmark.rs"
+
+[dependencies]
+esa-core = { path = "../esa-core" }
+esa-state = { path = "../esa-state" }
+esa-agents = { path = "../esa-agents" }
+esa-runtime = { path = "../esa-runtime" }
+esa-telemetry = { path = "../esa-telemetry" }
+esa-razorpay = { path = "../esa-razorpay" }
+esa-gateway = { path = "../esa-gateway" }
+esa-policy = { path = "../esa-policy" }
+
+tokio.workspace = true
+axum = { workspace = true, features = ["ws"] }
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+dotenvy.workspace = true
+futures = "0.3"
+chrono.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true

@@ -1,0 +1,29 @@
+# Secrets — never commit real keys
+.env
+.env.local
+.env.*.local
+
+# Rust
+target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (frontend / payment-simulator)
+node_modules/
+dist/
+.next/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
