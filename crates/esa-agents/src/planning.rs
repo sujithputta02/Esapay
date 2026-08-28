@@ -81,10 +81,14 @@ impl PlanningAgent {
             });
 
         let action = match diagnosis.recommended_action.as_deref() {
-            Some("CREATE_REPLICA") if workload.replication.current_replicas >= workload.replication.max_replicas => {
+            Some("CREATE_REPLICA")
+                if workload.replication.current_replicas >= workload.replication.max_replicas =>
+            {
                 info!(
                     "⚠️ Workload {} is at max replicas ({}/{}). Switching proposal to SHIFT_ROUTE.",
-                    workload_id, workload.replication.current_replicas, workload.replication.max_replicas
+                    workload_id,
+                    workload.replication.current_replicas,
+                    workload.replication.max_replicas
                 );
 
                 let target_region = workload
@@ -99,7 +103,10 @@ impl PlanningAgent {
                     from_region: workload.region.clone(),
                     to_region: target_region,
                     traffic_percentage: 35.0,
-                    reason: format!("Capacity limit reached ({}/{} pods). Shifting load to fallback region.", workload.replication.current_replicas, workload.replication.max_replicas),
+                    reason: format!(
+                        "Capacity limit reached ({}/{} pods). Shifting load to fallback region.",
+                        workload.replication.current_replicas, workload.replication.max_replicas
+                    ),
                     expected_effect: ExpectedEffect {
                         latency_delta_ms: Some(-60.0),
                         throughput_delta_pct: None,

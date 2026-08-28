@@ -9,7 +9,6 @@ fn test_tamper_detection_and_integrity_verification() {
     let store = Arc::new(AuditStore::new());
 
     // 1. Create a chain of 4 decisions
-    let mut last_audit_id = String::new();
     for i in 1..=4 {
         let proposal = ActionProposal::new(
             ActionType::CreateReplica {
@@ -42,8 +41,7 @@ fn test_tamper_detection_and_integrity_verification() {
         )
         .with_outcome(AuditOutcome::Success);
 
-        let appended = store.append(record);
-        last_audit_id = appended.audit_id.clone();
+        store.append(record);
     }
 
     // 2. Untampered chain verifies 100% valid
@@ -68,7 +66,13 @@ fn test_tamper_detection_and_integrity_verification() {
 
     // The store should detect the payload modification because current_hash != calculate_hash()
     let tampered_verification = store.verify_chain();
-    assert!(!tampered_verification.is_valid, "Tampered chain must fail cryptographic verification");
+    assert!(
+        !tampered_verification.is_valid,
+        "Tampered chain must fail cryptographic verification"
+    );
     assert!(!tampered_verification.violations.is_empty());
-    assert!(tampered_verification.violations.iter().any(|v| v.contains("Payload integrity violation")));
+    assert!(tampered_verification
+        .violations
+        .iter()
+        .any(|v| v.contains("Payload integrity violation")));
 }

@@ -1,6 +1,6 @@
 use esa_core::{
-    ActionOutcome, ActionProposal, ActionType, AgentId, AuditOutcome, AuditRecord, AuditStore,
-    ExpectedEffect, Region, RiskLevel, GENESIS_HASH,
+    ActionProposal, ActionType, AgentId, AuditOutcome, AuditRecord, AuditStore, ExpectedEffect,
+    Region, RiskLevel, GENESIS_HASH,
 };
 use std::sync::Arc;
 

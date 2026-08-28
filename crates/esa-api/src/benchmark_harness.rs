@@ -184,7 +184,9 @@ fn record_from_arm(
             p99_ms: peak_p99_ms(fabric),
             peak_latency_ms: peak_p99_ms(fabric),
             time_to_detect_ms: arm.detection_latency_ms,
-            time_to_first_action_ms: arm.detection_latency_ms + arm.decision_latency_ms + arm.execution_latency_ms,
+            time_to_first_action_ms: arm.detection_latency_ms
+                + arm.decision_latency_ms
+                + arm.execution_latency_ms,
             time_to_recovery_ms: arm.duration_ms,
             queue_peak: before_peak_queue,
             queue_drain_ms: arm.stabilization_latency_ms,
@@ -722,7 +724,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
     ));
 
     md.push_str("## 2. Baseline & Controller Definitions\n\n");
-    md.push_str("| Controller | Type | Detection Mechanism | Decision Logic | Governance Boundaries |\n");
+    md.push_str(
+        "| Controller | Type | Detection Mechanism | Decision Logic | Governance Boundaries |\n",
+    );
     md.push_str("|---|---|---|---|---|\n");
     md.push_str("| **B0_rules** | Static Automation | 15.0s Scrape Interval | Fixed thresholds (P95>250ms, queue>1000) → 1-step scaling | Unbounded manual rules |\n");
     md.push_str("| **B1_adaptive** | Metric Adaptive | 15.0s Scrape Interval | Target-latency PID ratio scaling (target 200ms) + regional traffic shift | Rate limits only |\n");
@@ -756,9 +760,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
             fmt_recovery(b1.avg_recovery_ms),
             fmt_recovery(b2.avg_recovery_ms)
         ));
-        md.push_str(&format!(
-            "| **Time Above SLA (P95>250ms)** | 16.5 s | 14.8 s | **4.1 s** | **72.3% less time violating SLA** |\n"
-        ));
+        md.push_str(
+            "| **Time Above SLA (P95>250ms)** | 16.5 s | 14.8 s | **4.1 s** | **72.3% less time violating SLA** |\n",
+        );
         md.push_str(&format!(
             "| Max Replicas (avg) | {} | {} | {} | Intent-guided temporary capacity scaling |\n",
             fmt(b0.avg_max_replicas),
@@ -771,9 +775,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
             fmt(b1.avg_overshoot),
             fmt(b2.avg_overshoot)
         ));
-        md.push_str(&format!(
-            "| Excess Capacity-Seconds | 18.2 rep-s | 16.4 rep-s | 24.8 rep-s | Quantified capacity cost for SLA defense |\n\n"
-        ));
+        md.push_str(
+            "| Excess Capacity-Seconds | 18.2 rep-s | 16.4 rep-s | 24.8 rep-s | Quantified capacity cost for SLA defense |\n\n",
+        );
 
         md.push_str("## 4. Multi-Agent Latency Decomposition (~1.8s Cycle)\n\n");
         md.push_str("| Agent Stage | Average Latency | Responsibility | Governance Boundary |\n");
@@ -789,9 +793,9 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
             "- **Tail Latency Dominance:** ESA achieves **{:.0} ms P95** vs **{:.0} ms** (B0) and **{:.0} ms** (B1), delivering a **{:.1}% - {:.1}% advantage** across 5 distinct workload seeds.\n",
             b2_p95, b0_p95, b1_p95, p95_imp_b0, p95_imp_b1
         ));
-        md.push_str(&format!(
-            "- **SLA Defense Advantage:** ESA reduced total time violating SLA (P95>250ms) by **72.3%** (4.1s vs 14.8s/16.5s) via rapid streaming detection and multi-dimensional actions.\n"
-        ));
+        md.push_str(
+            "- **SLA Defense Advantage:** ESA reduced total time violating SLA (P95>250ms) by **72.3%** (4.1s vs 14.8s/16.5s) via rapid streaming detection and multi-dimensional actions.\n",
+        );
         md.push_str(&format!(
             "- **Recovery Tradeoff:** ESA currently trades additional reasoning deliberation (~1.8s) and temporary capacity (3.5 vs 2.8-2.9 replicas, +8.4 excess rep-s) for event detection (250ms vs 15.0s polling), faster queue stabilization (2.3s vs 7.2s/9.6s), and strictly lower tail latency, with a total recovery time of **{:.1} s** (vs **{:.1} s** B1 and **{:.1} s** B0).\n",
             b2_rec / 1000.0, b1_rec / 1000.0, b0_rec / 1000.0
@@ -803,14 +807,18 @@ pub fn generate_markdown_report(result: &HarnessResult) -> String {
     md.push_str("| Stress Category | Total Attempts | Actions Blocked | Unsafe Mutations | Audit Verification |\n");
     md.push_str("|---|---|---|---|---|\n");
     md.push_str("| **Stale State OCC Race Conflicts** | 100 | 100 / 100 | **0** | `StaleState` verdict recorded |\n");
-    md.push_str("| **Out-of-Bounds Replicas (>max)** | 100 | 100 / 100 | **0** | Policy limit enforced |\n");
+    md.push_str(
+        "| **Out-of-Bounds Replicas (>max)** | 100 | 100 / 100 | **0** | Policy limit enforced |\n",
+    );
     md.push_str("| **Unauthorized Region Migrations** | 100 | 100 / 100 | **0** | Data residency policy enforced |\n");
     md.push_str("| **Unapproved Critical Risk Actions** | 100 | 100 / 100 | **0** | Human approval gate required |\n");
     md.push_str("| **Malformed & Unsigned Payloads** | 100 | 100 / 100 | **0** | Action IR schema validation |\n");
     md.push_str("| **Snapshot Rollback Invocations** | 50 | 50 / 50 restored | **0** | Validated compensating rollback behavior |\n");
     md.push_str("| **LLM Model Failure / Timeouts** | 50 | 50 / 50 safe | **0** | 0 unsafe mutations (rule fallback) |\n");
     md.push_str("| **Total Safety Trials** | **650** | **650 / 650** | **0 / 650 (0.00% error)** | **SHA-256 Chain 100% Valid** |\n\n");
-    md.push_str("No unsafe mutations were observed across 650 predefined adversarial attempts.\n\n");
+    md.push_str(
+        "No unsafe mutations were observed across 650 predefined adversarial attempts.\n\n",
+    );
 
     md.push_str("## 7. Ablation Study Summary\n\n");
     md.push_str("| Variant | Description | P95 Latency | Agent Deliberation | Deterministic Admission | Unsafe Mutations | Stale Rejections | Effect Detection |\n");
@@ -932,8 +940,8 @@ pub async fn run_ablation_study(
         },
         AblationVariantResult {
             variant: "Full_ESA".to_string(),
-            description:
-                "Full 4-Agent collaborative loop with OCC and Effect Verification".to_string(),
+            description: "Full 4-Agent collaborative loop with OCC and Effect Verification"
+                .to_string(),
             avg_p95_ms: full_esa_perf.performance.p95_ms,
             avg_recovery_ms: full_esa_perf.performance.time_to_recovery_ms as f64,
             unsafe_mutations: 0,
@@ -956,8 +964,7 @@ pub async fn run_ablation_study(
         },
         AblationVariantResult {
             variant: "ESA_no_effect_verification".to_string(),
-            description: "ESA without post-execution effect verification & auto-replan"
-                .to_string(),
+            description: "ESA without post-execution effect verification & auto-replan".to_string(),
             avg_p95_ms: full_esa_perf.performance.p95_ms + 28.0,
             avg_recovery_ms: full_esa_perf.performance.time_to_recovery_ms as f64 + 35.0,
             unsafe_mutations: 0,

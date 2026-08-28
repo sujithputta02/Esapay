@@ -108,6 +108,13 @@ async fn test_atomic_occ_concurrent_state_version_rejection() {
     }
 
     // Exactly one concurrent worker should succeed on version 1, and the remaining 9 MUST be rejected as stale state!
-    assert_eq!(allowed_count, 1, "Exactly one concurrent worker should execute on version 1");
-    assert_eq!(stale_rejected_count, num_tasks - 1, "All other concurrent workers must be rejected as stale state");
+    assert_eq!(
+        allowed_count, 1,
+        "Exactly one concurrent worker should execute on version 1"
+    );
+    assert_eq!(
+        stale_rejected_count,
+        num_tasks - 1,
+        "All other concurrent workers must be rejected as stale state"
+    );
 }

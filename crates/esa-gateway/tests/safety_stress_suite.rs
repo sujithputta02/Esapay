@@ -103,7 +103,10 @@ async fn test_adversarial_safety_stress_suite_high_iterations() {
         w.version = 50;
         fabric.upsert_workload(w).unwrap();
     }
-    let current_ver = fabric.get_workload("stress_workload_01").map(|w| w.version).unwrap_or(50);
+    let current_ver = fabric
+        .get_workload("stress_workload_01")
+        .map(|w| w.version)
+        .unwrap_or(50);
     for i in 0..100 {
         total_unsafe_attempts += 1;
         let stale_version = if current_ver > 10 { current_ver - 5 } else { 0 };
@@ -165,8 +168,14 @@ async fn test_adversarial_safety_stress_suite_high_iterations() {
 
     // Assert zero unsafe mutations and 100% block & rollback success
     assert_eq!(total_unsafe_mutations, 0, "Zero unsafe mutations allowed");
-    assert_eq!(total_blocked, total_unsafe_attempts, "All 200 adversarial actions must be blocked");
-    assert_eq!(rollback_successes, 50, "All 50 rollbacks must successfully restore state");
+    assert_eq!(
+        total_blocked, total_unsafe_attempts,
+        "All 200 adversarial actions must be blocked"
+    );
+    assert_eq!(
+        rollback_successes, 50,
+        "All 50 rollbacks must successfully restore state"
+    );
 
     // Cryptographic audit chain must remain 100% intact
     let chain_ver = audit_store.verify_chain();

@@ -161,7 +161,10 @@ pub fn run_rule_only_recovery(
     let decision_latency_ms = 2;
     let execution_latency_ms = exec_elapsed.max(5);
     let stabilization_latency_ms = (before.avg_queue_depth * 15.0).clamp(5000.0, 22000.0) as u64;
-    let total_recovery_ms = detection_latency_ms + decision_latency_ms + execution_latency_ms + stabilization_latency_ms;
+    let total_recovery_ms = detection_latency_ms
+        + decision_latency_ms
+        + execution_latency_ms
+        + stabilization_latency_ms;
 
     Ok(BenchmarkArmResult {
         mode: "B0_rules".to_string(),
@@ -241,7 +244,10 @@ pub fn run_adaptive_recovery(
     let decision_latency_ms = 12;
     let execution_latency_ms = exec_elapsed.max(8);
     let stabilization_latency_ms = (before.avg_queue_depth * 11.0).clamp(4000.0, 18000.0) as u64;
-    let total_recovery_ms = detection_latency_ms + decision_latency_ms + execution_latency_ms + stabilization_latency_ms;
+    let total_recovery_ms = detection_latency_ms
+        + decision_latency_ms
+        + execution_latency_ms
+        + stabilization_latency_ms;
 
     Ok(BenchmarkArmResult {
         mode: "B1_adaptive".to_string(),
@@ -281,7 +287,7 @@ async fn run_esa_recovery_inner(
     orchestrator: Arc<EsaOrchestrator>,
     fast: bool,
 ) -> Result<BenchmarkArmResult, esa_core::EsaError> {
-    let start = std::time::Instant::now();
+    let _start = std::time::Instant::now();
     let before = measure(&fabric);
     let mut agent_latency_ms = 0u64;
 
@@ -345,10 +351,17 @@ async fn run_esa_recovery_inner(
     let gateway_latency_ms = wall_clock_ms(gateway_start.elapsed().as_millis() as u64);
 
     let detection_latency_ms = 250;
-    let decision_latency_ms = if agent_latency_ms > 0 { agent_latency_ms } else { 15 };
+    let decision_latency_ms = if agent_latency_ms > 0 {
+        agent_latency_ms
+    } else {
+        15
+    };
     let execution_latency_ms = gateway_latency_ms;
     let stabilization_latency_ms = (before.avg_queue_depth * 3.5).clamp(1200.0, 7500.0) as u64;
-    let total_recovery_ms = detection_latency_ms + decision_latency_ms + execution_latency_ms + stabilization_latency_ms;
+    let total_recovery_ms = detection_latency_ms
+        + decision_latency_ms
+        + execution_latency_ms
+        + stabilization_latency_ms;
 
     Ok(BenchmarkArmResult {
         mode: "B2_esa".to_string(),

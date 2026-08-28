@@ -171,7 +171,7 @@ impl AuditRecord {
         hasher.update(b"|");
         hasher.update(self.workload_id.as_bytes());
         hasher.update(b"|");
-        hasher.update(&self.state_version.to_be_bytes());
+        hasher.update(self.state_version.to_be_bytes());
         hasher.update(b"|");
         hasher.update(self.proposal.proposal_id.as_bytes());
         hasher.update(b"|");
@@ -331,7 +331,10 @@ impl AuditStore {
 
                 expected_prev_hash = record.current_hash.clone();
             } else {
-                violations.push(format!("Missing record for index {} (id {})", idx, audit_id));
+                violations.push(format!(
+                    "Missing record for index {} (id {})",
+                    idx, audit_id
+                ));
             }
         }
 

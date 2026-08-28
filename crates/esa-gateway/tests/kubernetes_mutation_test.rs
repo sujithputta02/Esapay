@@ -110,8 +110,15 @@ async fn test_live_kubernetes_mutation_and_rollback() {
         .output()
         .unwrap();
     let replicas_str = String::from_utf8_lossy(&k8s_out.stdout);
-    println!("Live Kubernetes deployment spec.replicas = {}", replicas_str);
-    assert_eq!(replicas_str.trim(), "3", "Kubernetes cluster must reflect 3 replicas");
+    println!(
+        "Live Kubernetes deployment spec.replicas = {}",
+        replicas_str
+    );
+    assert_eq!(
+        replicas_str.trim(),
+        "3",
+        "Kubernetes cluster must reflect 3 replicas"
+    );
 
     // 4. Test rollback scaling back to 2 replicas
     let snapshot_version = 1;
@@ -125,7 +132,10 @@ async fn test_live_kubernetes_mutation_and_rollback() {
         vec!["rollback_proof".to_string()],
     );
 
-    let rollback_result = gateway.execute_with_verdict(&rollback_proposal).await.unwrap();
+    let rollback_result = gateway
+        .execute_with_verdict(&rollback_proposal)
+        .await
+        .unwrap();
     assert!(rollback_result.is_success());
 
     let rolled_back_out = std::process::Command::new("kubectl")
@@ -141,6 +151,13 @@ async fn test_live_kubernetes_mutation_and_rollback() {
         .output()
         .unwrap();
     let rolled_back_str = String::from_utf8_lossy(&rolled_back_out.stdout);
-    println!("Live Kubernetes deployment after rollback = {}", rolled_back_str);
-    assert_eq!(rolled_back_str.trim(), "2", "Kubernetes cluster must rollback to 2 replicas");
+    println!(
+        "Live Kubernetes deployment after rollback = {}",
+        rolled_back_str
+    );
+    assert_eq!(
+        rolled_back_str.trim(),
+        "2",
+        "Kubernetes cluster must rollback to 2 replicas"
+    );
 }

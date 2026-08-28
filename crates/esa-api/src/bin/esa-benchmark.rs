@@ -67,15 +67,16 @@ async fn main() -> anyhow::Result<()> {
 
     if run_ablations {
         println!("Running ESA Ablation Study...");
-        let ablations = benchmark_harness::run_ablation_study(
-            state_fabric.clone(),
-            orchestrator.clone(),
-        )
-        .await?;
+        let ablations =
+            benchmark_harness::run_ablation_study(state_fabric.clone(), orchestrator.clone())
+                .await?;
         std::fs::create_dir_all(output.join("processed"))?;
         let ab_json = serde_json::to_string_pretty(&ablations)?;
         std::fs::write(output.join("processed/ablations.json"), &ab_json)?;
-        println!("Ablation study complete: {} variants evaluated", ablations.variants.len());
+        println!(
+            "Ablation study complete: {} variants evaluated",
+            ablations.variants.len()
+        );
         for v in &ablations.variants {
             println!("  - {:25} | P95: {:5.1}ms | Recov: {:5.1}ms | Unsafe: {} | StaleRej: {} | Effect: {:.0}%",
                 v.variant, v.avg_p95_ms, v.avg_recovery_ms, v.unsafe_mutations, v.stale_rejections, v.effect_detection_rate * 100.0);

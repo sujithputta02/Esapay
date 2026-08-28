@@ -30,7 +30,10 @@
 //! └────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::types::{LocalityPreference, PaymentMethodClass, Region, ReplicationPolicy, WorkloadEntity, WorkloadMetrics, WorkloadState};
+use crate::types::{
+    LocalityPreference, PaymentMethodClass, Region, ReplicationPolicy, WorkloadEntity,
+    WorkloadMetrics, WorkloadState,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
