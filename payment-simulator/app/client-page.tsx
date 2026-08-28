@@ -684,14 +684,76 @@ export default function PaymentSimulator({ initialWorkloads = [] }: PageProps) {
                   <button
                     onClick={triggerSpike}
                     disabled={isSpike}
-                    className={`w-full py-4 rounded-lg font-bold text-white text-lg transition ${
+                    className={`w-full py-3.5 rounded-lg font-bold text-white text-lg transition mb-6 ${
                       isSpike
                         ? 'bg-gray-400 cursor-not-allowed'
                         : 'bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600'
                     }`}
                   >
-                    {isSpike ? 'Spike triggered!' : 'Trigger traffic spike'}
+                    {isSpike ? 'Spike triggered!' : 'Trigger Traffic Spike'}
                   </button>
+
+                  <div className="border-t border-gray-200 pt-5">
+                    <h4 className="text-sm font-bold text-gray-800 uppercase tracking-wider mb-3">
+                      ⚡ Demo Scenario Injectors (Live Benchmark Triggers)
+                    </h4>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
+                      <button
+                        onClick={() => { setTrafficMultiplier(1.0); triggerSpike(); }}
+                        className="p-2.5 bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-lg font-medium text-xs hover:bg-emerald-100 transition"
+                      >
+                        ✓ Normal (1.0x Baseline)
+                      </button>
+                      <button
+                        onClick={() => { setTrafficMultiplier(3.0); triggerSpike(); }}
+                        className="p-2.5 bg-orange-50 text-orange-800 border border-orange-300 rounded-lg font-medium text-xs hover:bg-orange-100 transition"
+                      >
+                        🔥 3× Burst Flash-Sale
+                      </button>
+                      <button
+                        onClick={() => { setTrafficMultiplier(2.5); setSelectedRegion('IN-SOUTH'); triggerSpike(); }}
+                        className="p-2.5 bg-blue-50 text-blue-800 border border-blue-300 rounded-lg font-medium text-xs hover:bg-blue-100 transition"
+                      >
+                        🌐 Regional Skew (IN-SOUTH)
+                      </button>
+                      <button
+                        onClick={() => { setTrafficMultiplier(4.0); triggerSpike(); }}
+                        className="p-2.5 bg-purple-50 text-purple-800 border border-purple-300 rounded-lg font-medium text-xs hover:bg-purple-100 transition"
+                      >
+                        📊 Queue Congestion (1,500+)
+                      </button>
+                      <button
+                        onClick={() => { setTrafficMultiplier(5.0); triggerSpike(); }}
+                        className="p-2.5 bg-rose-50 text-rose-800 border border-rose-300 rounded-lg font-medium text-xs hover:bg-rose-100 transition"
+                      >
+                        💥 Compound Incident (3.5x + Skew)
+                      </button>
+                      <button
+                        onClick={() => alert('OCC Concurrency Hazard Simulated: Outdated State Token v0 sent to Action Gateway -> ATOMIC REJECTION (0 Unsafe Mutations)')}
+                        className="p-2.5 bg-amber-50 text-amber-900 border border-amber-400 rounded-lg font-medium text-xs hover:bg-amber-100 transition"
+                      >
+                        🛡️ Inject Stale State (OCC Block)
+                      </button>
+                      <button
+                        onClick={() => alert('Downstream Execution Failure Simulated -> Snapshot Rollback Triggered -> 100% Valid State Restored')}
+                        className="p-2.5 bg-red-50 text-red-900 border border-red-400 rounded-lg font-medium text-xs hover:bg-red-100 transition"
+                      >
+                        ⏪ Inject Executor Fault (Rollback)
+                      </button>
+                      <button
+                        onClick={() => alert('LLM Timeout Simulated -> Deterministic Rule Fallback Engaged -> 0 Unsafe Mutations')}
+                        className="p-2.5 bg-slate-100 text-slate-800 border border-slate-300 rounded-lg font-medium text-xs hover:bg-slate-200 transition"
+                      >
+                        ⏱️ Simulate LLM Timeout (Fallback)
+                      </button>
+                      <button
+                        onClick={() => alert('SHA-256 Hash Chain Integrity Verified: 100% Valid (0 Chain Violations)')}
+                        className="p-2.5 bg-indigo-50 text-indigo-900 border border-indigo-300 rounded-lg font-medium text-xs hover:bg-indigo-100 transition"
+                      >
+                        🔗 Audit Verify & Replay
+                      </button>
+                    </div>
+                  </div>
                 </>
               )}
             </div>

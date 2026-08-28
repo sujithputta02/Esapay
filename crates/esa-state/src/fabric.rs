@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use esa_core::{EsaResult, StateSnapshot, WorkloadEntity, WorkloadMetrics};
 use std::sync::Arc;
 
-/// State Fabric - In-memory state management with version tracking
+/// State Fabric - In-memory state management with atomic OCC version tracking
 pub struct StateFabric {
     workloads: Arc<DashMap<String, WorkloadEntity>>,
     version: Arc<parking_lot::RwLock<u64>>,
@@ -27,6 +27,39 @@ impl StateFabric {
         let mut version = self.version.write();
         *version += 1;
         *version
+    }
+
+    /// Compare and set version atomically.
+    /// If current_version == expected, bumps version and returns Ok(new_version).
+    /// If current_version != expected, returns Err((expected, current_version)).
+    pub fn compare_and_set_version(&self, expected_version: u64) -> Result<u64, (u64, u64)> {
+        let mut version_guard = self.version.write();
+        if *version_guard == expected_version {
+            *version_guard += 1;
+            Ok(*version_guard)
+        } else {
+            Err((expected_version, *version_guard))
+        }
+    }
+
+    /// Execute a state mutation atomically at commit-time checking that state version matches expected_version.
+    pub fn execute_atomic_mutation<F, R>(
+        &self,
+        expected_version: u64,
+        mutate: F,
+    ) -> Result<(R, u64), (u64, u64)>
+    where
+        F: FnOnce(&DashMap<String, WorkloadEntity>) -> R,
+    {
+        let mut version_guard = self.version.write();
+        if *version_guard != expected_version {
+            return Err((expected_version, *version_guard));
+        }
+
+        let res = mutate(&self.workloads);
+        *version_guard += 1;
+        let new_ver = *version_guard;
+        Ok((res, new_ver))
     }
 
     pub fn upsert_workload(&self, workload: WorkloadEntity) -> EsaResult<()> {
@@ -127,6 +160,19 @@ mod tests {
         let v1 = fabric.increment_version();
         assert_eq!(v1, 1);
         assert_eq!(fabric.current_version(), 1);
+    }
+
+    #[test]
+    fn test_compare_and_set_version() {
+        let fabric = StateFabric::new();
+        assert_eq!(fabric.current_version(), 0);
+
+        let cas_ok = fabric.compare_and_set_version(0);
+        assert_eq!(cas_ok, Ok(1));
+        assert_eq!(fabric.current_version(), 1);
+
+        let cas_err = fabric.compare_and_set_version(0);
+        assert_eq!(cas_err, Err((0, 1)));
     }
 
     #[test]

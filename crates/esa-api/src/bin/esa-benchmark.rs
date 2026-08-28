@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
 
     let quick = env::args().any(|a| a == "--quick");
     let smoke_full = env::args().any(|a| a == "--smoke-full");
+    let run_ablations = env::args().any(|a| a == "--ablations");
     let output = env::args()
         .position(|a| a == "--output")
         .and_then(|i| env::args().nth(i + 1))
@@ -63,6 +64,25 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&audit_store),
         None,
     ));
+
+    if run_ablations {
+        println!("Running ESA Ablation Study...");
+        let ablations =
+            benchmark_harness::run_ablation_study(state_fabric.clone(), orchestrator.clone())
+                .await?;
+        std::fs::create_dir_all(output.join("processed"))?;
+        let ab_json = serde_json::to_string_pretty(&ablations)?;
+        std::fs::write(output.join("processed/ablations.json"), &ab_json)?;
+        println!(
+            "Ablation study complete: {} variants evaluated",
+            ablations.variants.len()
+        );
+        for v in &ablations.variants {
+            println!("  - {:25} | P95: {:5.1}ms | Recov: {:5.1}ms | Unsafe: {} | StaleRej: {} | Effect: {:.0}%",
+                v.variant, v.avg_p95_ms, v.avg_recovery_ms, v.unsafe_mutations, v.stale_rejections, v.effect_detection_rate * 100.0);
+        }
+        return Ok(());
+    }
 
     let result = benchmark_harness::run_harness(
         state_fabric,

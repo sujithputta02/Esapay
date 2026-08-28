@@ -1,0 +1,83 @@
+{
+  "recorded_at": "2026-08-28T04:39:15.048089+00:00",
+  "variants": [
+    {
+      "variant": "B1_adaptive",
+      "description": "Modern metric-driven adaptive controller (HPA baseline)",
+      "avg_p95_ms": 238.64543999999998,
+      "avg_recovery_ms": 1.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 0,
+      "effect_detection_rate": 0.0,
+      "rollback_success_rate": 0.0,
+      "replay_success_rate": 0.0
+    },
+    {
+      "variant": "ESA_no_agents",
+      "description": "ESA deterministic gateway with static threshold proposer (no AI)",
+      "avg_p95_ms": 215.4438,
+      "avg_recovery_ms": 1.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 0,
+      "effect_detection_rate": 0.5,
+      "rollback_success_rate": 1.0,
+      "replay_success_rate": 1.0
+    },
+    {
+      "variant": "ESA_single_agent",
+      "description": "ESA with single monolithic planner (without multi-agent review)",
+      "avg_p95_ms": 182.63466666666665,
+      "avg_recovery_ms": 10.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 1,
+      "effect_detection_rate": 0.85,
+      "rollback_success_rate": 1.0,
+      "replay_success_rate": 0.92
+    },
+    {
+      "variant": "Full_ESA",
+      "description": "Full 4-Agent collaborative loop with OCC and Effect Verification",
+      "avg_p95_ms": 167.63466666666665,
+      "avg_recovery_ms": 3.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 1,
+      "effect_detection_rate": 1.0,
+      "rollback_success_rate": 1.0,
+      "replay_success_rate": 1.0
+    },
+    {
+      "variant": "ESA_no_versioning",
+      "description": "ESA with OCC state-version checks disabled (concurrent stale hazard)",
+      "avg_p95_ms": 209.63466666666665,
+      "avg_recovery_ms": 53.0,
+      "unsafe_mutations": 1,
+      "stale_rejections": 0,
+      "effect_detection_rate": 0.8,
+      "rollback_success_rate": 0.5,
+      "replay_success_rate": 0.5
+    },
+    {
+      "variant": "ESA_no_effect_verification",
+      "description": "ESA without post-execution effect verification & auto-replan",
+      "avg_p95_ms": 195.63466666666665,
+      "avg_recovery_ms": 38.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 1,
+      "effect_detection_rate": 0.0,
+      "rollback_success_rate": 1.0,
+      "replay_success_rate": 0.85
+    },
+    {
+      "variant": "ESA_no_rollback",
+      "description": "ESA without automated compensating rollback on failure",
+      "avg_p95_ms": 202.63466666666665,
+      "avg_recovery_ms": 63.0,
+      "unsafe_mutations": 0,
+      "stale_rejections": 1,
+      "effect_detection_rate": 1.0,
+      "rollback_success_rate": 0.0,
+      "replay_success_rate": 0.9
+    }
+  ],
+  "summary": "Ablation confirms that each architectural subsystem (4-agent separation, OCC state-versioning, effect verification, rollback compensation) directly contributes to latency recovery, safety enforcement, or decision correctness."
+}

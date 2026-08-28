@@ -203,6 +203,45 @@ impl ActionGateway {
             });
         }
 
+        // Commit-time Atomic Optimistic Concurrency Control (OCC) check
+        let proposed_state_version = match &proposal.action {
+            ActionType::CreateReplica { state_version, .. } => Some(*state_version),
+            ActionType::ShiftRoute { state_version, .. } => Some(*state_version),
+            ActionType::MigratePartition { state_version, .. } => Some(*state_version),
+            ActionType::ThrottleWorkload { state_version, .. } => Some(*state_version),
+            ActionType::RestartWorkload { .. } => None,
+            ActionType::Rollback { .. } => None,
+        };
+
+        if let Some(expected_ver) = proposed_state_version {
+            let current_ver = self.state_fabric.current_version();
+            if current_ver != expected_ver {
+                let reason = format!(
+                    "Commit-time OCC check failed: proposed_version={}, current_version={}",
+                    expected_ver, current_ver
+                );
+                warn!("🔄 Stale state rejected at commit boundary: {}", reason);
+                audit = audit.with_outcome(AuditOutcome::Denied {
+                    reason: reason.clone(),
+                });
+                self.audit_store.append(audit);
+
+                let execution = ActionExecution::new(proposal, serde_json::json!({}));
+                return Ok(GatewayResult {
+                    verdict: PolicyVerdict::StaleState {
+                        current_version: current_ver,
+                        proposed_version: expected_ver,
+                        drift: current_ver.saturating_sub(expected_ver),
+                    },
+                    execution: Some(execution),
+                    decision_id,
+                    trace_id,
+                    processing_time_ms: start_time.elapsed().as_millis() as u64,
+                    explanation: reason,
+                });
+            }
+        }
+
         // Snapshot for rollback (PRD §24)
         let snapshot_version = self
             .state_fabric
@@ -358,12 +397,47 @@ impl ActionGateway {
             workload.metrics.p99_latency_ms *= load_factor;
             workload.metrics.queue_depth =
                 ((workload.metrics.queue_depth as f64) * load_factor).round() as u64;
+
+            Self::sync_to_k8s_deployment(workload_id, workload.replication.current_replicas);
         } else {
             self.apply_expected_effect(&mut workload.metrics, expected);
         }
 
         self.finalize_workload_recovery(&mut workload);
         self.commit_workload_change(workload, &before, expected)
+    }
+
+    fn sync_to_k8s_deployment(workload_id: &str, replicas: u32) {
+        if std::env::var("KUBERNETES_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true)
+        {
+            let deployment_name = match workload_id {
+                "payment-processor" | "w_payment_01" | "payment-service" => "payment-processor",
+                "fraud-detector" | "w_fraud_01" | "fraud-service" => "fraud-detector",
+                "ledger-service" | "w_ledger_01" => "ledger-service",
+                other => other,
+            };
+            let output = std::process::Command::new("kubectl")
+                .args([
+                    "scale",
+                    "deployment",
+                    deployment_name,
+                    &format!("--replicas={}", replicas),
+                    "-n",
+                    "esa-workloads",
+                ])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    tracing::info!(
+                        "☸️ Kubernetes deployment {} scaled to {} replicas",
+                        deployment_name,
+                        replicas
+                    );
+                }
+            }
+        }
     }
 
     fn apply_rollback(
@@ -382,6 +456,11 @@ impl ActionGateway {
         let _before_summary = self.summarize_workloads();
         self.state_fabric.restore_snapshot(version)?;
         let after_summary = self.summarize_workloads();
+
+        // Sync restored workload replica counts back to Kubernetes
+        for w in self.state_fabric.list_workloads() {
+            Self::sync_to_k8s_deployment(&w.workload_id, w.replication.current_replicas);
+        }
 
         let expected = ExpectedEffect {
             latency_delta_ms: None,

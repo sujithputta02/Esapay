@@ -57,7 +57,7 @@ impl DiagnosisAgent {
     }
 
     fn build_diagnosis_prompt(&self, conditions: &[Condition]) -> String {
-        let conditions_json = serde_json::to_string_pretty(conditions).unwrap();
+        let conditions_json = serde_json::to_string(conditions).unwrap_or_default();
 
         format!(
             r#"You are a payment infrastructure diagnosis agent. Analyze the following conditions and identify the root cause.

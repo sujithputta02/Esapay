@@ -13,3 +13,5 @@ anyhow.workspace = true
 validator.workspace = true
 sqlx.workspace = true
 dashmap = "6.0"
+sha2 = "0.10"
+parking_lot.workspace = true

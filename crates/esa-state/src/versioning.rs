@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Version tracking for optimistic concurrency control
-
+/// Version tracking for optimistic concurrency control (OCC)
 #[derive(Clone)]
 pub struct VersionTracker {
     current: Arc<AtomicU64>,
@@ -25,6 +24,11 @@ impl VersionTracker {
 
     pub fn set(&self, version: u64) {
         self.current.store(version, Ordering::SeqCst);
+    }
+
+    pub fn compare_and_swap(&self, expected: u64, new: u64) -> Result<u64, u64> {
+        self.current
+            .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
     }
 
     pub fn is_stale(&self, version: u64, allowed_drift: u64) -> bool {
@@ -54,6 +58,20 @@ mod tests {
 
         let v2 = tracker.increment();
         assert_eq!(v2, 2);
+    }
+
+    #[test]
+    fn test_compare_and_swap() {
+        let tracker = VersionTracker::new();
+        tracker.set(10);
+
+        assert!(tracker.compare_and_swap(10, 11).is_ok());
+        assert_eq!(tracker.current(), 11);
+
+        // Stale CAS attempt fails
+        let fail = tracker.compare_and_swap(10, 12);
+        assert!(fail.is_err());
+        assert_eq!(fail.unwrap_err(), 11);
     }
 
     #[test]

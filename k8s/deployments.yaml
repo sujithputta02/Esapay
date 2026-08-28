@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: esa-workloads
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-processor
+  namespace: esa-workloads
+  labels:
+    app: payment-processor
+    tier: payment-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-processor
+  template:
+    metadata:
+      labels:
+        app: payment-processor
+    spec:
+      containers:
+      - name: processor
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-detector
+  namespace: esa-workloads
+  labels:
+    app: fraud-detector
+    tier: payment-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fraud-detector
+  template:
+    metadata:
+      labels:
+        app: fraud-detector
+    spec:
+      containers:
+      - name: detector
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-service
+  namespace: esa-workloads
+  labels:
+    app: ledger-service
+    tier: payment-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ledger-service
+  template:
+    metadata:
+      labels:
+        app: ledger-service
+    spec:
+      containers:
+      - name: ledger
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+          requests:
+            cpu: "50m"
+            memory: "64Mi"

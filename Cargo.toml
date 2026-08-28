@@ -71,6 +71,9 @@ governor = "0.6"
 dashmap = "5.5"
 parking_lot = "0.12"
 
+# Cryptography & Hashing
+sha2 = "0.10"
+
 [profile.dev]
 opt-level = 0
 debug = true
