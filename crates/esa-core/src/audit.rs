@@ -1,10 +1,14 @@
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::actions::{ActionExecution, ActionProposal, EffectMeasurement};
 
-/// Comprehensive audit trail for decision lineage and replay
+/// Comprehensive audit trail for decision lineage and replay with tamper-evident SHA-256 hash chaining
+pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
@@ -38,6 +42,10 @@ pub struct AuditRecord {
     // Metadata
     pub timestamp: DateTime<Utc>,
     pub agent_reasoning: AgentReasoningTrace,
+
+    // Tamper-evident cryptographic hash chain
+    pub previous_hash: String,
+    pub current_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,7 +90,7 @@ impl AuditRecord {
         proposal: ActionProposal,
         before_state: serde_json::Value,
     ) -> Self {
-        Self {
+        let mut record = Self {
             audit_id: Uuid::new_v4().to_string(),
             trace_id,
             decision_id,
@@ -107,7 +115,11 @@ impl AuditRecord {
                 evidence_refs: Vec::new(),
                 confidence_scores: Vec::new(),
             },
-        }
+            previous_hash: GENESIS_HASH.to_string(),
+            current_hash: String::new(),
+        };
+        record.current_hash = record.calculate_hash(&record.previous_hash);
+        record
     }
 
     pub fn with_policy_result(mut self, policy_result: serde_json::Value) -> Self {
@@ -145,31 +157,87 @@ impl AuditRecord {
         self.rollback_status = Some(status);
         self
     }
+
+    /// Calculate deterministic SHA-256 hash of this record given a previous hash
+    pub fn calculate_hash(&self, previous_hash: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(previous_hash.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.audit_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.decision_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.trace_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.workload_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(&self.state_version.to_be_bytes());
+        hasher.update(b"|");
+        hasher.update(self.proposal.proposal_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(format!("{:?}", self.final_outcome).as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.timestamp.to_rfc3339().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.policy_result.to_string().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.verification_result.to_string().as_bytes());
+
+        format!("{:x}", hasher.finalize())
+    }
 }
 
-/// Audit Store - Append-only audit trail storage
+/// Audit Store - Append-only tamper-evident audit trail storage
 pub struct AuditStore {
-    records: std::sync::Arc<dashmap::DashMap<String, AuditRecord>>,
-    by_trace: std::sync::Arc<dashmap::DashMap<String, Vec<String>>>,
-    by_workload: std::sync::Arc<dashmap::DashMap<String, Vec<String>>>,
+    records: Arc<dashmap::DashMap<String, AuditRecord>>,
+    by_trace: Arc<dashmap::DashMap<String, Vec<String>>>,
+    by_workload: Arc<dashmap::DashMap<String, Vec<String>>>,
+    ordered_ids: Arc<RwLock<Vec<String>>>,
+    last_hash: Arc<RwLock<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainVerificationResult {
+    pub is_valid: bool,
+    pub total_records: usize,
+    pub genesis_hash: String,
+    pub latest_hash: String,
+    pub violations: Vec<String>,
 }
 
 impl AuditStore {
     pub fn new() -> Self {
         Self {
-            records: std::sync::Arc::new(dashmap::DashMap::new()),
-            by_trace: std::sync::Arc::new(dashmap::DashMap::new()),
-            by_workload: std::sync::Arc::new(dashmap::DashMap::new()),
+            records: Arc::new(dashmap::DashMap::new()),
+            by_trace: Arc::new(dashmap::DashMap::new()),
+            by_workload: Arc::new(dashmap::DashMap::new()),
+            ordered_ids: Arc::new(RwLock::new(Vec::new())),
+            last_hash: Arc::new(RwLock::new(GENESIS_HASH.to_string())),
         }
     }
 
-    pub fn append(&self, record: AuditRecord) {
+    /// Append record atomically with SHA-256 hash chaining
+    pub fn append(&self, mut record: AuditRecord) -> AuditRecord {
+        let mut last_hash_guard = self.last_hash.write();
+        let mut ordered_guard = self.ordered_ids.write();
+
+        let previous_hash = last_hash_guard.clone();
+        let current_hash = record.calculate_hash(&previous_hash);
+
+        record.previous_hash = previous_hash;
+        record.current_hash = current_hash.clone();
+
+        *last_hash_guard = current_hash;
+
         let audit_id = record.audit_id.clone();
         let trace_id = record.trace_id.clone();
         let workload_id = record.workload_id.clone();
 
+        // Store ordered ID
+        ordered_guard.push(audit_id.clone());
+
         // Store the record
-        self.records.insert(audit_id.clone(), record);
+        self.records.insert(audit_id.clone(), record.clone());
 
         // Index by trace_id
         self.by_trace
@@ -182,6 +250,8 @@ impl AuditStore {
             .entry(workload_id)
             .or_default()
             .push(audit_id);
+
+        record
     }
 
     pub fn get(&self, audit_id: &str) -> Option<AuditRecord> {
@@ -218,19 +288,66 @@ impl AuditStore {
     }
 
     pub fn list_recent(&self, limit: usize) -> Vec<AuditRecord> {
-        let mut records: Vec<AuditRecord> = self
-            .records
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-
-        records.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
-        records.truncate(limit);
+        let ordered = self.ordered_ids.read();
+        let mut records = Vec::new();
+        for id in ordered.iter().rev().take(limit) {
+            if let Some(rec) = self.records.get(id) {
+                records.push(rec.clone());
+            }
+        }
         records
     }
 
     pub fn count(&self) -> usize {
         self.records.len()
+    }
+
+    pub fn latest_hash(&self) -> String {
+        self.last_hash.read().clone()
+    }
+
+    /// Verify cryptographic integrity of the entire audit hash chain
+    pub fn verify_chain(&self) -> ChainVerificationResult {
+        let ordered = self.ordered_ids.read();
+        let mut violations = Vec::new();
+        let mut expected_prev_hash = GENESIS_HASH.to_string();
+
+        for (idx, audit_id) in ordered.iter().enumerate() {
+            if let Some(record) = self.records.get(audit_id) {
+                if record.previous_hash != expected_prev_hash {
+                    violations.push(format!(
+                        "Chain link broken at index {}: record {} previous_hash {} != expected {}",
+                        idx, audit_id, record.previous_hash, expected_prev_hash
+                    ));
+                }
+
+                let recalculated = record.calculate_hash(&record.previous_hash);
+                if record.current_hash != recalculated {
+                    violations.push(format!(
+                        "Payload integrity violation at index {}: record {} current_hash {} != recalculated {}",
+                        idx, audit_id, record.current_hash, recalculated
+                    ));
+                }
+
+                expected_prev_hash = record.current_hash.clone();
+            } else {
+                violations.push(format!("Missing record for index {} (id {})", idx, audit_id));
+            }
+        }
+
+        let is_valid = violations.is_empty();
+        ChainVerificationResult {
+            is_valid,
+            total_records: ordered.len(),
+            genesis_hash: GENESIS_HASH.to_string(),
+            latest_hash: expected_prev_hash,
+            violations,
+        }
+    }
+
+    /// Insert or update a raw record without recomputing hashes (simulates raw DB tampering for testing)
+    pub fn update_raw_for_testing(&self, record: AuditRecord) {
+        self.records.insert(record.audit_id.clone(), record);
     }
 }
 
@@ -261,9 +378,11 @@ pub struct ReplayResult {
     pub policy_would_allow: bool,
     pub verification_would_pass: bool,
 
-    // Context
+    // Context & Proofs
     pub evidence: Vec<String>,
     pub reasoning_summary: String,
+    pub previous_hash: String,
+    pub current_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,11 +401,11 @@ pub struct VerificationReplayDecision {
 }
 
 pub struct DecisionReplayer {
-    audit_store: std::sync::Arc<AuditStore>,
+    audit_store: Arc<AuditStore>,
 }
 
 impl DecisionReplayer {
-    pub fn new(audit_store: std::sync::Arc<AuditStore>) -> Self {
+    pub fn new(audit_store: Arc<AuditStore>) -> Self {
         Self { audit_store }
     }
 
@@ -331,11 +450,12 @@ impl DecisionReplayer {
             verification_would_pass: self.would_verification_pass(&record),
             evidence: record.agent_reasoning.evidence_refs.clone(),
             reasoning_summary,
+            previous_hash: record.previous_hash.clone(),
+            current_hash: record.current_hash.clone(),
         })
     }
 
     fn reconstruct_policy_decision(&self, record: &AuditRecord) -> PolicyReplayDecision {
-        // Extract policy result from stored JSON
         let verdict = record
             .policy_result
             .get("verdict")
@@ -525,14 +645,14 @@ mod tests {
     use crate::ExpectedEffect;
 
     #[test]
-    fn test_audit_store() {
+    fn test_audit_store_with_hash_chain() {
         let store = AuditStore::new();
 
-        let proposal = ActionProposal::new(
+        let proposal1 = ActionProposal::new(
             ActionType::CreateReplica {
                 workload_id: "w_001".to_string(),
                 target_region: Region::IndiaSouth,
-                reason: "Test".to_string(),
+                reason: "Test 1".to_string(),
                 expected_effect: ExpectedEffect {
                     latency_delta_ms: Some(-50.0),
                     throughput_delta_pct: None,
@@ -549,25 +669,63 @@ mod tests {
             vec!["evidence_1".to_string()],
         );
 
-        let record = AuditRecord::new(
+        let record1 = AuditRecord::new(
             "trace_001".to_string(),
             "decision_001".to_string(),
             "w_001".to_string(),
             1,
-            proposal,
+            proposal1,
             serde_json::json!({}),
         );
 
-        let audit_id = record.audit_id.clone();
-        store.append(record);
+        let appended1 = store.append(record1);
+        assert_eq!(appended1.previous_hash, GENESIS_HASH);
+        assert!(!appended1.current_hash.is_empty());
 
-        assert!(store.get(&audit_id).is_some());
-        assert_eq!(store.count(), 1);
+        let proposal2 = ActionProposal::new(
+            ActionType::ThrottleWorkload {
+                workload_id: "w_001".to_string(),
+                throttle_percentage: 20.0,
+                reason: "Test 2".to_string(),
+                expected_effect: ExpectedEffect {
+                    latency_delta_ms: Some(-20.0),
+                    throughput_delta_pct: None,
+                    error_rate_delta: None,
+                    queue_delta: None,
+                    description: "Throttle effect".to_string(),
+                },
+                confidence: 0.85,
+                risk: RiskLevel::Low,
+                state_version: 2,
+                rollback_enabled: true,
+            },
+            AgentId::Planning,
+            vec!["evidence_2".to_string()],
+        );
+
+        let record2 = AuditRecord::new(
+            "trace_002".to_string(),
+            "decision_002".to_string(),
+            "w_001".to_string(),
+            2,
+            proposal2,
+            serde_json::json!({}),
+        );
+
+        let appended2 = store.append(record2);
+        assert_eq!(appended2.previous_hash, appended1.current_hash);
+
+        // Verify chain integrity
+        let verification = store.verify_chain();
+        assert!(verification.is_valid);
+        assert_eq!(verification.total_records, 2);
+        assert_eq!(verification.latest_hash, appended2.current_hash);
+        assert!(verification.violations.is_empty());
     }
 
     #[test]
     fn test_decision_replay() {
-        let store = std::sync::Arc::new(AuditStore::new());
+        let store = Arc::new(AuditStore::new());
         let replayer = DecisionReplayer::new(store.clone());
 
         let proposal = ActionProposal::new(
@@ -616,5 +774,7 @@ mod tests {
         let result = replay_result.unwrap();
         assert_eq!(result.policy_decision.verdict, "ALLOWED");
         assert!(result.can_replay);
+        assert_eq!(result.previous_hash, GENESIS_HASH);
+        assert!(!result.current_hash.is_empty());
     }
 }

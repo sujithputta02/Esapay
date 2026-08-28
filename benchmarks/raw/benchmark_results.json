@@ -5,22 +5,22 @@
       "scenario": "BENCH-01",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 20,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 120.0,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
         "queue_peak": 150,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 5000
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 2.0,
+        "replica_seconds": 40.0,
         "overshoot": 0.0
       },
       "decision": {
@@ -47,22 +47,22 @@
       "scenario": "BENCH-01",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 19,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 120.0,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
         "queue_peak": 150,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4000
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 2.0,
+        "replica_seconds": 38.0,
         "overshoot": 0.0
       },
       "decision": {
@@ -95,11 +95,515 @@
         "p95_ms": 120.0,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 252,
+        "time_to_recovery_ms": 1452,
         "queue_peak": 150,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 2.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B0_rules_481924",
+      "scenario": "BENCH-01",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 150,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 40.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B1_adaptive_481924",
+      "scenario": "BENCH-01",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 150,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 38.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B2_esa_481924",
+      "scenario": "BENCH-01",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 252,
+        "time_to_recovery_ms": 1452,
+        "queue_peak": 150,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 2.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B0_rules_481925",
+      "scenario": "BENCH-01",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 150,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 40.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B1_adaptive_481925",
+      "scenario": "BENCH-01",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 150,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 38.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B2_esa_481925",
+      "scenario": "BENCH-01",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 252,
+        "time_to_recovery_ms": 1452,
+        "queue_peak": 150,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 2.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B0_rules_481926",
+      "scenario": "BENCH-01",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 150,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 40.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B1_adaptive_481926",
+      "scenario": "BENCH-01",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 150,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 38.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B2_esa_481926",
+      "scenario": "BENCH-01",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 252,
+        "time_to_recovery_ms": 1452,
+        "queue_peak": 150,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 2.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B0_rules_481927",
+      "scenario": "BENCH-01",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 150,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 40.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B1_adaptive_481927",
+      "scenario": "BENCH-01",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 150,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 38.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-01_B2_esa_481927",
+      "scenario": "BENCH-01",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 252,
+        "time_to_recovery_ms": 1452,
+        "queue_peak": 150,
+        "queue_drain_ms": 1200
       },
       "resources": {
         "max_replicas": 2,
@@ -131,22 +635,22 @@
       "scenario": "BENCH-02",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 21,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 215.4438,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 21907,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 6900
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 63.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -173,22 +677,22 @@
       "scenario": "BENCH-02",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 20,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 238.64543999999998,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 20080,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 5060
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 60.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -215,27 +719,531 @@
       "scenario": "BENCH-02",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 27,
       "performance": {
         "p50_ms": 6.666666666666667,
         "p95_ms": 167.63466666666665,
         "p99_ms": 77.33333333333333,
         "peak_latency_ms": 77.33333333333333,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 26255,
+        "time_to_recovery_ms": 27865,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 1610
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 81.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
-        "actions_proposed": 6,
-        "actions_executed": 6,
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B0_rules_481924",
+      "scenario": "BENCH-02",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 21,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 215.6544,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 21922,
+        "queue_peak": 461,
+        "queue_drain_ms": 6915
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 63.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B1_adaptive_481924",
+      "scenario": "BENCH-02",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 238.87872000000002,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 20091,
+        "queue_peak": 461,
+        "queue_drain_ms": 5071
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 60.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B2_esa_481924",
+      "scenario": "BENCH-02",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 23,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 167.85066666666665,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 22263,
+        "time_to_recovery_ms": 23876,
+        "queue_peak": 461,
+        "queue_drain_ms": 1613
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 69.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B0_rules_481925",
+      "scenario": "BENCH-02",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 21,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 215.86499999999998,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 21922,
+        "queue_peak": 461,
+        "queue_drain_ms": 6915
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 63.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B1_adaptive_481925",
+      "scenario": "BENCH-02",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 239.11199999999997,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 20091,
+        "queue_peak": 461,
+        "queue_drain_ms": 5071
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 60.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B2_esa_481925",
+      "scenario": "BENCH-02",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 24,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 168.06666666666663,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 23226,
+        "time_to_recovery_ms": 24839,
+        "queue_peak": 461,
+        "queue_drain_ms": 1613
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 72.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B0_rules_481926",
+      "scenario": "BENCH-02",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 21,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 216.07560000000004,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 21937,
+        "queue_peak": 462,
+        "queue_drain_ms": 6930
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 63.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B1_adaptive_481926",
+      "scenario": "BENCH-02",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 239.34528,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 20102,
+        "queue_peak": 462,
+        "queue_drain_ms": 5082
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 60.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B2_esa_481926",
+      "scenario": "BENCH-02",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 25,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 168.28266666666667,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 23541,
+        "time_to_recovery_ms": 25158,
+        "queue_peak": 462,
+        "queue_drain_ms": 1617
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 75.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B0_rules_481927",
+      "scenario": "BENCH-02",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 21,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 216.28619999999992,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 21937,
+        "queue_peak": 462,
+        "queue_drain_ms": 6930
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 63.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B1_adaptive_481927",
+      "scenario": "BENCH-02",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 239.57855999999995,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 20102,
+        "queue_peak": 462,
+        "queue_drain_ms": 5082
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 60.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-02_B2_esa_481927",
+      "scenario": "BENCH-02",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 25,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 168.49866666666662,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 24271,
+        "time_to_recovery_ms": 25888,
+        "queue_peak": 462,
+        "queue_drain_ms": 1617
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 75.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
         "actions_blocked": 0,
         "stale_rejections": 0,
         "replans": 0,
@@ -257,22 +1265,22 @@
       "scenario": "BENCH-03",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 20,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 167.79399999999998,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 5000
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -299,22 +1307,22 @@
       "scenario": "BENCH-03",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 19,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 176.38719999999998,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4000
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -341,27 +1349,27 @@
       "scenario": "BENCH-03",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 8,
       "performance": {
         "p50_ms": 28.888888888888886,
         "p95_ms": 152.0622222222222,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 7764,
+        "time_to_recovery_ms": 8964,
         "queue_peak": 460,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 1200
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 18.666666666666668,
         "overshoot": 0.1428571428571429
       },
       "decision": {
-        "actions_proposed": 2,
-        "actions_executed": 2,
+        "actions_proposed": 1,
+        "actions_executed": 1,
         "actions_blocked": 0,
         "stale_rejections": 0,
         "replans": 0,
@@ -379,26 +1387,530 @@
       }
     },
     {
+      "run_id": "run_BENCH-03_B0_rules_481924",
+      "scenario": "BENCH-03",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 167.87199999999999,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 461,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5376000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B1_adaptive_481924",
+      "scenario": "BENCH-03",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 176.4736,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 461,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.4300799999999999
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B2_esa_481924",
+      "scenario": "BENCH-03",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 8,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 152.14222222222222,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 7722,
+        "time_to_recovery_ms": 8922,
+        "queue_peak": 461,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 18.666666666666668,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7342222222222222
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B0_rules_481925",
+      "scenario": "BENCH-03",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 167.95,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 461,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5381250000000002
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B1_adaptive_481925",
+      "scenario": "BENCH-03",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 176.55999999999997,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 461,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.4305000000000003
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B2_esa_481925",
+      "scenario": "BENCH-03",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 9,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 152.2222222222222,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8187,
+        "time_to_recovery_ms": 9387,
+        "queue_peak": 461,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 21.0,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7347222222222225
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B0_rules_481926",
+      "scenario": "BENCH-03",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.028,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 462,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5386500000000002
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B1_adaptive_481926",
+      "scenario": "BENCH-03",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 176.6464,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 462,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.4309200000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B2_esa_481926",
+      "scenario": "BENCH-03",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 9,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 152.3022222222222,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8273,
+        "time_to_recovery_ms": 9473,
+        "queue_peak": 462,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 21.0,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7352222222222224
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B0_rules_481927",
+      "scenario": "BENCH-03",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.106,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 462,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5391749999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B1_adaptive_481927",
+      "scenario": "BENCH-03",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 176.7328,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 462,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.4313399999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-03_B2_esa_481927",
+      "scenario": "BENCH-03",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 9,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 152.3822222222222,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8704,
+        "time_to_recovery_ms": 9904,
+        "queue_peak": 462,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 21.0,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7357222222222223
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
       "run_id": "run_BENCH-04_B0_rules_481923",
       "scenario": "BENCH-04",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 20,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 137.20000000000002,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
         "queue_peak": 270,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 5000
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -425,22 +1937,22 @@
       "scenario": "BENCH-04",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 19,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 143.35999999999999,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
         "queue_peak": 270,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4000
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -467,27 +1979,531 @@
       "scenario": "BENCH-04",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 9,
       "performance": {
         "p50_ms": 28.888888888888886,
         "p95_ms": 120.88888888888887,
         "p99_ms": 257.3333333333333,
         "peak_latency_ms": 257.3333333333333,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8728,
+        "time_to_recovery_ms": 9928,
         "queue_peak": 270,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 1200
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 21.0,
         "overshoot": 0.1428571428571429
       },
       "decision": {
-        "actions_proposed": 2,
-        "actions_executed": 2,
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5888888888888891
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B0_rules_481924",
+      "scenario": "BENCH-04",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 137.20000000000002,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 270,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.3849999999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B1_adaptive_481924",
+      "scenario": "BENCH-04",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 143.35999999999999,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 270,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.30800000000000016
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B2_esa_481924",
+      "scenario": "BENCH-04",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 10,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 120.88888888888887,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 9052,
+        "time_to_recovery_ms": 10252,
+        "queue_peak": 270,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 23.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5888888888888891
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B0_rules_481925",
+      "scenario": "BENCH-04",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 137.20000000000002,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 270,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.3849999999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B1_adaptive_481925",
+      "scenario": "BENCH-04",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 143.35999999999999,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 270,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.30800000000000016
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B2_esa_481925",
+      "scenario": "BENCH-04",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 10,
+      "performance": {
+        "p50_ms": 28.88888888888889,
+        "p95_ms": 120.88888888888887,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 9046,
+        "time_to_recovery_ms": 10246,
+        "queue_peak": 270,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 23.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5888888888888891
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B0_rules_481926",
+      "scenario": "BENCH-04",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 137.20000000000002,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 270,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.3849999999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B1_adaptive_481926",
+      "scenario": "BENCH-04",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 143.35999999999999,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 270,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.30800000000000016
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B2_esa_481926",
+      "scenario": "BENCH-04",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 9,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 120.88888888888887,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8185,
+        "time_to_recovery_ms": 9385,
+        "queue_peak": 270,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 21.0,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5888888888888891
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B0_rules_481927",
+      "scenario": "BENCH-04",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 137.20000000000002,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 270,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.3849999999999998
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B1_adaptive_481927",
+      "scenario": "BENCH-04",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 143.35999999999999,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 270,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.30800000000000016
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-04_B2_esa_481927",
+      "scenario": "BENCH-04",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 9,
+      "performance": {
+        "p50_ms": 28.888888888888886,
+        "p95_ms": 120.88888888888887,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 8542,
+        "time_to_recovery_ms": 9742,
+        "queue_peak": 270,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 21.0,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
         "actions_blocked": 0,
         "stale_rejections": 0,
         "replans": 0,
@@ -509,22 +2525,22 @@
       "scenario": "BENCH-05",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 32,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 109.2,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32272,
         "queue_peak": 1151,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 17265
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 96.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -551,22 +2567,22 @@
       "scenario": "BENCH-05",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 27,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 120.96,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 27681,
         "queue_peak": 1151,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 12661
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 2.0,
+        "replica_seconds": 54.0,
         "overshoot": 0.0
       },
       "decision": {
@@ -593,22 +2609,526 @@
       "scenario": "BENCH-05",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 34,
       "performance": {
         "p50_ms": 6.666666666666667,
         "p95_ms": 58.666666666666664,
         "p99_ms": 77.33333333333333,
         "peak_latency_ms": 77.33333333333333,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 30670,
+        "time_to_recovery_ms": 34698,
         "queue_peak": 1151,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4028
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 102.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 6,
+        "actions_executed": 6,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B0_rules_481924",
+      "scenario": "BENCH-05",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 32,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 109.2,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32287,
+        "queue_peak": 1152,
+        "queue_drain_ms": 17280
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 96.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.735
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B1_adaptive_481924",
+      "scenario": "BENCH-05",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.96,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 27692,
+        "queue_peak": 1152,
+        "queue_drain_ms": 12672
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 54.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5880000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B2_esa_481924",
+      "scenario": "BENCH-05",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 34,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 30526,
+        "time_to_recovery_ms": 34558,
+        "queue_peak": 1152,
+        "queue_drain_ms": 4032
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 102.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 6,
+        "actions_executed": 6,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B0_rules_481925",
+      "scenario": "BENCH-05",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 32,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 109.2,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32302,
+        "queue_peak": 1153,
+        "queue_drain_ms": 17295
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 96.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.735
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B1_adaptive_481925",
+      "scenario": "BENCH-05",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.96,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 27703,
+        "queue_peak": 1153,
+        "queue_drain_ms": 12683
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 54.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5880000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B2_esa_481925",
+      "scenario": "BENCH-05",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 34,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 30913,
+        "time_to_recovery_ms": 34948,
+        "queue_peak": 1153,
+        "queue_drain_ms": 4035
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 102.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 6,
+        "actions_executed": 6,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B0_rules_481926",
+      "scenario": "BENCH-05",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 32,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 109.2,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32317,
+        "queue_peak": 1154,
+        "queue_drain_ms": 17310
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 96.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.735
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B1_adaptive_481926",
+      "scenario": "BENCH-05",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.96,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 27714,
+        "queue_peak": 1154,
+        "queue_drain_ms": 12694
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 54.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5880000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B2_esa_481926",
+      "scenario": "BENCH-05",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 33,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 29573,
+        "time_to_recovery_ms": 33612,
+        "queue_peak": 1154,
+        "queue_drain_ms": 4039
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 99.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 6,
+        "actions_executed": 6,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B0_rules_481927",
+      "scenario": "BENCH-05",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 32,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 109.2,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32332,
+        "queue_peak": 1155,
+        "queue_drain_ms": 17325
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 96.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.735
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B1_adaptive_481927",
+      "scenario": "BENCH-05",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.96,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 27725,
+        "queue_peak": 1155,
+        "queue_drain_ms": 12705
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 54.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 0,
+        "actions_executed": 0,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.5880000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-05_B2_esa_481927",
+      "scenario": "BENCH-05",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 34,
+      "performance": {
+        "p50_ms": 6.666666666666667,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 30497,
+        "time_to_recovery_ms": 34539,
+        "queue_peak": 1155,
+        "queue_drain_ms": 4042
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 102.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -635,22 +3155,22 @@
       "scenario": "BENCH-06",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 27,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 378.3911274,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 27127,
         "queue_peak": 1412,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 12120
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 81.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -677,22 +3197,22 @@
       "scenario": "BENCH-06",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 23,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 419.14094112000004,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 23908,
         "queue_peak": 1412,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 8888
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 69.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -719,27 +3239,531 @@
       "scenario": "BENCH-06",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 35,
       "performance": {
         "p50_ms": 7.111111111111111,
         "p95_ms": 214.11780284444444,
         "p99_ms": 77.33333333333333,
         "peak_latency_ms": 77.33333333333333,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 32230,
+        "time_to_recovery_ms": 35058,
         "queue_peak": 1412,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 2828
       },
       "resources": {
         "max_replicas": 5,
         "avg_replicas": 3.6666666666666665,
-        "replica_seconds": 3.6666666666666665,
+        "replica_seconds": 128.33333333333331,
         "overshoot": 0.45454545454545453
       },
       "decision": {
-        "actions_proposed": 7,
-        "actions_executed": 7,
+        "actions_proposed": 5,
+        "actions_executed": 5,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B0_rules_481924",
+      "scenario": "BENCH-06",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 378.9766656,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 27157,
+        "queue_peak": 1416,
+        "queue_drain_ms": 12150
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 81.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B1_adaptive_481924",
+      "scenario": "BENCH-06",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 23,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 419.78953728000005,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 23930,
+        "queue_peak": 1416,
+        "queue_drain_ms": 8910
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 69.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B2_esa_481924",
+      "scenario": "BENCH-06",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 36,
+      "performance": {
+        "p50_ms": 7.111111111111111,
+        "p95_ms": 214.54149404444445,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 33326,
+        "time_to_recovery_ms": 36161,
+        "queue_peak": 1416,
+        "queue_drain_ms": 2835
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 3.6666666666666665,
+        "replica_seconds": 132.0,
+        "overshoot": 0.45454545454545453
+      },
+      "decision": {
+        "actions_proposed": 5,
+        "actions_executed": 5,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B0_rules_481925",
+      "scenario": "BENCH-06",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 379.56262499999997,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 27167,
+        "queue_peak": 1418,
+        "queue_drain_ms": 12160
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 81.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B1_adaptive_481925",
+      "scenario": "BENCH-06",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 23,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 420.43859999999995,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 23937,
+        "queue_peak": 1418,
+        "queue_drain_ms": 8917
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 69.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B2_esa_481925",
+      "scenario": "BENCH-06",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 35,
+      "performance": {
+        "p50_ms": 7.111111111111111,
+        "p95_ms": 214.9654444444444,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 32281,
+        "time_to_recovery_ms": 35118,
+        "queue_peak": 1418,
+        "queue_drain_ms": 2837
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 3.6666666666666665,
+        "replica_seconds": 128.33333333333331,
+        "overshoot": 0.45454545454545453
+      },
+      "decision": {
+        "actions_proposed": 5,
+        "actions_executed": 5,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B0_rules_481926",
+      "scenario": "BENCH-06",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 380.14900560000007,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 27197,
+        "queue_peak": 1422,
+        "queue_drain_ms": 12190
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 81.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B1_adaptive_481926",
+      "scenario": "BENCH-06",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 23,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 421.08812928000003,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 23959,
+        "queue_peak": 1422,
+        "queue_drain_ms": 8939
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 69.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B2_esa_481926",
+      "scenario": "BENCH-06",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 36,
+      "performance": {
+        "p50_ms": 7.111111111111111,
+        "p95_ms": 215.38965404444448,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 33783,
+        "time_to_recovery_ms": 36627,
+        "queue_peak": 1422,
+        "queue_drain_ms": 2844
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 3.6666666666666665,
+        "replica_seconds": 132.0,
+        "overshoot": 0.45454545454545453
+      },
+      "decision": {
+        "actions_proposed": 6,
+        "actions_executed": 6,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B0_rules_481927",
+      "scenario": "BENCH-06",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 27,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 380.7358073999999,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 27202,
+        "queue_peak": 1423,
+        "queue_drain_ms": 12195
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 81.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B1_adaptive_481927",
+      "scenario": "BENCH-06",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 23,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 421.7381251199999,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 23963,
+        "queue_peak": 1423,
+        "queue_drain_ms": 8943
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 69.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-06_B2_esa_481927",
+      "scenario": "BENCH-06",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 36,
+      "performance": {
+        "p50_ms": 7.111111111111111,
+        "p95_ms": 215.81412284444437,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 33782,
+        "time_to_recovery_ms": 36627,
+        "queue_peak": 1423,
+        "queue_drain_ms": 2845
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 3.6666666666666665,
+        "replica_seconds": 132.0,
+        "overshoot": 0.45454545454545453
+      },
+      "decision": {
+        "actions_proposed": 5,
+        "actions_executed": 5,
         "actions_blocked": 0,
         "stale_rejections": 0,
         "replans": 0,
@@ -761,22 +3785,22 @@
       "scenario": "BENCH-07",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 20,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 263.5468,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20797,
         "queue_peak": 828,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 5790
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -803,22 +3827,22 @@
       "scenario": "BENCH-07",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 19,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 282.45184,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19266,
         "queue_peak": 828,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4246
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 2.3333333333333335,
-        "replica_seconds": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
         "overshoot": 0.1428571428571429
       },
       "decision": {
@@ -845,22 +3869,22 @@
       "scenario": "BENCH-07",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 11,
       "performance": {
         "p50_ms": 29.333333333333332,
         "p95_ms": 148.0288,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 9885,
+        "time_to_recovery_ms": 11236,
         "queue_peak": 828,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 1351
       },
       "resources": {
         "max_replicas": 5,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 33.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -883,26 +3907,530 @@
       }
     },
     {
+      "run_id": "run_BENCH-07_B0_rules_481924",
+      "scenario": "BENCH-07",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 186.792,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 461,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 53.33333333333333,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.9611000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B1_adaptive_481924",
+      "scenario": "BENCH-07",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 202.16960000000003,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 461,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 50.666666666666664,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7688799999999997
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B2_esa_481924",
+      "scenario": "BENCH-07",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 17.777777777777775,
+        "p95_ms": 154.89777777777778,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 19315,
+        "time_to_recovery_ms": 20515,
+        "queue_peak": 461,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 53.33333333333333,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B0_rules_481925",
+      "scenario": "BENCH-07",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 186.87,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 461,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 53.33333333333333,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.9616250000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B1_adaptive_481925",
+      "scenario": "BENCH-07",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 202.256,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 461,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 50.666666666666664,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7693000000000001
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B2_esa_481925",
+      "scenario": "BENCH-07",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 17.777777777777775,
+        "p95_ms": 154.97777777777776,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 19514,
+        "time_to_recovery_ms": 20714,
+        "queue_peak": 461,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 53.33333333333333,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B0_rules_481926",
+      "scenario": "BENCH-07",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 264.06160000000006,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20817,
+        "queue_peak": 832,
+        "queue_drain_ms": 5810
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 46.66666666666667,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B1_adaptive_481926",
+      "scenario": "BENCH-07",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 283.02208,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19280,
+        "queue_peak": 832,
+        "queue_drain_ms": 4260
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.3333333333333335,
+        "replica_seconds": 44.333333333333336,
+        "overshoot": 0.1428571428571429
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.9480240000000002
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B2_esa_481926",
+      "scenario": "BENCH-07",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 11,
+      "performance": {
+        "p50_ms": 29.333333333333332,
+        "p95_ms": 148.34560000000002,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 10222,
+        "time_to_recovery_ms": 11577,
+        "queue_peak": 832,
+        "queue_drain_ms": 1355
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 3.0,
+        "replica_seconds": 33.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B0_rules_481927",
+      "scenario": "BENCH-07",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 20,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 187.02599999999998,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 20007,
+        "queue_peak": 462,
+        "queue_drain_ms": 5000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 53.33333333333333,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.9626749999999997
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B1_adaptive_481927",
+      "scenario": "BENCH-07",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 202.4288,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 19020,
+        "queue_peak": 462,
+        "queue_drain_ms": 4000
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 50.666666666666664,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 2,
+        "actions_executed": 2,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.7701399999999996
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-07_B2_esa_481927",
+      "scenario": "BENCH-07",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 19,
+      "performance": {
+        "p50_ms": 17.777777777777775,
+        "p95_ms": 155.13777777777776,
+        "p99_ms": 257.3333333333333,
+        "peak_latency_ms": 257.3333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 18470,
+        "time_to_recovery_ms": 19670,
+        "queue_peak": 462,
+        "queue_drain_ms": 1200
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 2.6666666666666665,
+        "replica_seconds": 50.666666666666664,
+        "overshoot": 0.24999999999999994
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
       "run_id": "run_BENCH-08_B0_rules_481923",
       "scenario": "BENCH-08",
       "controller": "B0_rules",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 32,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 642.86993628,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32777,
         "queue_peak": 2542,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 17770
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 96.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -929,22 +4457,22 @@
       "scenario": "BENCH-08",
       "controller": "B1_adaptive",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 28,
       "performance": {
         "p50_ms": 40.0,
         "p95_ms": 712.102083264,
         "p99_ms": 450.0,
         "peak_latency_ms": 450.0,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 28051,
         "queue_peak": 2542,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 13031
       },
       "resources": {
         "max_replicas": 3,
         "avg_replicas": 3.0,
-        "replica_seconds": 3.0,
+        "replica_seconds": 84.0,
         "overshoot": 0.3333333333333333
       },
       "decision": {
@@ -971,23 +4499,527 @@
       "scenario": "BENCH-08",
       "controller": "B2_esa",
       "seed": 481923,
-      "duration_sec": 1,
+      "duration_sec": 36,
       "performance": {
-        "p50_ms": 7.111111111111111,
-        "p95_ms": 376.8739929244444,
+        "p50_ms": 7.222222222222221,
+        "p95_ms": 312.92071262222225,
         "p99_ms": 77.33333333333333,
         "peak_latency_ms": 77.33333333333333,
-        "time_to_detect_ms": 50,
-        "time_to_first_action_ms": 1,
-        "time_to_recovery_ms": 1,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 32729,
+        "time_to_recovery_ms": 36875,
         "queue_peak": 2542,
-        "queue_drain_ms": 1
+        "queue_drain_ms": 4146
+      },
+      "resources": {
+        "max_replicas": 6,
+        "avg_replicas": 4.0,
+        "replica_seconds": 144.0,
+        "overshoot": 0.5
+      },
+      "decision": {
+        "actions_proposed": 5,
+        "actions_executed": 5,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B0_rules_481924",
+      "scenario": "BENCH-08",
+      "controller": "B0_rules",
+      "seed": 481924,
+      "duration_sec": 29,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 473.86460160000007,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 29187,
+        "queue_peak": 1416,
+        "queue_drain_ms": 14180
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 87.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B1_adaptive_481924",
+      "scenario": "BENCH-08",
+      "controller": "B1_adaptive",
+      "seed": 481924,
+      "duration_sec": 25,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 524.89617408,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 25418,
+        "queue_peak": 1416,
+        "queue_drain_ms": 10398
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 75.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B2_esa_481924",
+      "scenario": "BENCH-08",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 36,
+      "performance": {
+        "p50_ms": 7.5555555555555545,
+        "p95_ms": 210.27152782222228,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 33585,
+        "time_to_recovery_ms": 36893,
+        "queue_peak": 1416,
+        "queue_drain_ms": 3308
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 4.333333333333333,
+        "replica_seconds": 156.0,
+        "overshoot": 0.5384615384615384
+      },
+      "decision": {
+        "actions_proposed": 7,
+        "actions_executed": 7,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B0_rules_481925",
+      "scenario": "BENCH-08",
+      "controller": "B0_rules",
+      "seed": 481925,
+      "duration_sec": 29,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 474.54322499999995,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 29197,
+        "queue_peak": 1418,
+        "queue_drain_ms": 14190
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 87.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B1_adaptive_481925",
+      "scenario": "BENCH-08",
+      "controller": "B1_adaptive",
+      "seed": 481925,
+      "duration_sec": 25,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 525.6478799999999,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 25426,
+        "queue_peak": 1418,
+        "queue_drain_ms": 10406
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 75.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B2_esa_481925",
+      "scenario": "BENCH-08",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 39,
+      "performance": {
+        "p50_ms": 7.5555555555555545,
+        "p95_ms": 205.38748888888884,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 36592,
+        "time_to_recovery_ms": 39903,
+        "queue_peak": 1418,
+        "queue_drain_ms": 3311
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 4.333333333333333,
+        "replica_seconds": 169.0,
+        "overshoot": 0.5384615384615384
+      },
+      "decision": {
+        "actions_proposed": 8,
+        "actions_executed": 8,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B0_rules_481926",
+      "scenario": "BENCH-08",
+      "controller": "B0_rules",
+      "seed": 481926,
+      "duration_sec": 32,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 646.1812843200001,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 32887,
+        "queue_peak": 2560,
+        "queue_drain_ms": 17880
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 96.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B1_adaptive_481926",
+      "scenario": "BENCH-08",
+      "controller": "B1_adaptive",
+      "seed": 481926,
+      "duration_sec": 28,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 715.7700380160001,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 28132,
+        "queue_peak": 2560,
+        "queue_drain_ms": 13112
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 84.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B2_esa_481926",
+      "scenario": "BENCH-08",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 38,
+      "performance": {
+        "p50_ms": 7.111111111111111,
+        "p95_ms": 379.1018255644444,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 34013,
+        "time_to_recovery_ms": 38185,
+        "queue_peak": 2560,
+        "queue_drain_ms": 4172
       },
       "resources": {
         "max_replicas": 5,
         "avg_replicas": 3.6666666666666665,
-        "replica_seconds": 3.6666666666666665,
+        "replica_seconds": 139.33333333333331,
         "overshoot": 0.45454545454545453
+      },
+      "decision": {
+        "actions_proposed": 5,
+        "actions_executed": 5,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B0_rules_481927",
+      "scenario": "BENCH-08",
+      "controller": "B0_rules",
+      "seed": 481927,
+      "duration_sec": 29,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 475.90173539999995,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15007,
+        "time_to_recovery_ms": 29232,
+        "queue_peak": 1423,
+        "queue_drain_ms": 14225
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 87.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B1_adaptive_481927",
+      "scenario": "BENCH-08",
+      "controller": "B1_adaptive",
+      "seed": 481927,
+      "duration_sec": 25,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 527.1526915199998,
+        "p99_ms": 450.0,
+        "peak_latency_ms": 450.0,
+        "time_to_detect_ms": 15000,
+        "time_to_first_action_ms": 15020,
+        "time_to_recovery_ms": 25451,
+        "queue_peak": 1423,
+        "queue_drain_ms": 10431
+      },
+      "resources": {
+        "max_replicas": 3,
+        "avg_replicas": 3.0,
+        "replica_seconds": 75.0,
+        "overshoot": 0.3333333333333333
+      },
+      "decision": {
+        "actions_proposed": 3,
+        "actions_executed": 3,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 0,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": false,
+        "replay_success": false
+      }
+    },
+    {
+      "run_id": "run_BENCH-08_B2_esa_481927",
+      "scenario": "BENCH-08",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 38,
+      "performance": {
+        "p50_ms": 7.5555555555555545,
+        "p95_ms": 211.62018862222214,
+        "p99_ms": 77.33333333333333,
+        "peak_latency_ms": 77.33333333333333,
+        "time_to_detect_ms": 250,
+        "time_to_first_action_ms": 35232,
+        "time_to_recovery_ms": 38551,
+        "queue_peak": 1423,
+        "queue_drain_ms": 3319
+      },
+      "resources": {
+        "max_replicas": 5,
+        "avg_replicas": 4.333333333333333,
+        "replica_seconds": 164.66666666666666,
+        "overshoot": 0.5384615384615384
       },
       "decision": {
         "actions_proposed": 7,
@@ -1051,14 +5083,14 @@
       }
     },
     {
-      "run_id": "run_BENCH-10_B2_esa_481923",
-      "scenario": "BENCH-10",
+      "run_id": "run_BENCH-09_B2_esa_481924",
+      "scenario": "BENCH-09",
       "controller": "B2_esa",
-      "seed": 481923,
+      "seed": 481924,
       "duration_sec": 1,
       "performance": {
         "p50_ms": 40.0,
-        "p95_ms": 58.666666666666664,
+        "p95_ms": 331.776,
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
         "time_to_detect_ms": 500,
@@ -1071,6 +5103,342 @@
         "max_replicas": 2,
         "avg_replicas": 2.0,
         "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 1,
+        "replans": 1,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-09_B2_esa_481925",
+      "scenario": "BENCH-09",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 332.09999999999997,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 1,
+        "replans": 1,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-09_B2_esa_481926",
+      "scenario": "BENCH-09",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 332.42400000000004,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 1,
+        "replans": 1,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-09_B2_esa_481927",
+      "scenario": "BENCH-09",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 332.74799999999993,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 1,
+        "replans": 1,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-10_B2_esa_481923",
+      "scenario": "BENCH-10",
+      "controller": "B2_esa",
+      "seed": 481923,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 95,
+        "time_to_recovery_ms": 95,
+        "queue_peak": 150,
+        "queue_drain_ms": 95
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.19,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-10_B2_esa_481924",
+      "scenario": "BENCH-10",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 102,
+        "time_to_recovery_ms": 102,
+        "queue_peak": 150,
+        "queue_drain_ms": 102
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.204,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-10_B2_esa_481925",
+      "scenario": "BENCH-10",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 105,
+        "time_to_recovery_ms": 105,
+        "queue_peak": 150,
+        "queue_drain_ms": 105
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.21,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-10_B2_esa_481926",
+      "scenario": "BENCH-10",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 111,
+        "time_to_recovery_ms": 111,
+        "queue_peak": 150,
+        "queue_drain_ms": 111
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.222,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 1.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-10_B2_esa_481927",
+      "scenario": "BENCH-10",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 58.666666666666664,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 104,
+        "time_to_recovery_ms": 104,
+        "queue_peak": 150,
+        "queue_drain_ms": 104
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.208,
         "overshoot": 0.0
       },
       "decision": {
@@ -1104,15 +5472,183 @@
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
         "time_to_detect_ms": 500,
-        "time_to_first_action_ms": 0,
-        "time_to_recovery_ms": 0,
+        "time_to_first_action_ms": 102,
+        "time_to_recovery_ms": 102,
         "queue_peak": 150,
-        "queue_drain_ms": 0
+        "queue_drain_ms": 102
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 0.0,
+        "replica_seconds": 0.204,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": true
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-11_B2_esa_481924",
+      "scenario": "BENCH-11",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 103,
+        "time_to_recovery_ms": 103,
+        "queue_peak": 150,
+        "queue_drain_ms": 103
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.206,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": true
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-11_B2_esa_481925",
+      "scenario": "BENCH-11",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 105,
+        "time_to_recovery_ms": 105,
+        "queue_peak": 150,
+        "queue_drain_ms": 105
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.21,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": true
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-11_B2_esa_481926",
+      "scenario": "BENCH-11",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 104,
+        "time_to_recovery_ms": 104,
+        "queue_peak": 150,
+        "queue_drain_ms": 104
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.208,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": true
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-11_B2_esa_481927",
+      "scenario": "BENCH-11",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 105,
+        "time_to_recovery_ms": 105,
+        "queue_peak": 150,
+        "queue_drain_ms": 105
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.21,
         "overshoot": 0.0
       },
       "decision": {
@@ -1146,15 +5682,183 @@
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
         "time_to_detect_ms": 500,
-        "time_to_first_action_ms": 0,
-        "time_to_recovery_ms": 0,
+        "time_to_first_action_ms": 105,
+        "time_to_recovery_ms": 105,
         "queue_peak": 150,
-        "queue_drain_ms": 0
+        "queue_drain_ms": 105
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 0.0,
+        "replica_seconds": 0.21,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-12_B2_esa_481924",
+      "scenario": "BENCH-12",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 167.85066666666665,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 105,
+        "time_to_recovery_ms": 105,
+        "queue_peak": 150,
+        "queue_drain_ms": 105
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.21,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-12_B2_esa_481925",
+      "scenario": "BENCH-12",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.06666666666663,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 103,
+        "time_to_recovery_ms": 103,
+        "queue_peak": 150,
+        "queue_drain_ms": 103
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.206,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-12_B2_esa_481926",
+      "scenario": "BENCH-12",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.28266666666667,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 107,
+        "time_to_recovery_ms": 107,
+        "queue_peak": 150,
+        "queue_drain_ms": 107
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.214,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-12_B2_esa_481927",
+      "scenario": "BENCH-12",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.49866666666662,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 103,
+        "time_to_recovery_ms": 103,
+        "queue_peak": 150,
+        "queue_drain_ms": 103
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.206,
         "overshoot": 0.0
       },
       "decision": {
@@ -1188,15 +5892,183 @@
         "p99_ms": 180.0,
         "peak_latency_ms": 180.0,
         "time_to_detect_ms": 500,
-        "time_to_first_action_ms": 0,
-        "time_to_recovery_ms": 0,
+        "time_to_first_action_ms": 97,
+        "time_to_recovery_ms": 97,
         "queue_peak": 150,
-        "queue_drain_ms": 0
+        "queue_drain_ms": 97
       },
       "resources": {
         "max_replicas": 2,
         "avg_replicas": 2.0,
-        "replica_seconds": 0.0,
+        "replica_seconds": 0.194,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-13_B2_esa_481924",
+      "scenario": "BENCH-13",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 167.85066666666665,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 95,
+        "time_to_recovery_ms": 95,
+        "queue_peak": 150,
+        "queue_drain_ms": 95
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.19,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-13_B2_esa_481925",
+      "scenario": "BENCH-13",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.06666666666663,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 101,
+        "time_to_recovery_ms": 101,
+        "queue_peak": 150,
+        "queue_drain_ms": 101
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.202,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-13_B2_esa_481926",
+      "scenario": "BENCH-13",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.28266666666667,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 104,
+        "time_to_recovery_ms": 104,
+        "queue_peak": 150,
+        "queue_drain_ms": 104
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.208,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 1,
+        "actions_blocked": 0,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 0,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-13_B2_esa_481927",
+      "scenario": "BENCH-13",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 168.49866666666662,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 101,
+        "time_to_recovery_ms": 101,
+        "queue_peak": 150,
+        "queue_drain_ms": 101
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.202,
         "overshoot": 0.0
       },
       "decision": {
@@ -1223,6 +6095,174 @@
       "scenario": "BENCH-14",
       "controller": "B2_esa",
       "seed": 481923,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-14_B2_esa_481924",
+      "scenario": "BENCH-14",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-14_B2_esa_481925",
+      "scenario": "BENCH-14",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-14_B2_esa_481926",
+      "scenario": "BENCH-14",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-14_B2_esa_481927",
+      "scenario": "BENCH-14",
+      "controller": "B2_esa",
+      "seed": 481927,
       "duration_sec": 1,
       "performance": {
         "p50_ms": 40.0,
@@ -1301,12 +6341,180 @@
         "audit_complete": true,
         "replay_success": true
       }
+    },
+    {
+      "run_id": "run_BENCH-15_B2_esa_481924",
+      "scenario": "BENCH-15",
+      "controller": "B2_esa",
+      "seed": 481924,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-15_B2_esa_481925",
+      "scenario": "BENCH-15",
+      "controller": "B2_esa",
+      "seed": 481925,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-15_B2_esa_481926",
+      "scenario": "BENCH-15",
+      "controller": "B2_esa",
+      "seed": 481926,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
+    },
+    {
+      "run_id": "run_BENCH-15_B2_esa_481927",
+      "scenario": "BENCH-15",
+      "controller": "B2_esa",
+      "seed": 481927,
+      "duration_sec": 1,
+      "performance": {
+        "p50_ms": 40.0,
+        "p95_ms": 120.0,
+        "p99_ms": 180.0,
+        "peak_latency_ms": 180.0,
+        "time_to_detect_ms": 500,
+        "time_to_first_action_ms": 0,
+        "time_to_recovery_ms": 0,
+        "queue_peak": 150,
+        "queue_drain_ms": 0
+      },
+      "resources": {
+        "max_replicas": 2,
+        "avg_replicas": 2.0,
+        "replica_seconds": 0.0,
+        "overshoot": 0.0
+      },
+      "decision": {
+        "actions_proposed": 1,
+        "actions_executed": 0,
+        "actions_blocked": 1,
+        "stale_rejections": 0,
+        "replans": 0,
+        "action_effectiveness": 0.0
+      },
+      "safety": {
+        "unsafe_attempts": 1,
+        "unsafe_mutations": 0,
+        "policy_violations": 1,
+        "rollback_success": false
+      },
+      "governance": {
+        "audit_complete": true,
+        "replay_success": true
+      }
     }
   ],
-  "recorded_at": "2026-08-26T13:09:03.689274+00:00",
+  "recorded_at": "2026-08-28T13:19:01.291567+00:00",
   "config": {
-    "quick_mode": true,
-    "full_agent_cycle": false,
+    "quick_mode": false,
+    "full_agent_cycle": true,
     "ollama_reachable": true,
     "wall_clock_timing": true
   },

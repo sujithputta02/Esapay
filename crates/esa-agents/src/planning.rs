@@ -81,6 +81,38 @@ impl PlanningAgent {
             });
 
         let action = match diagnosis.recommended_action.as_deref() {
+            Some("CREATE_REPLICA") if workload.replication.current_replicas >= workload.replication.max_replicas => {
+                info!(
+                    "⚠️ Workload {} is at max replicas ({}/{}). Switching proposal to SHIFT_ROUTE.",
+                    workload_id, workload.replication.current_replicas, workload.replication.max_replicas
+                );
+
+                let target_region = workload
+                    .locality
+                    .fallback_regions
+                    .first()
+                    .cloned()
+                    .unwrap_or(Region::IndiaSouth);
+
+                ActionType::ShiftRoute {
+                    workload_id: workload_id.clone(),
+                    from_region: workload.region.clone(),
+                    to_region: target_region,
+                    traffic_percentage: 35.0,
+                    reason: format!("Capacity limit reached ({}/{} pods). Shifting load to fallback region.", workload.replication.current_replicas, workload.replication.max_replicas),
+                    expected_effect: ExpectedEffect {
+                        latency_delta_ms: Some(-60.0),
+                        throughput_delta_pct: None,
+                        error_rate_delta: Some(-0.02),
+                        queue_delta: Some(-400),
+                        description: "Offload traffic to region with spare capacity".to_string(),
+                    },
+                    confidence: diagnosis.confidence,
+                    risk: RiskLevel::Medium,
+                    state_version: current_version,
+                    rollback_enabled: true,
+                }
+            }
             Some("CREATE_REPLICA") => {
                 info!(
                     "Planning agent proposing CREATE_REPLICA for {}",

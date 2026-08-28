@@ -243,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         razorpay,
         vitals,
         last_benchmark: Arc::new(std::sync::RwLock::new(None)),
+        last_ablation: Arc::new(std::sync::RwLock::new(None)),
     };
 
     // Build router
@@ -270,8 +271,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/actions/recent", get(get_recent_actions))
         // NEW: Audit Trail endpoints
         .route("/api/audit/trail", get(get_audit_trail))
+        .route("/api/audit/verify-chain", get(verify_audit_chain))
         .route("/api/audit/decision/:decision_id", get(get_decision_detail))
         .route("/api/audit/replay/:decision_id", post(replay_decision))
+        .route("/api/audit/replay/:decision_id", get(replay_decision))
+        // Benchmark & Ablation endpoints
+        .route("/api/benchmark/ablations", post(run_benchmark_ablations))
+        .route("/api/benchmark/ablations", get(get_benchmark_ablations))
         // NEW: Effect Measurement endpoints
         .route("/api/effects/measurements", get(get_effect_measurements))
         .route("/api/effects/recent", get(get_recent_effects))
@@ -310,6 +316,7 @@ struct AppState {
     razorpay: Option<Arc<RazorpayAdapter>>,
     vitals: VitalsStore,
     last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
+    last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -970,6 +977,52 @@ async fn replay_decision(
         "Decision {} not found",
         decision_id
     )))
+}
+
+async fn verify_audit_chain(State(state): State<AppState>) -> impl IntoResponse {
+    let result = state.audit_store.verify_chain();
+    Json(result)
+}
+
+async fn run_benchmark_ablations(
+    State(state): State<AppState>,
+) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
+    let result = benchmark_harness::run_ablation_study(
+        state.state_fabric.clone(),
+        state.orchestrator.clone(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if let Ok(mut guard) = state.last_ablation.write() {
+        *guard = Some(result.clone());
+    }
+
+    Ok(Json(result))
+}
+
+async fn get_benchmark_ablations(
+    State(state): State<AppState>,
+) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
+    if let Ok(guard) = state.last_ablation.read() {
+        if let Some(res) = guard.as_ref() {
+            return Ok(Json(res.clone()));
+        }
+    }
+
+    // Auto-run if not executed yet
+    let result = benchmark_harness::run_ablation_study(
+        state.state_fabric.clone(),
+        state.orchestrator.clone(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if let Ok(mut guard) = state.last_ablation.write() {
+        *guard = Some(result.clone());
+    }
+
+    Ok(Json(result))
 }
 
 // Effect Measurement Endpoints

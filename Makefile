@@ -1,13 +1,19 @@
-.PHONY: benchmark benchmark-quick test
+.PHONY: demo benchmark benchmark-smoke benchmark-quick test audit-verify
 
-benchmark-smoke:
-	cargo run --release --bin esa-benchmark -- --smoke-full
+demo:
+	./scripts/demo.sh
 
 benchmark:
-	cargo run --release --bin esa-benchmark
+	cargo run --bin esa-benchmark
+
+benchmark-smoke:
+	cargo run --bin esa-benchmark -- --smoke-full
 
 benchmark-quick:
-	cargo run --release --bin esa-benchmark -- --quick
+	cargo run --bin esa-benchmark -- --quick
 
 test:
-	cargo test --all
+	cargo test --workspace
+
+audit-verify:
+	cargo test --test tamper_detection_test -- --nocapture

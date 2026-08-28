@@ -60,14 +60,14 @@ impl OllamaClient {
             stream: false,
             format: Some("json".to_string()),
             options: Some(OllamaOptions {
-                temperature: 0.2,
-                top_p: 0.9,
-                num_predict: 512,
+                temperature: 0.1,
+                top_p: 0.85,
+                num_predict: 128,
             }),
         };
 
         info!(
-            "🤖 Ollama request to model: {} for agent: {}",
+            "🤖 Ollama fast-inference request to model: {} for agent: {}",
             self.model, agent_id
         );
 
