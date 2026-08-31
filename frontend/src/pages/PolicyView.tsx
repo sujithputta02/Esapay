@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query';
-import { Card, CardHeader, CardTitle, CardBody } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { apiClient } from '@/lib/api';
 import { CheckCircle, XCircle, AlertCircle, Shield, AlertTriangle } from 'lucide-react';
@@ -31,30 +30,15 @@ interface VerdictStats {
 const getVerdictIcon = (verdict: string) => {
   switch (verdict.toUpperCase()) {
     case 'ALLOW':
-      return <CheckCircle className="w-5 h-5 text-green-500" />;
+      return <CheckCircle className="w-5 h-5 text-accent" />;
     case 'DENY':
-      return <XCircle className="w-5 h-5 text-red-500" />;
+      return <XCircle className="w-5 h-5 text-error" />;
     case 'STALE_STATE':
-      return <AlertCircle className="w-5 h-5 text-yellow-500" />;
+      return <AlertCircle className="w-5 h-5 text-warning" />;
     case 'REQUIRES_APPROVAL':
-      return <AlertTriangle className="w-5 h-5 text-orange-500" />;
+      return <AlertTriangle className="w-5 h-5 text-warning" />;
     default:
-      return <Shield className="w-5 h-5 text-blue-500" />;
-  }
-};
-
-const getVerdictColor = (verdict: string) => {
-  switch (verdict.toUpperCase()) {
-    case 'ALLOW':
-      return 'success';
-    case 'DENY':
-      return 'error';
-    case 'STALE_STATE':
-      return 'warning';
-    case 'REQUIRES_APPROVAL':
-      return 'warning';
-    default:
-      return 'default';
+      return <Shield className="w-5 h-5 text-accent" />;
   }
 };
 
@@ -91,204 +75,164 @@ export function PolicyView() {
   };
 
   return (
-    <div className="p-8 space-y-8">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-h1 font-bold text-text-primary">Policy Verdicts</h1>
-        <p className="text-body text-text-secondary mt-2">
-          Real-time policy evaluation verdicts (ALLOW / DENY / STALE_STATE / REQUIRES_APPROVAL)
+        <h1 className="text-[28px] font-bold text-white tracking-tight">Policy Engine & Verifier Verdicts</h1>
+        <p className="text-[15px] text-[#B8B8B8] mt-1">
+          Deterministic safety bounds, state-version invariant checks, and Kubernetes replica constraint verifications.
         </p>
       </div>
 
-      {/* Verdict Statistics */}
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-        <Card>
-          <CardBody className="text-center">
-            <p className="text-text-secondary text-small">Total Decisions</p>
-            <p className="text-h2 font-bold text-text-primary mt-2">{stats.total_decisions}</p>
-          </CardBody>
-        </Card>
+      {/* Verdict Statistics (rounded-[22px] bg-[#333333]) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-[14px] font-medium text-[#B8B8B8]">Total Decisions</span>
+          <span className="text-[26px] font-extrabold text-white tracking-tight">{stats.total_decisions}</span>
+        </div>
 
-        <Card>
-          <CardBody className="text-center">
-            <p className="text-green-600 font-semibold text-small">ALLOW</p>
-            <p className="text-h3 font-bold text-green-600 mt-2">{stats.allow_count}</p>
-            <p className="text-micro text-text-secondary mt-1">{(stats.allow_rate * 100).toFixed(0)}%</p>
-          </CardBody>
-        </Card>
+        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-[14px] font-medium text-accent">ALLOW Rate</span>
+          <div>
+            <span className="text-[26px] font-extrabold text-accent tracking-tight">{stats.allow_count}</span>
+            <span className="text-xs text-[#777777] ml-1.5">({(stats.allow_rate * 100).toFixed(0)}%)</span>
+          </div>
+        </div>
 
-        <Card>
-          <CardBody className="text-center">
-            <p className="text-red-600 font-semibold text-small">DENY</p>
-            <p className="text-h3 font-bold text-red-600 mt-2">{stats.deny_count}</p>
-            <p className="text-micro text-text-secondary mt-1">{(stats.deny_rate * 100).toFixed(0)}%</p>
-          </CardBody>
-        </Card>
+        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-[14px] font-medium text-error">DENY</span>
+          <div>
+            <span className="text-[26px] font-extrabold text-error tracking-tight">{stats.deny_count}</span>
+            <span className="text-xs text-[#777777] ml-1.5">({(stats.deny_rate * 100).toFixed(0)}%)</span>
+          </div>
+        </div>
 
-        <Card>
-          <CardBody className="text-center">
-            <p className="text-yellow-600 font-semibold text-small">STALE_STATE</p>
-            <p className="text-h3 font-bold text-yellow-600 mt-2">{stats.stale_state_count}</p>
-            <p className="text-micro text-text-secondary mt-1">{(stats.stale_rate * 100).toFixed(0)}%</p>
-          </CardBody>
-        </Card>
+        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-[14px] font-medium text-warning">STALE STATE</span>
+          <div>
+            <span className="text-[26px] font-extrabold text-warning tracking-tight">{stats.stale_state_count}</span>
+            <span className="text-xs text-[#777777] ml-1.5">({(stats.stale_rate * 100).toFixed(0)}%)</span>
+          </div>
+        </div>
 
-        <Card>
-          <CardBody className="text-center">
-            <p className="text-orange-600 font-semibold text-small">APPROVAL</p>
-            <p className="text-h3 font-bold text-orange-600 mt-2">{stats.requires_approval_count}</p>
-            <p className="text-micro text-text-secondary mt-1">{(stats.approval_required_rate * 100).toFixed(0)}%</p>
-          </CardBody>
-        </Card>
+        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-[14px] font-medium text-[#B8B8B8]">APPROVAL</span>
+          <div>
+            <span className="text-[26px] font-extrabold text-white tracking-tight">{stats.requires_approval_count}</span>
+            <span className="text-xs text-[#777777] ml-1.5">({(stats.approval_required_rate * 100).toFixed(0)}%)</span>
+          </div>
+        </div>
       </div>
 
-      {/* Verdict Breakdown Chart */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Verdict Distribution</CardTitle>
-        </CardHeader>
-        <CardBody>
+      {/* Verdict Breakdown Progress & Rules */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Distribution Progress */}
+        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04] space-y-5">
+          <h3 className="text-[20px] font-bold text-white">Verdict Distribution</h3>
           <div className="space-y-4">
             {[
-              {
-                label: 'ALLOW',
-                count: stats.allow_count,
-                rate: stats.allow_rate,
-                color: 'bg-green-500',
-              },
-              {
-                label: 'DENY',
-                count: stats.deny_count,
-                rate: stats.deny_rate,
-                color: 'bg-red-500',
-              },
-              {
-                label: 'STALE_STATE',
-                count: stats.stale_state_count,
-                rate: stats.stale_rate,
-                color: 'bg-yellow-500',
-              },
-              {
-                label: 'REQUIRES_APPROVAL',
-                count: stats.requires_approval_count,
-                rate: stats.approval_required_rate,
-                color: 'bg-orange-500',
-              },
+              { label: 'ALLOW (Passed Safety)', count: stats.allow_count, rate: stats.allow_rate, color: 'bg-accent' },
+              { label: 'DENY (Policy Violation)', count: stats.deny_count, rate: stats.deny_rate, color: 'bg-error' },
+              { label: 'STALE_STATE (Concurrency Invariant)', count: stats.stale_state_count, rate: stats.stale_rate, color: 'bg-warning' },
+              { label: 'REQUIRES_APPROVAL', count: stats.requires_approval_count, rate: stats.approval_required_rate, color: 'bg-[#777777]' },
             ].map((item, idx) => (
-              <div key={idx}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-semibold text-text-primary">{item.label}</span>
-                  <span className="text-small text-text-secondary">
+              <div key={idx} className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-white">{item.label}</span>
+                  <span className="text-[#B8B8B8] font-mono">
                     {item.count} ({(item.rate * 100).toFixed(1)}%)
                   </span>
                 </div>
-                <div className="h-2 bg-background rounded-full overflow-hidden">
-                  <div className={`h-full ${item.color} transition-all`} style={{ width: `${item.rate * 100}%` }} />
+                <div className="h-2 bg-[#1D1E1C] rounded-full overflow-hidden">
+                  <div className={`h-full ${item.color} transition-all`} style={{ width: `${Math.max(item.rate * 100, item.count > 0 ? 5 : 0)}%` }} />
                 </div>
               </div>
             ))}
           </div>
-        </CardBody>
-      </Card>
+        </div>
+
+        {/* Policy Rules Reference */}
+        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04] space-y-4">
+          <h3 className="text-[20px] font-bold text-white">Deterministic Invariants</h3>
+          <div className="space-y-3">
+            <div className="p-3.5 bg-[#333333] rounded-[16px] border border-white/[0.03]">
+              <p className="font-bold text-accent text-xs uppercase tracking-wide">RULE_001_REPLICA_BOUNDS</p>
+              <p className="text-xs text-[#B8B8B8] mt-1">Guarantees Kubernetes pod replicas stay within min 2 and max 30 constraint bounds</p>
+            </div>
+            <div className="p-3.5 bg-[#333333] rounded-[16px] border border-white/[0.03]">
+              <p className="font-bold text-accent text-xs uppercase tracking-wide">RULE_002_STALE_STATE_INVARIANT</p>
+              <p className="text-xs text-[#B8B8B8] mt-1">Atomically rejects mutation if state version incremented during LLM inference loop</p>
+            </div>
+            <div className="p-3.5 bg-[#333333] rounded-[16px] border border-white/[0.03]">
+              <p className="font-bold text-accent text-xs uppercase tracking-wide">RULE_003_CIRCUIT_BREAKER</p>
+              <p className="text-xs text-[#B8B8B8] mt-1">Automatically shifts traffic to fallback regions if P95 latency exceeds 250ms SLA</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Recent Verdicts */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent Verdicts</CardTitle>
-        </CardHeader>
-        <CardBody>
-          {verdicts.length > 0 ? (
-            <div className="space-y-4">
-              {verdicts.map((verdict) => (
-                <div
-                  key={verdict.verdict_id}
-                  className="p-5 rounded-lg bg-background-elevated border-l-4 border-accent hover:shadow-md transition-shadow"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      {getVerdictIcon(verdict.verdict)}
-                      <div>
-                        <p className="font-mono text-small font-semibold text-text-primary">
-                          {verdict.decision_id.substring(0, 12)}...
-                        </p>
-                        <p className="text-micro text-text-secondary mt-1">
-                          {new Date(verdict.timestamp).toLocaleTimeString()}
-                        </p>
-                      </div>
-                    </div>
-                    <Badge variant={getVerdictColor(verdict.verdict)} className="font-bold">
-                      {verdict.verdict}
-                    </Badge>
-                  </div>
+      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-[20px] font-bold text-white">Recent Policy Verdicts</h3>
+          <span className="text-xs font-mono text-[#777777]">{verdicts.length} Evaluated</span>
+        </div>
 
-                  <div className="space-y-2 mb-3">
-                    <p className="text-small text-text-secondary">
-                      <strong>Action:</strong> {verdict.action_type} on{' '}
-                      <span className="font-mono">{verdict.workload_id}</span>
-                    </p>
-                    <p className="text-small text-text-primary">{verdict.explanation}</p>
-                  </div>
-
-                  {/* Rules */}
-                  {verdict.rules_passed && verdict.rules_passed.length > 0 && (
-                    <div className="mb-2">
-                      <p className="text-xs font-semibold text-green-700 mb-1">✅ Rules Passed:</p>
-                      <div className="flex flex-wrap gap-2">
-                        {verdict.rules_passed.map((rule, idx) => (
-                          <Badge key={idx} variant="success">
-                            {rule}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {verdict.rules_failed && verdict.rules_failed.length > 0 && (
+        {verdicts.length > 0 ? (
+          <div className="space-y-4">
+            {verdicts.map((verdict) => (
+              <div
+                key={verdict.verdict_id}
+                className="p-6 rounded-[22px] bg-[#333333] border border-white/[0.03] space-y-3"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    {getVerdictIcon(verdict.verdict)}
                     <div>
-                      <p className="text-xs font-semibold text-red-700 mb-1">❌ Rules Failed:</p>
-                      <div className="flex flex-wrap gap-2">
-                        {verdict.rules_failed.map((rule, idx) => (
-                          <Badge key={idx} variant="error">
-                            {rule}
-                          </Badge>
-                        ))}
-                      </div>
+                      <p className="font-mono text-sm font-bold text-white">
+                        {verdict.decision_id.substring(0, 16)}...
+                      </p>
+                      <p className="text-xs text-[#777777] mt-0.5">
+                        {new Date(verdict.timestamp).toLocaleTimeString()}
+                      </p>
                     </div>
-                  )}
+                  </div>
+                  <Badge variant={verdict.verdict === 'ALLOW' ? 'success' : 'warning'}>
+                    {verdict.verdict}
+                  </Badge>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-12">
-              <Shield className="w-12 h-12 text-text-muted mx-auto mb-4 opacity-20" />
-              <p className="text-text-secondary">No verdicts yet</p>
-              <p className="text-micro text-text-muted mt-2">
-                Policy verdicts will appear as actions are evaluated and executed
-              </p>
-            </div>
-          )}
-        </CardBody>
-      </Card>
 
-      {/* Policy Rules Reference */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Policy Rules Reference</CardTitle>
-        </CardHeader>
-        <CardBody className="space-y-3">
-          <div className="p-3 bg-blue-50 rounded border-l-2 border-blue-400">
-            <p className="font-semibold text-blue-900">RULE_001_UNKNOWN_ACTION</p>
-            <p className="text-sm text-blue-800 mt-1">Denies actions not in the whitelisted action types</p>
+                <div className="p-4 bg-[#1D1E1C] rounded-[16px] border border-white/[0.04] text-xs space-y-2">
+                  <p className="text-[#B8B8B8]">
+                    <strong className="text-white">Action:</strong> {verdict.action_type} on{' '}
+                    <span className="font-mono text-accent">{verdict.workload_id}</span>
+                  </p>
+                  <p className="text-white font-medium">{verdict.explanation}</p>
+                </div>
+
+                {verdict.rules_passed && verdict.rules_passed.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs pt-1">
+                    <span className="text-accent font-semibold">Rules Passed:</span>
+                    {verdict.rules_passed.map((rule, idx) => (
+                      <Badge key={idx} variant="accent">
+                        {rule}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
-          <div className="p-3 bg-blue-50 rounded border-l-2 border-blue-400">
-            <p className="font-semibold text-blue-900">RULE_002_REPLICA_BOUNDS</p>
-            <p className="text-sm text-blue-800 mt-1">Ensures replica count stays within min/max constraints</p>
+        ) : (
+          <div className="text-center py-16 text-[#777777] space-y-2">
+            <Shield className="w-12 h-12 text-[#777777] mx-auto mb-2 opacity-20" />
+            <p className="text-[15px] font-medium text-white">No policy evaluations logged yet</p>
+            <p className="text-xs text-[#777777]">
+              Verdicts will stream in live as actions are verified against policy constraints
+            </p>
           </div>
-          <div className="p-3 bg-blue-50 rounded border-l-2 border-blue-400">
-            <p className="font-semibold text-blue-900">RULE_003_STALE_STATE</p>
-            <p className="text-sm text-blue-800 mt-1">Rejects actions with mismatched state version (requires replan)</p>
-          </div>
-        </CardBody>
-      </Card>
+        )}
+      </div>
     </div>
   );
 }
+

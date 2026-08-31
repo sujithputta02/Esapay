@@ -2,39 +2,129 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Page / shell */
+  --color-bg: #1D1E1C;
+
+  /* Main cards / panels */
+  --color-surface: #272727;
+
+  /* Elevated inner surfaces / stat cards */
+  --color-surface-raised: #333333;
+
+  /* Hover / subtle raised surface */
+  --color-surface-hover: #3A3A39;
+
+  /* Active / selected tab */
+  --color-surface-active: #4B4B4B;
+
+  /* Control container */
+  --color-surface-control: #303030;
+
+  /* Strong but restrained text */
+  --color-text-primary: #F5F5F5;
+
+  /* Main secondary text */
+  --color-text-secondary: #B8B8B8;
+
+  /* Muted metadata */
+  --color-text-muted: #777777;
+
+  /* Disabled copy */
+  --color-text-disabled: #555555;
+
+  /* Accent (Lime) */
+  --color-accent: #C7F25C;
+  --color-accent-hover: #D7F873;
+  --color-accent-strong: #DDF47A;
+  --color-accent-soft: rgba(199, 242, 92, 0.14);
+
+  /* Selection / focus */
+  --color-focus: rgba(199, 242, 92, 0.35);
+
+  /* Charcoal CTA */
+  --color-charcoal: #474745;
+  --color-charcoal-hover: #5A5A58;
+
+  /* Borders - keep extremely subtle */
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-strong: rgba(255, 255, 255, 0.10);
+
+  /* Chart */
+  --chart-grid: rgba(255, 255, 255, 0.08);
+  --chart-line-muted: rgba(255, 255, 255, 0.10);
+  --chart-line-secondary: rgba(255, 255, 255, 0.13);
+  --chart-line-primary: rgba(199, 242, 92, 0.90);
+
+  /* Radius */
+  --radius-card: 32px;
+  --radius-stat: 22px;
+  --radius-action-bar: 40px;
+  --radius-tab: 16px;
+  --radius-pill: 999px;
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-normal: 180ms ease;
+}
+
 @layer base {
   * {
-    @apply border-border;
+    border-color: var(--color-border);
   }
   
   body {
-    @apply bg-background text-text-primary font-sans antialiased;
+    margin: 0;
+    background-color: var(--color-bg);
+    color: var(--color-text-primary);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    @apply text-text-primary font-semibold;
+    color: var(--color-text-primary);
+    font-weight: 700;
   }
 }
 
 @layer utilities {
-  .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-accent to-accent-light;
+  .accent-text {
+    color: var(--color-accent);
   }
 
-  .glass {
-    @apply bg-background-card/40 backdrop-blur-md border border-border;
+  .accent-bg {
+    background-color: var(--color-accent);
   }
 
-  .animate-glow {
-    animation: glow 2s ease-in-out infinite;
+  .accent-pill {
+    background-color: var(--color-accent);
+    color: #1D1E1C;
+    font-weight: 700;
   }
 
-  @keyframes glow {
-    0%, 100% {
-      box-shadow: 0 0 5px rgba(245, 158, 11, 0.2);
-    }
-    50% {
-      box-shadow: 0 0 20px rgba(245, 158, 11, 0.4);
-    }
+  .charcoal-pill {
+    background-color: var(--color-charcoal);
+    color: var(--color-text-primary);
+    font-weight: 700;
   }
+}
+
+/* Subtle scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1D1E1C;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333333;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #474745;
 }
