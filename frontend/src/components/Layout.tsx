@@ -15,6 +15,7 @@ const navigation = [
   { name: 'Effects', path: '/effects' },
   { name: 'Costs', path: '/costs' },
   { name: 'Policy', path: '/policy' },
+  { name: 'Benchmarks', path: '/benchmarks' },
 ];
 
 function invalidateLiveQueries(type?: string) {

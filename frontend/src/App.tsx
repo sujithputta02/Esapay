@@ -8,6 +8,7 @@ import { AuditView } from './pages/AuditView';
 import { EffectsView } from './pages/EffectsView';
 import { CostsView } from './pages/CostsView';
 import { PolicyView } from './pages/PolicyView';
+import { BenchmarksView } from './pages/BenchmarksView';
 import { queryClient } from './lib/queryClient';
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
             <Route path="effects" element={<EffectsView />} />
             <Route path="costs" element={<CostsView />} />
             <Route path="policy" element={<PolicyView />} />
+            <Route path="benchmarks" element={<BenchmarksView />} />
           </Route>
         </Routes>
       </BrowserRouter>

@@ -3,6 +3,7 @@
 **Project Name:** ESA (Executable State Architecture)  
 **Track:** Open Track (Governed Autonomous Cloud Infrastructure Layer)  
 **Target Proving Ground:** Razorpay Payment Processing Workloads on Kubernetes  
+**5-Minute Demo Video:** [https://youtu.be/77qjP2yK7Og](https://youtu.be/77qjP2yK7Og)  
 **Command:** `make demo` (5-Minute Live Demonstration)  
 
 ---

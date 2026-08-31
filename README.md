@@ -1,214 +1,380 @@
 # ESA — Executable State Architecture
 
-Policy-bounded multi-agent runtime for adaptive payment infrastructure.
+**One-line thesis:** AI agents propose typed infrastructure actions from live payment workload state; deterministic policy, OCC, gateway, effect verification, and audit **decide and execute** — validated in the local benchmark harness, not guaranteed in production.
 
 **Razorpay Buildathon 2026 — Open Track**
 
-> AI proposes typed infrastructure actions from live state; deterministic policy, verification, gateway, and audit execute or block them.
+---
+
+## 2. Demo / Video
+
+| Resource | Link |
+|----------|------|
+| 🎥 **5-Minute Live Demo Video** | **[Watch on YouTube](https://youtu.be/77qjP2yK7Og)** |
+| Live demo script | [`scripts/demo.sh`](scripts/demo.sh) |
+| 5-minute pitch script | [`FINAL_5MIN_DEMO_SCRIPT.md`](FINAL_5MIN_DEMO_SCRIPT.md) |
+| Operator manual | [`docs/demo.md`](docs/demo.md) |
+| Command Center | http://localhost:3000 |
+| Payment simulator | http://localhost:5173 |
+
+▶️ **Recorded Demo Video:** **[https://youtu.be/77qjP2yK7Og](https://youtu.be/77qjP2yK7Og)** (5-minute walkthrough of the Dark Premium Payment Simulator, 4-Agent Ollama reasoning loop, live Kubernetes scaling, and deterministic safety verification).
 
 ---
 
-## What it does
+## 3. Problem Statement
 
-ESA runs a closed control loop for payment workloads:
+Payment gateways face burst traffic, regional skew, and queue buildup. Static rules and scrape-based autoscalers detect incidents slowly (15s polling) and apply coarse actions. LLM agents can reason about context but are unsafe if given direct infrastructure control.
 
-1. **Monitor** — detect degradation (latency, queue, errors)
-2. **Diagnose** — root cause (Ollama + rule fallback)
-3. **Plan** — typed actions (`CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …)
-4. **Safety + Policy** — allow, deny, stale-state reject, approval gates
-5. **Gateway** — single execution path with effect measurement
-6. **Audit** — replayable decision lineage
-
-Optional **Razorpay Test Mode** webhooks and orders feed real payment events into the same loop.
+ESA targets **governed adaptive recovery**: contextual proposals under a non-bypassable deterministic boundary.
 
 ---
 
-## Architecture
+## 4. What ESA Does
 
-```
+1. Ingests payment events (synthetic API, Razorpay Test Mode webhooks/orders).
+2. Maintains versioned workload state (`StateFabric`).
+3. Runs a **4-agent loop** every 5s: Monitor → Diagnosis → Planning → Safety.
+4. Submits **typed** `ActionProposal` to Policy + Gateway (never direct kubectl from agents).
+5. Measures effects, appends SHA-256-chained audit records, supports deterministic replay.
+6. Optionally scales Kubernetes deployments when cluster + env allow.
+
+---
+
+## 5. Why Existing Approaches Are Insufficient
+
+| Approach | Limitation in evaluated scenarios |
+|----------|-----------------------------------|
+| Static rules (B0) | 15s detection window; P95 ~236ms tail; ~16.5s above SLA |
+| Adaptive HPA-style (B1) | Still scrape-bound; P95 ~257ms; no governance layer |
+| Ungoverned LLM ops | No OCC, policy, or typed IR — unsafe mutations risk |
+
+ESA trades ~1.8s deliberation for **250ms detection**, **156ms P95**, and **4.1s time above SLA** in the harness (vs B0/B1 baselines).
+
+---
+
+## 6. Core Innovation
+
+> **Agents propose; deterministic infrastructure decides and executes.**
+
+- Typed Action IR (no shell/exec)
+- Optimistic concurrency (stale proposals rejected)
+- Single Action Gateway execution path
+- Post-execution effect verification
+- Snapshot rollback + audit replay without LLM
+
+---
+
+## 7. Architecture Overview
+
+```text
 Payment events / Razorpay webhooks
            │
            ▼
-    State Fabric (versioned workloads)
+    Payment adapter
+           │
+           ▼
+    State Fabric (versioned)
            │
     ┌──────┴──────┐
     ▼             ▼
- Agents         Telemetry ──► Command Center UI
+ Agents         Telemetry (WebSocket)
     │
     ▼
- Policy + Verifier
+ Policy Engine → Decision Verifier
     │
     ▼
- Action Gateway ──► Runtime mutation + rollback
+ Action Gateway → Runtime mutation (+ optional kubectl)
     │
     ▼
- Audit trail + effect measurement
+ Effect measurement + Audit (SHA-256 chain)
 ```
+
+Detail: [`docs/architecture.md`](docs/architecture.md)
 
 ---
 
-## Quick start
+## 8. End-to-End Execution Flow
 
-### Prerequisites
+1. Metrics update on payment event or demo scenario.
+2. Monitor extracts conditions (latency, queue, errors).
+3. Diagnosis hypothesizes root cause (Ollama + rule fallback).
+4. Planning synthesizes typed action with `state_version` and `expected_effect`.
+5. Safety advisory review (does not execute).
+6. Policy engine: ALLOW / DENY / STALE / REQUIRES_APPROVAL.
+7. Gateway: commit-time OCC, apply mutation, measure effect, audit.
 
-- Rust 1.70+
-- Node 18+ (or Bun) for frontends
-- Ollama (optional but recommended for full agent diagnosis)
-- `.env` with Razorpay test keys if using live webhooks (see `.env.example` patterns in repo)
+Detail: [`docs/execution-flow.md`](docs/execution-flow.md)
 
-### 1. Environment
+---
+
+## 9. 4-Agent Architecture
+
+| Agent | Role | Executes? |
+|-------|------|-----------|
+| Monitor | Condition detection | No |
+| Diagnosis | Root-cause hypothesis | No |
+| Planning | Typed action proposal | No |
+| Safety | Risk advisory | No |
+
+Per-agent docs: [`docs/agents/`](docs/agents/)
+
+---
+
+## 10. Deterministic Governance Layer
+
+- **Typed Action IR** — `CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …
+- **Policy engine** — RULE_001–004 + intent constraints
+- **Decision verifier** — workload exists, version drift bounds
+- **Action Gateway** — sole mutation path
+
+Detail: [`docs/governance.md`](docs/governance.md)
+
+---
+
+## 11. Payment Runtime / Simulator
+
+| Component | Port | Role |
+|-----------|------|------|
+| `payment-simulator/` | 5173 | Next.js Razorpay Checkout (Test Mode) |
+| `esa-api` payment routes | 8080 | Events, orders, webhooks, confirm |
+| `esa-razorpay` | — | Adapter, signature verify, dedup |
+
+Test cards shown in simulator UI (e.g. Mastercard `5267 3181 8797 5449`).
+
+---
+
+## 12. Kubernetes Runtime
+
+- Optional Kind cluster, namespace `esa-workloads`
+- Gateway may `kubectl scale` mapped deployments when enabled
+- Manifests: `k8s/deployments.yaml`
+- In-memory state updates even if kubectl unavailable
+
+---
+
+## 13. Safety Model
+
+- Agents cannot invoke shell, kubectl, or arbitrary APIs
+- High/Critical risk → `RequiresApproval` (blocks auto-exec)
+- Stale `state_version` → reject before mutation
+- 650 adversarial harness trials → **0 unsafe mutations** observed
+- LLM failure → rule fallback, no direct infra access
+
+Detail: [`docs/claims.md`](docs/claims.md), [`SECURITY.md`](SECURITY.md)
+
+---
+
+## 14. Failure Handling
+
+Covers LLM timeout, policy violation, stale state, execution failure, effect underperformance, rollback.
+
+Detail: [`docs/failure-recovery.md`](docs/failure-recovery.md)
+
+**Limitation:** Orchestrator does not auto-replan on failed effect verification today.
+
+---
+
+## 15. Benchmark Methodology
+
+- **Controllers:** B0 static, B1 adaptive, B2 full ESA
+- **Matrix:** 8 perf × 5 seeds × 3 controllers + 7 safety × 5 seeds = **155 trials**
+- **Seeds:** 481923–481927
+- **Commands:** `make benchmark`, `make benchmark-quick`, `make benchmark-smoke`
+
+Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
+
+---
+
+## 16. Benchmark Results
+
+| Metric | B0 | B1 | B2 ESA |
+|--------|----|----|--------|
+| P95 | 236 ms | 257 ms | **156 ms** |
+| Time above SLA | 16.5 s | 14.8 s | **4.1 s** |
+| Stabilization | 9.6 s | 7.2 s | **2.3 s** |
+| Total recovery | 24.6 s | 22.2 s | 24.3 s |
+| Unsafe mutations (safety suite) | — | — | **0 / 650** |
+
+Full report: [`benchmarkreport.md`](benchmarkreport.md) · Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
+
+---
+
+## 17. Ablation Study
+
+| Variant | Evidence type |
+|---------|---------------|
+| B1_adaptive, ESA_no_agents, Full_ESA | **Live harness trials** |
+| ESA_single_agent, no_versioning, no_effect_verification, no_rollback | **Modeled offsets** from Full_ESA |
+
+Detail: [`benchmarks/ablations.md`](benchmarks/ablations.md)
+
+---
+
+## 18. Adversarial Safety Results
+
+650 predefined attempts across stale OCC, max replicas, region policy, critical risk, malformed payloads, rollback, LLM failure — all blocked or safely handled; SHA-256 chain valid.
+
+Source: `benchmarkreport.md` §6, `esa-gateway/tests/safety_stress_suite.rs`
+
+---
+
+## 19. Reproducibility
 
 ```bash
-cp .env.example .env   # if present, or configure .env manually
-ollama pull mistral:latest   # or model in OLLAMA_MODEL
-ollama serve
-```
-
-### 2. Backend (port 8080)
-
-```bash
+git clone <repo>
+cp .env.example .env
+docker compose up -d          # optional infra
+ollama serve && ollama pull mistral:latest
 cargo run --bin esa-api
+make benchmark-quick
+make audit-verify
 ```
 
-### 3. Command Center (port 3000)
+Detail: [`docs/reproducibility.md`](docs/reproducibility.md)
+
+---
+
+## 20. Quick Start
 
 ```bash
-cd frontend && npm install && npm run dev
-```
-
-### 4. Payment simulator (port 5173)
-
-```bash
-cd payment-simulator && npm install && npm run dev
-```
-
-### 5. Smoke test
-
-```bash
+cp .env.example .env
+ollama serve
+cargo run --bin esa-api                    # :8080
+cd frontend && npm install && npm run dev  # :3000
+cd payment-simulator && npm install && npm run dev  # :5173
 ./scripts/run-demo-test.sh
 ```
 
-Or use the all-in-one script:
-
-```bash
-./scripts/start-demo.sh
-```
+Also: [`docs/reproducibility.md`](docs/reproducibility.md) and [`docs/demo.md`](docs/demo.md)
 
 ---
 
-## URLs
+## 21. Demo Walkthrough
 
-| Service | URL |
-|---------|-----|
-| ESA Command Center | http://localhost:3000 |
-| API + health | http://localhost:8080/health |
-| Payment simulator | http://localhost:5173 |
-| WebSocket telemetry | ws://localhost:3000/ws/telemetry (via Vite proxy) |
+14-step operator flow: seed → spike → agents → stale reject → rollback → audit replay.
+
+Detail: [`docs/demo.md`](docs/demo.md)
 
 ---
 
-## Demo API (high level)
+## 22. API / Endpoints
 
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /api/demo/seed` | Seed 3 payment workloads |
-| `POST /api/demo/scenario/:name` | `burst-spike`, `stale-state`, `rollback-demo`, … |
-| `POST /api/benchmark/harness` | Run B0/B1/B2 benchmark harness |
-| `GET /api/audit/trail` | Decision audit records |
-| `POST /api/audit/replay/:id` | Deterministic replay |
+Implemented routes on `esa-api` (8080):
 
-Full list: start the API and explore routes in `crates/esa-api/src/main.rs`.
+- Workloads, payment, Razorpay, demo scenarios
+- Agents, actions, verdicts, effects, costs, intent
+- Audit trail, verify-chain, replay
+- Benchmark harness + ablations
+- WebSocket: `/ws/telemetry`
 
----
-
-## Benchmark harness
-
-Three controllers on identical scenarios:
-
-- **B0** — static threshold rules
-- **B1** — HPA-style adaptive controller
-- **B2** — full ESA (agents + policy + gateway)
-
-```bash
-make benchmark-quick      # fast smoke
-make benchmark-smoke      # full agent cycle, 1 seed
-make benchmark            # 5 seeds × 8 scenarios × 3 controllers
-```
-
-Latest summary: [`benchmarkreport.md`](benchmarkreport.md)
+Full list: [`docs/api.md`](docs/api.md)
 
 ---
 
-## Repository layout
+## 23. Repository Structure
 
-```
+```text
 ESA_paymentgateway/
-├── crates/                 # Rust workspace
-│   ├── esa-core/           # Types, actions, audit
-│   ├── esa-state/          # State fabric + snapshots
-│   ├── esa-policy/         # Policy engine
-│   ├── esa-agents/         # Monitor, diagnosis, planning, safety
-│   ├── esa-gateway/        # Action gateway + rollback
+├── crates/
+│   ├── esa-core/           # Types, actions, audit, intent
+│   ├── esa-state/          # State fabric, snapshots, store (PG not wired)
+│   ├── esa-agents/         # Monitor, diagnosis, planning, safety, Ollama
+│   ├── esa-policy/         # Policy engine, verifier
+│   ├── esa-gateway/        # Action gateway, rollback, optional K8s
 │   ├── esa-runtime/        # Orchestrator
-│   ├── esa-api/            # HTTP API + benchmark binary
-│   ├── esa-razorpay/       # Razorpay adapter
+│   ├── esa-api/            # HTTP API, benchmark binary
+│   ├── esa-razorpay/       # Razorpay Test Mode adapter
 │   └── esa-telemetry/      # Metrics helpers
 ├── frontend/               # Command Center (React + Vite)
-├── payment-simulator/      # Next.js payment traffic UI
-├── benchmarks/             # Harness outputs (raw, processed, scenarios)
-├── docs/                   # All project markdown docs
-├── scripts/                # Demo, test, seed scripts
-├── benchmarkreport.md      # Latest benchmark summary (root)
-├── Makefile                # benchmark targets
-└── docker-compose.yml      # Optional infra stack
+├── payment-simulator/      # Razorpay checkout UI
+├── benchmarks/
+│   ├── scenarios/taxonomy.yaml
+│   ├── raw/, processed/, reports/
+│   └── *.md
+├── docs/                   # Engineering documentation
+├── scripts/                # demo.sh, start-demo.sh, tests
+├── k8s/                    # Kubernetes manifests
+├── tests/                  # Integration tests
+├── benchmarkreport.md      # Latest benchmark summary
+├── docker-compose.yml
+├── Dockerfile
+├── Makefile
+├── SECURITY.md
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+└── README.md
 ```
 
 ---
 
-## Documentation
+## 24. Configuration
 
-All guides, PRD, status reports, and verification docs are in [`docs/`](docs/README.md).
+| Variable | Purpose |
+|----------|---------|
+| `OLLAMA_URL`, `OLLAMA_MODEL` | Diagnosis LLM |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Test Mode API |
+| `RAZORPAY_WEBHOOK_SECRET` | Webhook signature |
+| `DATABASE_URL`, `REDIS_URL`, `NATS_URL` | Compose template (**not wired to API state**) |
+| `KUBERNETES_ENABLED` | Optional kubectl scale |
+| `API_PORT` | Default 8080 |
 
-| Doc | Use when |
-|-----|----------|
-| [docs/QUICK_START.md](docs/QUICK_START.md) | Running the 5-minute demo |
-| [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md) | Pitch script for judges |
-| [docs/ESA_paymentprdv2.md](docs/ESA_paymentprdv2.md) | Full PRD |
-
----
-
-## Development
-
-```bash
-# Rust tests
-cargo test --all
-
-# Frontend build
-cd frontend && npm run build
-
-# Integration smoke
-./scripts/integration-test.sh
-```
-
-CI: `.github/workflows/ci.yml`
+Template: [`.env.example`](.env.example)
 
 ---
 
-## Safety model
+## 25. Limitations
 
-- No shell/exec actions from agents — typed `ActionType` enum only
-- Every mutation passes **policy** + **state version** checks
-- Stale proposals rejected; high-risk actions blocked or require approval
-- Rollback via snapshots; audit trail for replay
+- In-memory state fabric (PostgreSQL `StateStore` not connected to API)
+- Redis / NATS in Compose only — not used by runtime loop
+- No Prometheus `/metrics` on API
+- No automatic replan on failed effect verification
+- Ablation offsets for 4 of 7 variants (not live feature flags)
+- Audit trail not persisted across API restarts
+- Benchmark harness environment — not production Razorpay traffic
+
+**Not claimed:** production deployment, RBI/PCI compliance, real GMV protection, settlement, security certifications.
+
+See [`docs/claims.md`](docs/claims.md).
 
 ---
 
-## License
+## 26. Security / Secrets
 
-MIT — see [LICENSE](LICENSE) if present.
+- Never commit Razorpay live keys or production credentials
+- Use `.env` locally; `.env.example` is safe to commit
+- Test Mode only (`rzp_test_…`)
+- Agents have no direct infrastructure execution privileges
+
+Detail: [`SECURITY.md`](SECURITY.md)
 
 ---
 
-## Team
+## 27. Technology Stack
 
-ESA Team — Razorpay Buildathon 2026
+| Layer | Technology |
+|-------|------------|
+| Runtime / API | Rust, Axum, Tokio |
+| Agents | Rust + Ollama (local LLM) |
+| State | In-memory fabric + OCC |
+| Policy / Gateway | Rust crates in workspace |
+| Command Center | React, TypeScript, Vite, Tailwind |
+| Payment UI | Next.js, Razorpay Checkout |
+| Optional infra | Docker Compose, Postgres, Redis, NATS, Prometheus, Grafana |
+| Optional K8s | Kind, kubectl scale |
+| CI | GitHub Actions |
+
+---
+
+## 28. License
+
+MIT License — see [LICENSE](LICENSE).
+
+Copyright (c) 2026 ESA Team.
+
+---
+
+## Documentation index
+
+Full engineering docs: [`docs/README.md`](docs/README.md) · Claims register: [`docs/claims.md`](docs/claims.md)
+
+**ESA Team — Razorpay Buildathon 2026**
