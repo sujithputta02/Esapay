@@ -41,7 +41,7 @@ export const useEsaStore = create<EsaStore>((set) => ({
 
   updateWorkload: (workload) => set((state) => ({
     workloads: state.workloads.some((w) => w.workload_id === workload.workload_id)
-      ? state.workloads.map((w) => w.workload_id === workload.workload_id ? workload : w)
+      ? state.workloads.map((w) => w.workload_id === workload.workload_id ? { ...w, ...workload } : w)
       : [...state.workloads, workload],
   })),
   

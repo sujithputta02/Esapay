@@ -205,6 +205,103 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Seed default workloads on startup if empty so vitals and dashboard start immediately live
+    if state_fabric.list_workloads().is_empty() {
+        use chrono::Utc;
+        use esa_core::{ConsistencyMode, LifecycleState, LocalityPreference, Region, ReplicationPolicy, WorkloadEntity, WorkloadMetrics, WorkloadState};
+
+        let default_workloads = vec![
+            WorkloadEntity {
+                workload_id: "payment-upi-india-south".to_string(),
+                shard_id: "shard-001".to_string(),
+                state: WorkloadState::Healthy,
+                region: Region::IndiaSouth,
+                metrics: WorkloadMetrics {
+                    rate_per_min: 3000.0,
+                    p50_latency_ms: 45.0,
+                    p95_latency_ms: 120.0,
+                    p99_latency_ms: 180.0,
+                    error_rate: 0.01,
+                    queue_depth: 250,
+                    timestamp: Utc::now(),
+                },
+                replication: ReplicationPolicy {
+                    min_replicas: 2,
+                    max_replicas: 10,
+                    current_replicas: 3,
+                    consistency_mode: ConsistencyMode::Strong,
+                },
+                locality: LocalityPreference {
+                    preferred_region: Region::IndiaSouth,
+                    fallback_regions: vec![Region::IndiaWest, Region::IndiaNorth],
+                },
+                lifecycle: LifecycleState::Active,
+                version: 1,
+                updated_at: Utc::now(),
+            },
+            WorkloadEntity {
+                workload_id: "payment-cards-india-west".to_string(),
+                shard_id: "shard-002".to_string(),
+                state: WorkloadState::Healthy,
+                region: Region::IndiaWest,
+                metrics: WorkloadMetrics {
+                    rate_per_min: 1800.0,
+                    p50_latency_ms: 60.0,
+                    p95_latency_ms: 140.0,
+                    p99_latency_ms: 200.0,
+                    error_rate: 0.012,
+                    queue_depth: 180,
+                    timestamp: Utc::now(),
+                },
+                replication: ReplicationPolicy {
+                    min_replicas: 2,
+                    max_replicas: 8,
+                    current_replicas: 2,
+                    consistency_mode: ConsistencyMode::Strong,
+                },
+                locality: LocalityPreference {
+                    preferred_region: Region::IndiaWest,
+                    fallback_regions: vec![Region::IndiaSouth, Region::IndiaNorth],
+                },
+                lifecycle: LifecycleState::Active,
+                version: 1,
+                updated_at: Utc::now(),
+            },
+            WorkloadEntity {
+                workload_id: "payment-netbanking-india-north".to_string(),
+                shard_id: "shard-003".to_string(),
+                state: WorkloadState::Healthy,
+                region: Region::IndiaNorth,
+                metrics: WorkloadMetrics {
+                    rate_per_min: 1200.0,
+                    p50_latency_ms: 55.0,
+                    p95_latency_ms: 160.0,
+                    p99_latency_ms: 220.0,
+                    error_rate: 0.015,
+                    queue_depth: 150,
+                    timestamp: Utc::now(),
+                },
+                replication: ReplicationPolicy {
+                    min_replicas: 2,
+                    max_replicas: 6,
+                    current_replicas: 2,
+                    consistency_mode: ConsistencyMode::Strong,
+                },
+                locality: LocalityPreference {
+                    preferred_region: Region::IndiaNorth,
+                    fallback_regions: vec![Region::IndiaSouth, Region::IndiaWest],
+                },
+                lifecycle: LifecycleState::Active,
+                version: 1,
+                updated_at: Utc::now(),
+            },
+        ];
+
+        for workload in default_workloads {
+            let _ = state_fabric.upsert_workload(workload);
+        }
+    }
+
     let vitals = VitalsStore::new();
 
     // Periodic vitals broadcast for live dashboard graphs

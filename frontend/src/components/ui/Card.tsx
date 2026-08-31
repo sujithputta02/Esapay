@@ -4,19 +4,29 @@ import { cn } from '@/lib/utils';
 interface CardProps {
   children: ReactNode;
   className?: string;
-  glass?: boolean;
+  variant?: 'surface' | 'raised' | 'control' | 'action';
   hover?: boolean;
 }
 
-export function Card({ children, className, glass = false, hover = false }: CardProps) {
+export function Card({
+  children,
+  className,
+  variant = 'surface',
+  hover = false,
+}: CardProps) {
+  const variantStyles = {
+    surface: 'bg-surface rounded-[32px] border border-border/50',
+    raised: 'bg-surface-raised rounded-[22px] border border-border/30',
+    control: 'bg-surface-control rounded-[20px]',
+    action: 'bg-surface rounded-[40px] border border-border/50',
+  };
+
   return (
     <div
       className={cn(
-        'rounded-lg border transition-all duration-200',
-        glass
-          ? 'bg-background-card/40 backdrop-blur-md border-border'
-          : 'bg-background-card border-border',
-        hover && 'hover:border-border-hover hover:shadow-lg',
+        'transition-colors duration-150',
+        variantStyles[variant],
+        hover && 'hover:bg-surface-hover',
         className
       )}
     >
@@ -32,7 +42,7 @@ interface CardHeaderProps {
 
 export function CardHeader({ children, className }: CardHeaderProps) {
   return (
-    <div className={cn('px-6 py-4 border-b border-border', className)}>
+    <div className={cn('px-8 py-5 border-b border-border/40', className)}>
       {children}
     </div>
   );
@@ -45,7 +55,7 @@ interface CardBodyProps {
 
 export function CardBody({ children, className }: CardBodyProps) {
   return (
-    <div className={cn('px-6 py-4', className)}>
+    <div className={cn('px-8 py-6', className)}>
       {children}
     </div>
   );
@@ -58,8 +68,9 @@ interface CardTitleProps {
 
 export function CardTitle({ children, className }: CardTitleProps) {
   return (
-    <h3 className={cn('text-h4 text-text-primary font-semibold', className)}>
+    <h3 className={cn('text-h3 font-bold text-text-primary tracking-tight', className)}>
       {children}
     </h3>
   );
 }
+
