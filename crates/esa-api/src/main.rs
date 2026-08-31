@@ -208,7 +208,10 @@ async fn main() -> anyhow::Result<()> {
     // Seed default workloads on startup if empty so vitals and dashboard start immediately live
     if state_fabric.list_workloads().is_empty() {
         use chrono::Utc;
-        use esa_core::{ConsistencyMode, LifecycleState, LocalityPreference, Region, ReplicationPolicy, WorkloadEntity, WorkloadMetrics, WorkloadState};
+        use esa_core::{
+            ConsistencyMode, LifecycleState, LocalityPreference, Region, ReplicationPolicy,
+            WorkloadEntity, WorkloadMetrics, WorkloadState,
+        };
 
         let default_workloads = vec![
             WorkloadEntity {
