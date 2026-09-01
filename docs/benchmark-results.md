@@ -30,17 +30,17 @@ Summary aligned with [`benchmarkreport.md`](../benchmarkreport.md) (recorded 202
 | Planning | ~220 ms | Typed action synthesis |
 | Safety | ~115 ms | Advisory risk review |
 
-## Safety (B2 only — governance layer)
+## Safety — cross-controller adversarial suite (650 trials each)
 
-The 650-trial adversarial suite exercises the **Action Gateway + OCC + policy** path. B0/B1 baselines do not implement this layer and are not subject to the same stress tests.
+Run: `make adversarial` → [`benchmarks/processed/adversarial_suite.json`](../benchmarks/processed/adversarial_suite.json)
 
-| Metric | B0 | B1 | B2 ESA |
-|--------|----|----|--------|
-| Action Gateway + OCC | No | No | **Yes** |
-| Stale-state rejections (harness) | — | — | **5** |
-| Adversarial safety suite | Not tested | Not tested | **0 / 650** |
+| Controller | Blocked / safe | Unsafe mutations |
+|------------|----------------|------------------|
+| B0 rules | 150 / 650 | **450 / 650** |
+| B1 adaptive | 150 / 650 | **450 / 650** |
+| **B2 ESA** | **650 / 650** | **0 / 650** |
 
-Adversarial categories (B2 gateway):
+### B2 category breakdown (all attacks handled)
 
 | Category | Attempts | Blocked | Unsafe mutations |
 |----------|----------|---------|------------------|

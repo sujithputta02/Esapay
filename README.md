@@ -179,7 +179,7 @@ Detail: [`docs/failure-recovery.md`](docs/failure-recovery.md)
 - **Controllers:** B0 static, B1 adaptive, B2 full ESA
 - **Matrix:** 8 perf × 5 seeds × 3 controllers + 7 safety × 5 seeds = **155 trials**
 - **Seeds:** 481923–481927
-- **Commands:** `make benchmark`, `make benchmark-quick`, `make benchmark-smoke`
+- **Commands:** `make benchmark`, `make benchmark-quick`, `make benchmark-smoke`, `make adversarial`
 
 Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
 
@@ -195,10 +195,9 @@ Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
 | Total recovery | 24.6 s | 22.2 s | 24.3 s |
 | Detection latency | 15.0 s | 15.0 s | **250 ms** |
 | Action Gateway + OCC | No | No | **Yes** |
-| Stale-state rejections | — | — | **5** |
-| Adversarial safety suite | Not tested | Not tested | **0 / 650** |
+| Adversarial safety suite (650 trials) | **450 / 650 unsafe** | **450 / 650 unsafe** | **0 / 650** |
 
-*B0/B1 are performance baselines without a governance layer—the 650-trial adversarial suite (stale OCC, policy blocks, rollback, LLM failure) applies only to B2. Stale-state rejections are an ESA-only metric.*
+*Same 650 adversarial attack vectors applied to all three controllers (`make adversarial`). B0/B1 lack Action Gateway + OCC—stale writes, unauthorized regions, unbounded replicas, and missing rollback succeed. B2 blocks or safely handles every attack. Raw: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/adversarial_suite.json).*
 
 Full report: [`benchmarkreport.md`](benchmarkreport.md) · Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
 
@@ -217,7 +216,17 @@ Detail: [`benchmarks/ablations.md`](benchmarks/ablations.md)
 
 ## 18. Adversarial Safety Results
 
-650 predefined attempts across stale OCC, max replicas, region policy, critical risk, malformed payloads, rollback, LLM failure — all blocked or safely handled; SHA-256 chain valid.
+Cross-controller suite: **650 identical attack vectors × 3 controllers** (`make adversarial`).
+
+| Controller | Blocked / safe | Unsafe mutations | Stale rejections | Rollback success | Audit chain |
+|------------|----------------|------------------|------------------|------------------|-------------|
+| B0 rules | 150 / 650 | **450 / 650** | 0 | 0 | — |
+| B1 adaptive | 150 / 650 | **450 / 650** | 0 | 0 | — |
+| **B2 ESA** | **650 / 650** | **0 / 650** | 100 | 50 / 50 | SHA-256 valid |
+
+**B2 breakdown (all attacks blocked or safely recovered):** stale OCC 100/100 · max replicas 100/100 · unauthorized region 100/100 · critical risk 100/100 · malformed payloads 100/100 · rollback 50/50 · LLM failure 50/50 safe.
+
+**Why B0/B1 fail:** no typed Action IR, no OCC, no policy engine, no snapshot rollback—direct state mutation allows phantom writes, region violations, and unbounded replica counts.
 
 Source: `benchmarkreport.md` §6, `esa-gateway/tests/safety_stress_suite.rs`
 

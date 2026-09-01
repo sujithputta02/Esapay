@@ -68,6 +68,11 @@ impl EsaOrchestrator {
         Arc::clone(&self.action_gateway)
     }
 
+    /// Register India-only data residency intent for benchmark / adversarial workloads.
+    pub fn ensure_default_intent(&self, workload_id: &str) -> String {
+        self.planning_agent.create_default_intent(workload_id)
+    }
+
     pub async fn run_cycle(&self) -> EsaResult<CycleResult> {
         info!("🔄 Starting autonomous orchestration cycle");
 

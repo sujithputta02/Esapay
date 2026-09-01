@@ -18,7 +18,7 @@ Every major claim in README, demo scripts, and benchmark reports should match th
 | B0 / B1 / B2 benchmark harness | `esa-benchmark`, `make benchmark*` | **Implemented** |
 | P95 ~156 ms vs B0 ~236 ms (5 seeds) | `benchmarkreport.md`, raw JSON | **Measured in harness** |
 | Time above SLA ~4.1 s vs B0 ~16.5 s | `benchmarkreport.md` | **Measured in harness** |
-| 650 safety trials, 0 unsafe mutations | `benchmarkreport.md` §6 | **Measured in harness** |
+| 650 safety trials, 0 unsafe mutations (B2 only) | `adversarial_suite.json` | **Measured — B2: 0/650; B0/B1: 450/650 unsafe** |
 | Optional `kubectl scale` on replica changes | `sync_to_k8s_deployment` when `KUBERNETES_ENABLED` | **Implemented (optional)** |
 | Autonomous loop every 5 seconds | `orchestrator.run_forever(5s)` | **Implemented** |
 | Ollama diagnosis with rule fallback | `diagnosis.rs` | **Implemented** |

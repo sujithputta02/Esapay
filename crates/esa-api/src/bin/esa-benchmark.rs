@@ -12,6 +12,8 @@ use std::sync::Arc;
 mod benchmark;
 #[path = "../benchmark_harness.rs"]
 mod benchmark_harness;
+#[path = "../adversarial_suite.rs"]
+mod adversarial_suite;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let quick = env::args().any(|a| a == "--quick");
     let smoke_full = env::args().any(|a| a == "--smoke-full");
     let run_ablations = env::args().any(|a| a == "--ablations");
+    let run_adversarial = env::args().any(|a| a == "--adversarial");
     let output = env::args()
         .position(|a| a == "--output")
         .and_then(|i| env::args().nth(i + 1))
@@ -64,6 +67,41 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&audit_store),
         None,
     ));
+
+    if run_adversarial {
+        println!("Running cross-controller adversarial safety suite (650 trials × 3 controllers)...");
+        let result = adversarial_suite::run_adversarial_suite_all(
+            state_fabric.clone(),
+            orchestrator.clone(),
+            audit_store.clone(),
+            ollama_reachable,
+        )
+        .await?;
+        std::fs::create_dir_all(output.join("processed"))?;
+        let json = serde_json::to_string_pretty(&result)?;
+        std::fs::write(output.join("processed/adversarial_suite.json"), &json)?;
+        for c in &result.controllers {
+            println!(
+                "  {} | blocked: {}/{} | unsafe: {}/{} | stale rej: {} | rollback: {} | audit: {:?}",
+                c.controller,
+                c.total_blocked,
+                c.total_attempts,
+                c.total_unsafe,
+                c.total_attempts,
+                c.stale_rejections,
+                c.rollback_successes,
+                c.audit_chain_valid
+            );
+            for cat in &c.categories {
+                println!(
+                    "      - {}: blocked {} unsafe {}",
+                    cat.name, cat.blocked, cat.unsafe_mutations
+                );
+            }
+        }
+        println!("Results: {}/processed/adversarial_suite.json", output.display());
+        return Ok(());
+    }
 
     if run_ablations {
         println!("Running ESA Ablation Study...");
