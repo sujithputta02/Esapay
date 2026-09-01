@@ -193,7 +193,12 @@ Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
 | Time above SLA | 16.5 s | 14.8 s | **4.1 s** |
 | Stabilization | 9.6 s | 7.2 s | **2.3 s** |
 | Total recovery | 24.6 s | 22.2 s | 24.3 s |
-| Unsafe mutations (safety suite) | — | — | **0 / 650** |
+| Detection latency | 15.0 s | 15.0 s | **250 ms** |
+| Action Gateway + OCC | No | No | **Yes** |
+| Stale-state rejections | — | — | **5** |
+| Adversarial safety suite | Not tested | Not tested | **0 / 650** |
+
+*B0/B1 are performance baselines without a governance layer—the 650-trial adversarial suite (stale OCC, policy blocks, rollback, LLM failure) applies only to B2. Stale-state rejections are an ESA-only metric.*
 
 Full report: [`benchmarkreport.md`](benchmarkreport.md) · Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
 
