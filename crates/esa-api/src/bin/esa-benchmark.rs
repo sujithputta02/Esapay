@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
 
     let ollama_url =
         std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let ollama_model =
+        std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "mistral:latest".to_string());
     let ollama_reachable = benchmark_harness::probe_ollama(&ollama_url).await;
 
     println!("ESA Benchmark Harness");
@@ -45,11 +47,16 @@ async fn main() -> anyhow::Result<()> {
         }
     );
     println!(
-        "  ollama: {}",
+        "  ollama: {}{}",
         if ollama_reachable {
             "reachable"
         } else {
             "not reachable (rule fallback)"
+        },
+        if ollama_reachable {
+            format!(" ({})", ollama_model)
+        } else {
+            String::new()
         }
     );
     println!("  output: {}", output.display());
@@ -57,9 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let state_fabric = Arc::new(StateFabric::new());
     let audit_store = Arc::new(AuditStore::new());
 
-    let ollama_model =
-        std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "mistral:latest".to_string());
-    let ollama_client = OllamaClient::new(ollama_url, ollama_model);
+    let ollama_client = OllamaClient::new(ollama_url, ollama_model.clone());
 
     let orchestrator = Arc::new(EsaOrchestrator::new(
         Arc::clone(&state_fabric),

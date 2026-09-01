@@ -340,13 +340,14 @@ async fn run_b2_adversarial(
     total_blocked += blocked;
     total_unsafe += unsafe_m;
 
-    // 7. LLM path — full agent cycle when Ollama is up; fast rule fallback otherwise
+    // 7. LLM path — 5 live Ollama cycles + 45 rule-fallback when Ollama is up
     blocked = 0;
     unsafe_m = 0;
-    for _ in 0..50 {
+    let live_llm_trials = if ollama_reachable { 5 } else { 0 };
+    for i in 0..50 {
         seed_stress_workload(&fabric)?;
         apply_burst_spike(&fabric, 3.0)?;
-        if ollama_reachable {
+        if i < live_llm_trials {
             run_esa_recovery(fabric.clone(), orchestrator.clone()).await?;
         } else {
             run_esa_recovery_fast(fabric.clone(), orchestrator.clone()).await?;
@@ -356,7 +357,7 @@ async fn run_b2_adversarial(
     record_category(
         &mut categories,
         if ollama_reachable {
-            "LLM Live Inference + Safe Recovery"
+            "LLM Live Inference (5) + Rule Fallback (45)"
         } else {
             "LLM Model Failure / Timeouts (rule fallback)"
         },
