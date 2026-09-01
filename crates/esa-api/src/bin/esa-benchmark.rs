@@ -8,12 +8,12 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "../adversarial_suite.rs"]
+mod adversarial_suite;
 #[path = "../benchmark.rs"]
 mod benchmark;
 #[path = "../benchmark_harness.rs"]
 mod benchmark_harness;
-#[path = "../adversarial_suite.rs"]
-mod adversarial_suite;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -74,7 +74,9 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     if run_adversarial {
-        println!("Running cross-controller adversarial safety suite (650 trials × 3 controllers)...");
+        println!(
+            "Running cross-controller adversarial safety suite (650 trials × 3 controllers)..."
+        );
         let result = adversarial_suite::run_adversarial_suite_all(
             state_fabric.clone(),
             orchestrator.clone(),
@@ -104,7 +106,10 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        println!("Results: {}/processed/adversarial_suite.json", output.display());
+        println!(
+            "Results: {}/processed/adversarial_suite.json",
+            output.display()
+        );
         return Ok(());
     }
 
