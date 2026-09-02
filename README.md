@@ -12,7 +12,6 @@
 |----------|------|
 | 🎥 **5-Minute Live Demo Video** | **[Watch on YouTube](https://youtu.be/77qjP2yK7Og)** |
 | Live demo script | [`scripts/demo.sh`](scripts/demo.sh) |
-| 5-minute pitch script | [`FINAL_5MIN_DEMO_SCRIPT.md`](FINAL_5MIN_DEMO_SCRIPT.md) |
 | Operator manual | [`docs/demo.md`](docs/demo.md) |
 | Command Center | http://localhost:3000 |
 | Payment simulator | http://localhost:5173 |
