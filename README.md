@@ -1,8 +1,8 @@
-# ESA — Executable State Architecture
+# ESA – Executable State Architecture
 
-**One-line thesis:** AI agents propose typed infrastructure actions from live payment workload state; deterministic policy, OCC, gateway, effect verification, and audit **decide and execute** — validated in the local benchmark harness, not guaranteed in production.
+**One-line thesis:** AI agents propose typed infrastructure actions from live payment workload state; deterministic policy, OCC, gateway, effect verification, and audit **decide and execute** – validated in the local benchmark harness, not guaranteed in production.
 
-**Razorpay Buildathon 2026 — Open Track**
+**Razorpay Buildathon 2026 – Open Track**
 
 ---
 
@@ -45,7 +45,7 @@ ESA targets **governed adaptive recovery**: contextual proposals under a non-byp
 |----------|-----------------------------------|
 | Static rules (B0) | 15s detection window; P95 ~236ms tail; ~16.5s above SLA |
 | Adaptive HPA-style (B1) | Still scrape-bound; P95 ~257ms; no governance layer |
-| Ungoverned LLM ops | No OCC, policy, or typed IR — unsafe mutations risk |
+| Ungoverned LLM ops | No OCC, policy, or typed IR – unsafe mutations risk |
 
 ESA trades ~1.8s deliberation for **250ms detection**, **156ms P95**, and **4.1s time above SLA** in the harness (vs B0/B1 baselines).
 
@@ -121,10 +121,10 @@ Per-agent docs: [`docs/agents/`](docs/agents/)
 
 ## 10. Deterministic Governance Layer
 
-- **Typed Action IR** — `CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …
-- **Policy engine** — RULE_001–004 + intent constraints
-- **Decision verifier** — workload exists, version drift bounds
-- **Action Gateway** — sole mutation path
+- **Typed Action IR** – `CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …
+- **Policy engine** – RULE_001–004 + intent constraints
+- **Decision verifier** – workload exists, version drift bounds
+- **Action Gateway** – sole mutation path
 
 Detail: [`docs/governance.md`](docs/governance.md)
 
@@ -136,7 +136,7 @@ Detail: [`docs/governance.md`](docs/governance.md)
 |-----------|------|------|
 | `payment-simulator/` | 5173 | Next.js Razorpay Checkout (Test Mode) |
 | `esa-api` payment routes | 8080 | Events, orders, webhooks, confirm |
-| `esa-razorpay` | — | Adapter, signature verify, dedup |
+| `esa-razorpay` | – | Adapter, signature verify, dedup |
 
 Test cards shown in simulator UI (e.g. Mastercard `5267 3181 8797 5449`).
 
@@ -196,7 +196,7 @@ Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
 | Action Gateway + OCC | No | No | **Yes** |
 | Adversarial safety suite (650 trials) | **450 / 650 unsafe** | **450 / 650 unsafe** | **0 / 650** |
 
-*Same 650 adversarial attack vectors applied to all three controllers (`make adversarial`). B0/B1 lack Action Gateway + OCC—stale writes, unauthorized regions, unbounded replicas, and missing rollback succeed. B2 blocks or safely handles every attack. Raw: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/adversarial_suite.json).*
+*Same 650 adversarial attack vectors applied to all three controllers (`make adversarial`). B0/B1 lack Action Gateway + OCC–stale writes, unauthorized regions, unbounded replicas, and missing rollback succeed. B2 blocks or safely handles every attack. Raw: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/adversarial_suite.json).*
 
 Full report: [`benchmarkreport.md`](benchmarkreport.md) · Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
 
@@ -219,13 +219,13 @@ Cross-controller suite: **650 identical attack vectors × 3 controllers** (`make
 
 | Controller | Blocked / safe | Unsafe mutations | Stale rejections | Rollback success | Audit chain |
 |------------|----------------|------------------|------------------|------------------|-------------|
-| B0 rules | 150 / 650 | **450 / 650** | 0 | 0 | — |
-| B1 adaptive | 150 / 650 | **450 / 650** | 0 | 0 | — |
+| B0 rules | 150 / 650 | **450 / 650** | 0 | 0 | – |
+| B1 adaptive | 150 / 650 | **450 / 650** | 0 | 0 | – |
 | **B2 ESA** | **650 / 650** | **0 / 650** | 100 | 50 / 50 | SHA-256 valid |
 
 **B2 breakdown (all attacks blocked or safely recovered):** stale OCC 100/100 · max replicas 100/100 · unauthorized region 100/100 · critical risk 100/100 · malformed payloads 100/100 · rollback 50/50 · LLM failure 50/50 safe.
 
-**Why B0/B1 fail:** no typed Action IR, no OCC, no policy engine, no snapshot rollback—direct state mutation allows phantom writes, region violations, and unbounded replica counts.
+**Why B0/B1 fail:** no typed Action IR, no OCC, no policy engine, no snapshot rollback–direct state mutation allows phantom writes, region violations, and unbounded replica counts.
 
 Source: `benchmarkreport.md` §6, `esa-gateway/tests/safety_stress_suite.rs`
 
@@ -338,12 +338,12 @@ Template: [`.env.example`](.env.example)
 ## 25. Limitations
 
 - In-memory state fabric (PostgreSQL `StateStore` not connected to API)
-- Redis / NATS in Compose only — not used by runtime loop
+- Redis / NATS in Compose only – not used by runtime loop
 - No Prometheus `/metrics` on API
 - No automatic replan on failed effect verification
 - Ablation offsets for 4 of 7 variants (not live feature flags)
 - Audit trail not persisted across API restarts
-- Benchmark harness environment — not production Razorpay traffic
+- Benchmark harness environment – not production Razorpay traffic
 
 **Not claimed:** production deployment, RBI/PCI compliance, real GMV protection, settlement, security certifications.
 
@@ -380,7 +380,7 @@ Detail: [`SECURITY.md`](SECURITY.md)
 
 ## 28. License
 
-MIT License — see [LICENSE](LICENSE).
+MIT License – see [LICENSE](LICENSE).
 
 Copyright (c) 2026 ESA Team.
 
@@ -390,4 +390,4 @@ Copyright (c) 2026 ESA Team.
 
 Full engineering docs: [`docs/README.md`](docs/README.md) · Claims register: [`docs/claims.md`](docs/claims.md)
 
-**ESA Team — Razorpay Buildathon 2026**
+**ESA Team – Razorpay Buildathon 2026**
