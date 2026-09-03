@@ -1,393 +1,328 @@
-# ESA – Executable State Architecture
+# ESA — Executable State Architecture
 
-**One-line thesis:** AI agents propose typed infrastructure actions from live payment workload state; deterministic policy, OCC, gateway, effect verification, and audit **decide and execute** – validated in the local benchmark harness, not guaranteed in production.
+A governed adaptive runtime for payment workloads: LLM agents reason over live state and propose typed infrastructure actions, but **cannot** directly mutate infrastructure. Every change passes deterministic policy, optimistic concurrency, a single Action Gateway, effect verification, and a SHA-256 audit chain.
 
-**Razorpay Buildathon 2026 – Open Track**
+**Razorpay Buildathon 2026 — Open Track**
 
----
-
-## 2. Demo / Video
-
-| Resource | Link |
-|----------|------|
-| 🎥 **5-Minute Live Demo Video** | **[Watch on YouTube](https://youtu.be/77qjP2yK7Og)** |
-| Live demo script | [`scripts/demo.sh`](scripts/demo.sh) |
-| Operator manual | [`docs/demo.md`](docs/demo.md) |
-| Command Center | http://localhost:3000 |
-| Payment simulator | http://localhost:5173 |
-
-▶️ **Recorded Demo Video:** **[https://youtu.be/77qjP2yK7Og](https://youtu.be/77qjP2yK7Og)** (5-minute walkthrough of the Dark Premium Payment Simulator, 4-Agent Ollama reasoning loop, live Kubernetes scaling, and deterministic safety verification).
+[![Rust](https://img.shields.io/badge/Rust-workspace-orange)](https://www.rust-lang.org/)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-blue)](.github/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
-## 3. Problem Statement
+## One-line thesis
 
-Payment gateways face burst traffic, regional skew, and queue buildup. Static rules and scrape-based autoscalers detect incidents slowly (15s polling) and apply coarse actions. LLM agents can reason about context but are unsafe if given direct infrastructure control.
+> **Agents propose. Deterministic infrastructure decides and executes.**
 
-ESA targets **governed adaptive recovery**: contextual proposals under a non-bypassable deterministic boundary.
-
----
-
-## 4. What ESA Does
-
-1. Ingests payment events (synthetic API, Razorpay Test Mode webhooks/orders).
-2. Maintains versioned workload state (`StateFabric`).
-3. Runs a **4-agent loop** every 5s: Monitor → Diagnosis → Planning → Safety.
-4. Submits **typed** `ActionProposal` to Policy + Gateway (never direct kubectl from agents).
-5. Measures effects, appends SHA-256-chained audit records, supports deterministic replay.
-6. Optionally scales Kubernetes deployments when cluster + env allow.
+Agents (Monitor, Diagnosis, Planning, Safety) produce `ActionProposal` values with embedded `state_version`, risk class, and expected effects. The Policy Engine, Decision Verifier, and Action Gateway approve, deny, or block before any workload mutation. No agent invokes shell, `kubectl`, or arbitrary infrastructure APIs.
 
 ---
 
-## 5. Why Existing Approaches Are Insufficient
+## Why ESA?
 
-| Approach | Limitation in evaluated scenarios |
-|----------|-----------------------------------|
-| Static rules (B0) | 15s detection window; P95 ~236ms tail; ~16.5s above SLA |
-| Adaptive HPA-style (B1) | Still scrape-bound; P95 ~257ms; no governance layer |
-| Ungoverned LLM ops | No OCC, policy, or typed IR – unsafe mutations risk |
+Payment infrastructure fails in bursts: flash-sale traffic, regional skew, queue buildup, and SLA violations. Common responses fall short:
 
-ESA trades ~1.8s deliberation for **250ms detection**, **156ms P95**, and **4.1s time above SLA** in the harness (vs B0/B1 baselines).
+| Approach | Gap |
+|----------|-----|
+| Static rules | ~15s scrape-bound detection; coarse single-step scaling |
+| Adaptive autoscalers | Faster scaling, but no governance layer for unsafe mutations |
+| Ungoverned LLM ops | Contextual reasoning without OCC, policy, or typed actions |
 
----
-
-## 6. Core Innovation
-
-> **Agents propose; deterministic infrastructure decides and executes.**
-
-- Typed Action IR (no shell/exec)
-- Optimistic concurrency (stale proposals rejected)
-- Single Action Gateway execution path
-- Post-execution effect verification
-- Snapshot rollback + audit replay without LLM
+ESA combines **contextual agent proposals** with **deterministic governance**, **controlled execution**, **post-mutation effect verification**, and **auditable replay** — validated in the local benchmark harness, not as production guarantees.
 
 ---
 
-## 7. Architecture Overview
+## What ESA does
 
-```text
-Payment events / Razorpay webhooks
-           │
-           ▼
-    Payment adapter
-           │
-           ▼
-    State Fabric (versioned)
-           │
-    ┌──────┴──────┐
-    ▼             ▼
- Agents         Telemetry (WebSocket)
-    │
-    ▼
- Policy Engine → Decision Verifier
-    │
-    ▼
- Action Gateway → Runtime mutation (+ optional kubectl)
-    │
-    ▼
- Effect measurement + Audit (SHA-256 chain)
+1. **Ingest** payment events (synthetic API, Razorpay Test Mode webhooks/orders).
+2. **Maintain** versioned workload state in `StateFabric` (optimistic concurrency).
+3. **Run** a four-agent loop (~5s cadence): Monitor → Diagnosis → Planning → Safety.
+4. **Emit** typed `ActionProposal` values (`CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …).
+5. **Validate** through Policy Engine + Decision Verifier (ALLOW / DENY / STALE / REQUIRES_APPROVAL).
+6. **Execute** only via the Action Gateway — the sole mutation path.
+7. **Measure** expected vs observed effects after mutation.
+8. **Record** SHA-256-chained audit events with deterministic replay (no LLM re-invocation).
+9. **Optionally** scale Kubernetes deployments when Kind/cluster + env allow.
+
+**Boundary:** LLM reasoning ends at the proposal. Deterministic infrastructure owns authorization and execution.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Payment events / Razorpay webhooks] --> B[Payment adapter]
+    B --> C[State Fabric — versioned workloads]
+    C --> D[Monitor]
+    D --> E[Diagnosis — Ollama + rule fallback]
+    E --> F[Planning]
+    F --> G[Safety — advisory only]
+    G --> H[Typed Action IR]
+    H --> I[Policy Engine]
+    I --> J[Decision Verifier]
+    J --> K[Action Gateway]
+    K --> L[Runtime mutation]
+    L --> M[Effect verification]
+    M --> N[Audit / replay — SHA-256 chain]
+    K -. optional .-> O[kubectl scale]
+    C --> P[Telemetry — WebSocket / vitals]
 ```
 
-Detail: [`docs/architecture.md`](docs/architecture.md)
+Agents **do not** call shell, `kubectl`, or free-form infrastructure APIs. Deep dive: [`docs/architecture.md`](docs/architecture.md) · [`docs/execution-flow.md`](docs/execution-flow.md)
 
 ---
 
-## 8. End-to-End Execution Flow
+## Safety & governance
 
-1. Metrics update on payment event or demo scenario.
-2. Monitor extracts conditions (latency, queue, errors).
-3. Diagnosis hypothesizes root cause (Ollama + rule fallback).
-4. Planning synthesizes typed action with `state_version` and `expected_effect`.
-5. Safety advisory review (does not execute).
-6. Policy engine: ALLOW / DENY / STALE / REQUIRES_APPROVAL.
-7. Gateway: commit-time OCC, apply mutation, measure effect, audit.
+### Typed Action IR
 
-Detail: [`docs/execution-flow.md`](docs/execution-flow.md)
+Infrastructure changes are enum-typed proposals — not scripts. Examples: `CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`.
 
----
+### Optimistic concurrency (OCC)
 
-## 9. 4-Agent Architecture
+Proposals embed `state_version`. Stale proposals are rejected (`STALE_STATE` / `RULE_003`) before mutation.
 
-| Agent | Role | Executes? |
-|-------|------|-----------|
-| Monitor | Condition detection | No |
-| Diagnosis | Root-cause hypothesis | No |
-| Planning | Typed action proposal | No |
-| Safety | Risk advisory | No |
+### Policy engine
 
-Per-agent docs: [`docs/agents/`](docs/agents/)
+Verdicts: **ALLOWED**, **DENIED**, **STALE_STATE**, **REQUIRES_APPROVAL** (high/critical risk blocks auto-exec).
 
----
+### Action Gateway
 
-## 10. Deterministic Governance Layer
+**Sole execution path.** Policy + OCC + snapshot + audit run here.
 
-- **Typed Action IR** – `CREATE_REPLICA`, `SHIFT_ROUTE`, `ROLLBACK`, …
-- **Policy engine** – RULE_001–004 + intent constraints
-- **Decision verifier** – workload exists, version drift bounds
-- **Action Gateway** – sole mutation path
+### Effect verification
 
-Detail: [`docs/governance.md`](docs/governance.md)
+Post-execution comparison of expected vs observed metrics (`ObjectiveMet`, `Underperformed`, `Failed`).
+
+### Rollback
+
+Pre-execution snapshots; `ROLLBACK` restores numeric snapshot versions.
+
+### Auditability
+
+Append-only records with SHA-256 hash chaining; `GET /api/audit/verify-chain` and deterministic replay APIs.
+
+> **Agents cannot directly mutate infrastructure.**
+
+Details: [`docs/governance.md`](docs/governance.md) · [`docs/state-management.md`](docs/state-management.md) · [`docs/effect-verification.md`](docs/effect-verification.md) · [`docs/audit-replay.md`](docs/audit-replay.md)
 
 ---
 
-## 11. Payment Runtime / Simulator
+## Four-agent architecture
 
-| Component | Port | Role |
-|-----------|------|------|
-| `payment-simulator/` | 5173 | Next.js Razorpay Checkout (Test Mode) |
-| `esa-api` payment routes | 8080 | Events, orders, webhooks, confirm |
-| `esa-razorpay` | – | Adapter, signature verify, dedup |
+| Agent | Responsibility | Direct execution |
+|-------|----------------|------------------|
+| Monitor | Condition detection (latency, queue, errors) | No |
+| Diagnosis | Root-cause hypothesis (Ollama + rule fallback) | No |
+| Planning | Typed `ActionProposal` synthesis | No |
+| Safety | Risk advisory (gateway decides) | No |
 
-Test cards shown in simulator UI (e.g. Mastercard `5267 3181 8797 5449`).
-
----
-
-## 12. Kubernetes Runtime
-
-- Optional Kind cluster, namespace `esa-workloads`
-- Gateway may `kubectl scale` mapped deployments when enabled
-- Manifests: `k8s/deployments.yaml`
-- In-memory state updates even if kubectl unavailable
+Per-agent docs: [`docs/agents/monitor.md`](docs/agents/monitor.md) · [`docs/agents/diagnosis.md`](docs/agents/diagnosis.md) · [`docs/agents/planning.md`](docs/agents/planning.md) · [`docs/agents/safety.md`](docs/agents/safety.md)
 
 ---
 
-## 13. Safety Model
+## Demo
 
-- Agents cannot invoke shell, kubectl, or arbitrary APIs
-- High/Critical risk → `RequiresApproval` (blocks auto-exec)
-- Stale `state_version` → reject before mutation
-- 650 adversarial harness trials → **0 unsafe mutations** observed
-- LLM failure → rule fallback, no direct infra access
+**Watch the 5-minute demo → [YouTube](https://youtu.be/77qjP2yK7Og)**
 
-Detail: [`docs/claims.md`](docs/claims.md), [`SECURITY.md`](SECURITY.md)
-
----
-
-## 14. Failure Handling
-
-Covers LLM timeout, policy violation, stale state, execution failure, effect underperformance, rollback.
-
-Detail: [`docs/failure-recovery.md`](docs/failure-recovery.md)
-
-**Limitation:** Orchestrator does not auto-replan on failed effect verification today.
+| Surface | URL / path |
+|---------|------------|
+| Command Center | http://localhost:3000 |
+| Payment simulator (Razorpay Test Mode) | http://localhost:5173 |
+| API + health | http://localhost:8080/health |
+| Terminal narrative | [`scripts/demo.sh`](scripts/demo.sh) |
+| Operator manual | [`docs/demo.md`](docs/demo.md) |
+| Pitch script | [`FINAL_5MIN_DEMO_SCRIPT.md`](FINAL_5MIN_DEMO_SCRIPT.md) |
 
 ---
 
-## 15. Benchmark Methodology
+## Quick start
 
-- **Controllers:** B0 static, B1 adaptive, B2 full ESA
-- **Matrix:** 8 perf × 5 seeds × 3 controllers + 7 safety × 5 seeds = **155 trials**
-- **Seeds:** 481923–481927
-- **Commands:** `make benchmark`, `make benchmark-quick`, `make benchmark-smoke`, `make adversarial`
-
-Detail: [`benchmarks/methodology.md`](benchmarks/methodology.md)
-
----
-
-## 16. Benchmark Results
-
-| Metric | B0 | B1 | B2 ESA |
-|--------|----|----|--------|
-| P95 | 236 ms | 257 ms | **156 ms** |
-| Time above SLA | 16.5 s | 14.8 s | **4.1 s** |
-| Stabilization | 9.6 s | 7.2 s | **2.3 s** |
-| Total recovery | 24.6 s | 22.2 s | 24.3 s |
-| Detection latency | 15.0 s | 15.0 s | **250 ms** |
-| Action Gateway + OCC | No | No | **Yes** |
-| Adversarial safety suite (650 trials) | **450 / 650 unsafe** | **450 / 650 unsafe** | **0 / 650** |
-
-*Same 650 adversarial attack vectors applied to all three controllers (`make adversarial`). B0/B1 lack Action Gateway + OCC–stale writes, unauthorized regions, unbounded replicas, and missing rollback succeed. B2 blocks or safely handles every attack. Raw: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/adversarial_suite.json).*
-
-Full report: [`benchmarkreport.md`](benchmarkreport.md) · Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
-
----
-
-## 17. Ablation Study
-
-| Variant | Evidence type |
-|---------|---------------|
-| B1_adaptive, ESA_no_agents, Full_ESA | **Live harness trials** |
-| ESA_single_agent, no_versioning, no_effect_verification, no_rollback | **Modeled offsets** from Full_ESA |
-
-Detail: [`benchmarks/ablations.md`](benchmarks/ablations.md)
-
----
-
-## 18. Adversarial Safety Results
-
-Cross-controller suite: **650 identical attack vectors × 3 controllers** (`make adversarial`).
-
-| Controller | Blocked / safe | Unsafe mutations | Stale rejections | Rollback success | Audit chain |
-|------------|----------------|------------------|------------------|------------------|-------------|
-| B0 rules | 150 / 650 | **450 / 650** | 0 | 0 | – |
-| B1 adaptive | 150 / 650 | **450 / 650** | 0 | 0 | – |
-| **B2 ESA** | **650 / 650** | **0 / 650** | 100 | 50 / 50 | SHA-256 valid |
-
-**B2 breakdown (all attacks blocked or safely recovered):** stale OCC 100/100 · max replicas 100/100 · unauthorized region 100/100 · critical risk 100/100 · malformed payloads 100/100 · rollback 50/50 · LLM failure 50/50 safe.
-
-**Why B0/B1 fail:** no typed Action IR, no OCC, no policy engine, no snapshot rollback–direct state mutation allows phantom writes, region violations, and unbounded replica counts.
-
-Source: `benchmarkreport.md` §6, `esa-gateway/tests/safety_stress_suite.rs`
-
----
-
-## 19. Reproducibility
+### Minimal — API only
 
 ```bash
-git clone <repo>
 cp .env.example .env
-docker compose up -d          # optional infra
-ollama serve && ollama pull mistral:latest
-cargo run --bin esa-api
-make benchmark-quick
-make audit-verify
+ollama serve   # optional; rule fallback if unavailable
+cargo run --bin esa-api    # http://localhost:8080
 ```
 
-Detail: [`docs/reproducibility.md`](docs/reproducibility.md)
-
----
-
-## 20. Quick Start
+### Full demo stack
 
 ```bash
 cp .env.example .env
 ollama serve
-cargo run --bin esa-api                    # :8080
-cd frontend && npm install && npm run dev  # :3000
-cd payment-simulator && npm install && npm run dev  # :5173
-./scripts/run-demo-test.sh
+cargo run --bin esa-api                              # :8080
+cd frontend && npm install && npm run dev            # :3000
+cd payment-simulator && npm install && npm run dev   # :5173
 ```
 
-Also: [`docs/reproducibility.md`](docs/reproducibility.md) and [`docs/demo.md`](docs/demo.md)
+One-shot: [`scripts/start-demo.sh`](scripts/start-demo.sh) · Smoke: [`scripts/run-demo-test.sh`](scripts/run-demo-test.sh)
+
+More: [`docs/reproducibility.md`](docs/reproducibility.md) · [`docs/demo.md`](docs/demo.md)
 
 ---
 
-## 21. Demo Walkthrough
+## Benchmark results
 
-14-step operator flow: seed → spike → agents → stale reject → rollback → audit replay.
+Figures below are from the **local benchmark harness** (Docker + Kind optional, in-memory `StateFabric`). They are **not** production Razorpay traffic or SLA guarantees.
 
-Detail: [`docs/demo.md`](docs/demo.md)
+### Performance (B0 / B1 / B2 on identical scenarios, 5 seeds)
+
+| Metric | B0 | B1 | B2 ESA |
+|--------|----|----|--------|
+| P95 tail latency | 236 ms | 257 ms | **156 ms** |
+| Time above SLA (P95>250ms) | 16.5 s | 14.8 s | **4.1 s** |
+| Stabilization | 9.6 s | 7.2 s | **2.3 s** |
+| Detection latency | 15.0 s | 15.0 s | **250 ms** |
+| Total recovery | 24.6 s | 22.2 s | 24.3 s |
+
+ESA trades ~1.8s agent deliberation for faster detection, lower tail latency, and less time above SLA in these harness scenarios.
+
+### Adversarial safety (650 identical attacks × 3 controllers)
+
+Same attack vectors applied to B0, B1, and B2 (`make adversarial`):
+
+| Controller | Unsafe mutations (of 650) |
+|------------|---------------------------|
+| B0 static rules | **450** |
+| B1 adaptive | **450** |
+| **B2 ESA** | **0** |
+
+B2: 100 stale OCC rejects · 50/50 rollbacks · SHA-256 audit chain valid · live Ollama validation in suite when reachable.
+
+Raw data: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/adversarial_suite.json)
+
+### Evidence & methodology
+
+- Full report: [`benchmarkreport.md`](benchmarkreport.md)
+- Summary: [`docs/benchmark-results.md`](docs/benchmark-results.md)
+- Methodology: [`benchmarks/methodology.md`](benchmarks/methodology.md)
+- Claims register: [`docs/claims.md`](docs/claims.md)
+
+**Ablation note:** Three variants use live harness trials; four use arithmetic offsets from `Full_ESA` — see [`benchmarks/ablations.md`](benchmarks/ablations.md).
 
 ---
 
-## 22. API / Endpoints
-
-Implemented routes on `esa-api` (8080):
-
-- Workloads, payment, Razorpay, demo scenarios
-- Agents, actions, verdicts, effects, costs, intent
-- Audit trail, verify-chain, replay
-- Benchmark harness + ablations
-- WebSocket: `/ws/telemetry`
-
-Full list: [`docs/api.md`](docs/api.md)
-
----
-
-## 23. Repository Structure
+## Repository structure
 
 ```text
 ESA_paymentgateway/
 ├── crates/
-│   ├── esa-core/           # Types, actions, audit, intent
-│   ├── esa-state/          # State fabric, snapshots, store (PG not wired)
-│   ├── esa-agents/         # Monitor, diagnosis, planning, safety, Ollama
-│   ├── esa-policy/         # Policy engine, verifier
-│   ├── esa-gateway/        # Action gateway, rollback, optional K8s
-│   ├── esa-runtime/        # Orchestrator
-│   ├── esa-api/            # HTTP API, benchmark binary
-│   ├── esa-razorpay/       # Razorpay Test Mode adapter
-│   └── esa-telemetry/      # Metrics helpers
-├── frontend/               # Command Center (React + Vite)
-├── payment-simulator/      # Razorpay checkout UI
-├── benchmarks/
-│   ├── scenarios/taxonomy.yaml
-│   ├── raw/, processed/, reports/
-│   └── *.md
-├── docs/                   # Engineering documentation
-├── scripts/                # demo.sh, start-demo.sh, tests
-├── k8s/                    # Kubernetes manifests
-├── tests/                  # Integration tests
-├── benchmarkreport.md      # Latest benchmark summary
+│   ├── esa-core/        # Types, actions, audit, intent
+│   ├── esa-state/       # State fabric, snapshots, OCC
+│   ├── esa-agents/      # Monitor, diagnosis, planning, safety
+│   ├── esa-policy/      # Policy engine, verifier
+│   ├── esa-gateway/     # Action gateway, rollback, optional K8s
+│   ├── esa-runtime/     # Orchestrator loop
+│   ├── esa-api/         # HTTP API, benchmark binaries
+│   ├── esa-razorpay/    # Razorpay Test Mode adapter
+│   └── esa-telemetry/   # Metrics helpers
+├── frontend/            # Command Center (React + Vite)
+├── payment-simulator/   # Next.js Razorpay checkout UI
+├── benchmarks/          # Harness outputs, scenarios, docs
+├── docs/                # Engineering documentation
+├── scripts/             # Demo and test scripts
+├── k8s/                 # Kubernetes manifests
+├── benchmarkreport.md
 ├── docker-compose.yml
-├── Dockerfile
-├── Makefile
-├── SECURITY.md
-├── CONTRIBUTING.md
-├── CHANGELOG.md
-└── README.md
+└── Makefile
 ```
 
 ---
 
-## 24. Configuration
-
-| Variable | Purpose |
-|----------|---------|
-| `OLLAMA_URL`, `OLLAMA_MODEL` | Diagnosis LLM |
-| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Test Mode API |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook signature |
-| `DATABASE_URL`, `REDIS_URL`, `NATS_URL` | Compose template (**not wired to API state**) |
-| `KUBERNETES_ENABLED` | Optional kubectl scale |
-| `API_PORT` | Default 8080 |
-
-Template: [`.env.example`](.env.example)
-
----
-
-## 25. Limitations
-
-- In-memory state fabric (PostgreSQL `StateStore` not connected to API)
-- Redis / NATS in Compose only – not used by runtime loop
-- No Prometheus `/metrics` on API
-- No automatic replan on failed effect verification
-- Ablation offsets for 4 of 7 variants (not live feature flags)
-- Audit trail not persisted across API restarts
-- Benchmark harness environment – not production Razorpay traffic
-
-**Not claimed:** production deployment, RBI/PCI compliance, real GMV protection, settlement, security certifications.
-
-See [`docs/claims.md`](docs/claims.md).
-
----
-
-## 26. Security / Secrets
-
-- Never commit Razorpay live keys or production credentials
-- Use `.env` locally; `.env.example` is safe to commit
-- Test Mode only (`rzp_test_…`)
-- Agents have no direct infrastructure execution privileges
-
-Detail: [`SECURITY.md`](SECURITY.md)
-
----
-
-## 27. Technology Stack
+## Technology stack
 
 | Layer | Technology |
 |-------|------------|
 | Runtime / API | Rust, Axum, Tokio |
 | Agents | Rust + Ollama (local LLM) |
-| State | In-memory fabric + OCC |
-| Policy / Gateway | Rust crates in workspace |
+| State | In-memory `StateFabric` + OCC |
+| Governance | `esa-policy`, `esa-gateway` |
 | Command Center | React, TypeScript, Vite, Tailwind |
-| Payment UI | Next.js, Razorpay Checkout |
+| Payment UI | Next.js, Razorpay Checkout (Test Mode) |
 | Optional infra | Docker Compose, Postgres, Redis, NATS, Prometheus, Grafana |
-| Optional K8s | Kind, kubectl scale |
-| CI | GitHub Actions |
+| Kubernetes | Kind, optional `kubectl scale` |
+| CI | GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) |
 
 ---
 
-## 28. License
+## Configuration
 
-MIT License – see [LICENSE](LICENSE).
+Copy [`.env.example`](.env.example) to `.env` — never commit secrets.
 
-Copyright (c) 2026 ESA Team.
+| Variable | Purpose |
+|----------|---------|
+| `OLLAMA_URL`, `OLLAMA_MODEL` | Diagnosis LLM |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | **Test Mode** only (`rzp_test_…`) |
+| `RAZORPAY_WEBHOOK_SECRET` | Webhook signature verification |
+| `KUBERNETES_ENABLED` | Optional `kubectl scale` side effects |
+| `DATABASE_URL`, `REDIS_URL`, `NATS_URL` | Compose template — **not wired to API state today** |
 
 ---
 
-## Documentation index
+## Reproducibility
 
-Full engineering docs: [`docs/README.md`](docs/README.md) · Claims register: [`docs/claims.md`](docs/claims.md)
+```bash
+make benchmark-quick      # smoke harness
+make benchmark            # full B0/B1/B2 matrix
+make adversarial          # 650-trial cross-controller safety suite
+make audit-verify         # SHA-256 chain tamper test
+make test                 # workspace tests
+```
 
-**ESA Team – Razorpay Buildathon 2026**
+Details: [`docs/reproducibility.md`](docs/reproducibility.md) · [`benchmarks/README.md`](benchmarks/README.md)
+
+---
+
+## Current limitations
+
+- In-memory state fabric (`PostgreSQL` `StateStore` exists but is **not** connected to the API)
+- Redis / NATS defined in Compose — **not** used by the runtime loop
+- No Prometheus `/metrics` endpoint on the API
+- No automatic replan when effect verification reports `Failed`
+- Four of seven ablation variants use **modeled offsets**, not live feature flags
+- Audit trail is in-memory — not persisted across API restarts
+- Benchmarks run in a **containerized demo environment**, not production payment traffic
+
+**Not claimed:** production deployment, RBI/PCI compliance, real GMV protection, settlement, or security certifications.
+
+Full register: [`docs/claims.md`](docs/claims.md)
+
+---
+
+## Security
+
+- Never commit Razorpay **live** keys or production credentials
+- Razorpay **Test Mode** only for this repository
+- Use local `.env`; template is safe to commit
+- Agents have **no** direct infrastructure execution privileges
+
+[`SECURITY.md`](SECURITY.md)
+
+---
+
+## Documentation
+
+| Topic | Link |
+|-------|------|
+| Index | [`docs/README.md`](docs/README.md) |
+| Architecture | [`docs/architecture.md`](docs/architecture.md) |
+| Execution flow | [`docs/execution-flow.md`](docs/execution-flow.md) |
+| Governance | [`docs/governance.md`](docs/governance.md) |
+| Agent model | [`docs/agent-model.md`](docs/agent-model.md) |
+| Demo | [`docs/demo.md`](docs/demo.md) |
+| Reproducibility | [`docs/reproducibility.md`](docs/reproducibility.md) |
+| Benchmark results | [`docs/benchmark-results.md`](docs/benchmark-results.md) |
+| Failure recovery | [`docs/failure-recovery.md`](docs/failure-recovery.md) |
+| API | [`docs/api.md`](docs/api.md) |
+| Claims register | [`docs/claims.md`](docs/claims.md) |
+| PRD | [`docs/ESA_paymentprdv2.md`](docs/ESA_paymentprdv2.md) |
+| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 ESA Team.
