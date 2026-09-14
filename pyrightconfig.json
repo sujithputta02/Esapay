@@ -1,0 +1,13 @@
+{
+  "include": [
+    "arc_reasoner"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/target",
+    ".venv"
+  ]
+}

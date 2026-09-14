@@ -4,14 +4,25 @@ use esa_core::EsaResult;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::fluid_reasoner::FluidReasonerClient;
+
 /// Diagnosis Agent - Analyzes conditions and identifies root causes
 pub struct DiagnosisAgent {
     ollama_client: OllamaClient,
+    fluid_client: Option<FluidReasonerClient>,
 }
 
 impl DiagnosisAgent {
     pub fn new(ollama_client: OllamaClient) -> Self {
-        Self { ollama_client }
+        Self {
+            ollama_client,
+            fluid_client: None,
+        }
+    }
+
+    pub fn with_fluid_reasoner(mut self, fluid_client: FluidReasonerClient) -> Self {
+        self.fluid_client = Some(fluid_client);
+        self
     }
 
     pub async fn diagnose(&self, conditions: &[Condition]) -> EsaResult<Diagnosis> {
@@ -25,12 +36,36 @@ impl DiagnosisAgent {
             });
         }
 
-        // Build diagnosis prompt
-        let prompt = self.build_diagnosis_prompt(conditions);
-
         info!("Diagnosis agent analyzing {} conditions", conditions.len());
 
-        // For MVP, use rule-based diagnosis if Ollama is unavailable
+        // Tier 1: Try Fluid Reasoning Engine (Autonomous Topological Rule Induction)
+        if let Some(fluid_client) = &self.fluid_client {
+            match fluid_client.diagnose(conditions).await {
+                Ok(diagnosis) => {
+                    if diagnosis.confidence >= 0.7 {
+                        info!(
+                            "✅ Fluid reasoning succeeded with confidence {:.2}",
+                            diagnosis.confidence
+                        );
+                        return Ok(diagnosis);
+                    } else {
+                        warn!(
+                            "Fluid reasoning confidence too low ({:.2}), falling back to LLM",
+                            diagnosis.confidence
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Fluid reasoning engine unavailable or timed out: {}. Falling back to LLM/Rules",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Tier 2: Ollama LLM
+        let prompt = self.build_diagnosis_prompt(conditions);
         match self
             .ollama_client
             .generate_with_agent("diagnosis", prompt)
@@ -51,6 +86,7 @@ impl DiagnosisAgent {
             }
             Err(e) => {
                 warn!("Ollama unavailable, using rule-based diagnosis: {}", e);
+                // Tier 3: Deterministic Rule-based diagnosis
                 Ok(self.rule_based_diagnosis(conditions))
             }
         }
