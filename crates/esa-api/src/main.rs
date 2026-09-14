@@ -372,7 +372,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/metrics/tokens", get(get_token_metrics))
         .route("/api/agents/status", get(get_agents_status))
         .route("/api/agents/activity", get(get_agent_activity))
-        .route("/api/agents/fluid-reasoner/status", get(get_fluid_reasoner_status))
+        .route(
+            "/api/agents/fluid-reasoner/status",
+            get(get_fluid_reasoner_status),
+        )
         .route("/api/actions/recent", get(get_recent_actions))
         // NEW: Audit Trail endpoints
         .route("/api/audit/trail", get(get_audit_trail))

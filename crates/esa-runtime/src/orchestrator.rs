@@ -43,7 +43,9 @@ impl EsaOrchestrator {
         let fluid_client = FluidReasonerClient::default_local();
         Self {
             monitor_agent: Arc::new(MonitorAgent::new(Arc::clone(&state_fabric))),
-            diagnosis_agent: Arc::new(DiagnosisAgent::new(ollama_client).with_fluid_reasoner(fluid_client)),
+            diagnosis_agent: Arc::new(
+                DiagnosisAgent::new(ollama_client).with_fluid_reasoner(fluid_client),
+            ),
             planning_agent,
             safety_agent: Arc::new(SafetyAgent::new()),
             _policy_engine: Arc::clone(&policy_engine),

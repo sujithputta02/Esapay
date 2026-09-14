@@ -93,7 +93,10 @@ mod tests {
         }];
 
         let result = client.diagnose(&conditions).await;
-        assert!(result.is_err(), "Expected connection error to non-existent server");
+        assert!(
+            result.is_err(),
+            "Expected connection error to non-existent server"
+        );
     }
 
     #[test]
@@ -106,10 +109,16 @@ mod tests {
             "recommended_action": "CREATE_REPLICA"
         }"#;
 
-        let diagnosis: Diagnosis = serde_json::from_str(json_data).expect("Must parse valid diagnosis");
-        assert_eq!(diagnosis.root_cause, crate::diagnosis::RootCause::HotPartition);
-        assert_eq!(diagnosis.recommended_action, Some("CREATE_REPLICA".to_string()));
+        let diagnosis: Diagnosis =
+            serde_json::from_str(json_data).expect("Must parse valid diagnosis");
+        assert_eq!(
+            diagnosis.root_cause,
+            crate::diagnosis::RootCause::HotPartition
+        );
+        assert_eq!(
+            diagnosis.recommended_action,
+            Some("CREATE_REPLICA".to_string())
+        );
         assert!((diagnosis.confidence - 0.94).abs() < f64::EPSILON);
     }
 }
-
