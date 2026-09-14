@@ -332,11 +332,15 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Initialize fluid reasoner client
+    let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
+
     // Create app state
     let app_state = AppState {
         state_fabric,
         orchestrator,
         ollama_client,
+        fluid_reasoner,
         broadcaster: Arc::clone(&broadcaster),
         audit_store,
         agent_status,
@@ -368,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/metrics/tokens", get(get_token_metrics))
         .route("/api/agents/status", get(get_agents_status))
         .route("/api/agents/activity", get(get_agent_activity))
+        .route("/api/agents/fluid-reasoner/status", get(get_fluid_reasoner_status))
         .route("/api/actions/recent", get(get_recent_actions))
         // NEW: Audit Trail endpoints
         .route("/api/audit/trail", get(get_audit_trail))
@@ -410,6 +415,7 @@ struct AppState {
     state_fabric: Arc<StateFabric>,
     orchestrator: Arc<EsaOrchestrator>,
     ollama_client: OllamaClient,
+    fluid_reasoner: esa_agents::FluidReasonerClient,
     broadcaster: Arc<TelemetryBroadcaster>,
     audit_store: Arc<AuditStore>,
     agent_status: Arc<std::sync::RwLock<AgentStatusState>>,
@@ -433,6 +439,17 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy",
         "service": "esa-api"
+    }))
+}
+
+async fn get_fluid_reasoner_status(State(state): State<AppState>) -> impl IntoResponse {
+    let available = state.fluid_reasoner.is_available().await;
+    Json(serde_json::json!({
+        "status": if available { "online" } else { "offline" },
+        "service": "arc_fluid_reasoner",
+        "port": 5005,
+        "available": available,
+        "fallback_tier_order": ["FluidReasoner (Local port 5005)", "Ollama LLM (mistral)", "Deterministic Rules"]
     }))
 }
 

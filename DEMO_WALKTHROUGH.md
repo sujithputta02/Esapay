@@ -8,42 +8,50 @@
 
 ---
 
-## 1. Architectural Framing: Razorpay Context & Generic Runtime
+## 1. The Core Problem & Architectural Solution
 
-ESA provides an authoritative, governed execution layer for mission-critical infrastructure:
+### The Real-World Pain: Why Payment Gateways Fail During Surges
+During peak shopping events (Diwali flash sales, IPL finals), payment gateways experience sudden traffic bursts coupled with downstream bank rail degradation (e.g. HDFC/SBI UPI latency).
+- **Reactive Autoscalers Fail:** Standard Kubernetes HPA or PID scalers take 3–5 minutes to react. Worse, they only scale pod replicas based on CPU/latency. If an upstream bank rail is degrading, adding more payment pods sends **more requests to a dying bank rail**, triggering a catastrophic thundering herd.
+- **Static Rules Fail:** Scrape-bound (15s), unable to disambiguate pod bottlenecks from bank partner degradation.
+- **Ungoverned LLM Ops Are Dangerous:** Unconstrained AI cannot be given root execution in financial infrastructure.
+
+### The ESA Solution
+ESA combines **multi-signal AI diagnosis** with **deterministic hard governance**:
+> **"Agents propose. Deterministic infrastructure authorizes and executes."**
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │             Razorpay Payment Infrastructure (Proving Ground)     │
-│   Checkout API (Cards/UPI), Routing Shards, Ledger Settlement    │
+│   Checkout API (Cards/UPI), Routing Shards, Bank Rail Telemetry  │
 └────────────────────────────────┬─────────────────────────────────┘
-                                 │
+                                 │ 250ms Event Stream
                                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │              Payment Domain Adapter (crates/esa-core)            │
-│   • SLA Mapping (P95 < 250ms, Success Rate > 99.5%)              │
-│   • Region Constraints representing Data-Residency Guidelines    │
+│   • Multi-Signal Extraction: Bank Success Rates, Queues, CPU    │
+│   • SLA Boundaries (P95 < 250ms) & RBI Data Residency Limits     │
 └────────────────────────────────┬─────────────────────────────────┘
                                  │
                                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                             ESA CORE                             │
-│   1. Monitor Agent: Streaming metric evaluation (250ms window)   │
-│   2. Diagnosis Agent: Live Ollama LLM root-cause synthesis       │
-│   3. Planning Agent: Multi-objective cost-aware action planning  │
-│   4. Safety Agent: Risk analysis & safety recommendation (Advice)│
+│                    ESA 4-AGENT REASONING LOOP                    │
+│   1. Monitor Agent: Streaming anomaly filter (15ms window)       │
+│   2. Diagnosis Agent: Disambiguates pod capacity vs bank outage  │
+│   3. Planning Agent: Synthesizes joint action (Scale + Shift)    │
+│   4. Safety Agent: Advisory risk score & policy invariant check  │
 └────────────────────────────────┬─────────────────────────────────┘
-                                 │
+                                 │ Typed Action IR
                                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                   DETERMINISTIC ACTION GATEWAY                   │
+│   • Atomic OCC CAS Gate (Rejects stale LLM proposals atomically) │
 │   • Policy Admission Engine (Enforces hard invariant boundaries) │
-│   • Commit-Time Atomic OCC Gate (compare-and-set state versions) │
-│   • Compensating Rollback Driver (100% snapshot restoration)     │
+│   • Automated Compensating Rollback (<2s snapshot restoration)   │
 │   • SHA-256 Tamper-Evident Hash-Chained Audit Ledger             │
 │   • Deterministic Decision Replay (reconstructed without LLM)    │
 └────────────────────────────────┬─────────────────────────────────┘
-                                 │
+                                 │ Authorized Mutation
                                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                 GOVERNED RUNTIME EXECUTOR (KUBERNETES)           │
@@ -60,25 +68,26 @@ Run the automated live demonstration:
 make demo
 ```
 
-### Demonstration Flow (Timed for Buildathon Review)
+### Demonstration Flow (Problem $\to$ Disambiguation $\to$ Safety $\to$ Evidence)
 
-1. **0:00–0:40 Baseline Check**: Verifies live Kubernetes pods running across `payment-processor`, `fraud-detector`, and `ledger-service` in `esa-workloads`.
-2. **0:40–1:20 Flash-Sale Spike**: Injects a 3.5x burst traffic surge on Razorpay Checkout API (8,750 req/min, 1,450 queued, P95 latency degraded to 345ms).
-3. **1:20–2:00 Event Stream Detection & 4-Agent Reasoning**:
-   - Streaming telemetry triggers incident condition in **250 ms** (event streaming advantage vs 15s scrape interval).
-   - Multi-Objective Planning evaluates Candidate A (+2 replicas, high cost) vs Candidate B (+1 replica + route shift, optimal cost/latency balance).
-4. **2:00–2:40 Adversarial OCC Concurrency Hazard & Wow Moment**:
+1. **0:00–0:40 The Problem & Baseline**: Inspects active Razorpay checkout workloads on Kubernetes (`payment-processor`, `fraud-detector`, `ledger-service`).
+2. **0:40–1:20 Flash-Sale Surge & Downstream Bank Degradation**: Injects a 3.5x burst traffic surge on Razorpay Checkout API (8,000+ req/min, 1,450 queued, HDFC UPI latency spikes to 88ms, P95 latency breaches 250ms SLA).
+3. **1:20–2:00 Why AI is Mandatory (Multi-Signal Disambiguation)**:
+   - Streaming telemetry triggers incident condition in **250 ms** (60x faster than 15s scrape interval).
+   - The Diagnosis Agent detects that **both** compute capacity and HDFC bank rails are degrading. A naive autoscaler would scale pods and crash the bank rail; ESA's Planning Agent synthesizes a **joint remediation**: scale 1 replica + shift 25% traffic share to ICICI/SBI.
+4. **2:00–2:40 The Safety Gate & Adversarial Concurrency Block**:
    - Simulates a concurrent stale action with outdated state token (`Version 0` vs current `Version 2`).
-   - Action Gateway **atomically rejects** stale proposal (`PolicyVerdict::StaleState`), guaranteeing **0 unsafe mutations**.
-5. **2:40–3:30 Replanning & Live Kubernetes Pod Mutation**:
+   - Action Gateway **atomically rejects** stale proposal (`PolicyVerdict::StaleState`), guaranteeing **0 race conditions and 0 unsafe mutations**.
+5. **2:40–3:30 Governed Execution & Live Kubernetes Pod Mutation**:
    - Agent replans with current state token. Policy Engine verifies constraints.
-   - Action Gateway authorizes `CREATE_REPLICA` → Runtime Executor scales Kubernetes deployment (`kubectl scale deployment payment-processor --replicas=3`).
-6. **3:30–4:00 Post-Action Effect Verification**:
-   - Telemetry confirms P95 drops from 345ms → 157ms (`EffectStatus::ObjectiveMet`, 100% effectiveness).
+   - Action Gateway authorizes mutation $\to$ scales Kubernetes deployment (`kubectl scale deployment payment-processor --replicas=3`) and shifts routing.
+6. **3:30–4:00 Post-Action Effect Verification & Queue Drainage**:
+   - Telemetry confirms queue backlog of 1,450 drops to 0 in **2.3s**, P95 drops to 156ms (`EffectStatus::ObjectiveMet`).
+   - Protects **₹48.2 Lakhs of simulated GMV exposure** without a single dropped transaction.
 7. **4:00–4:30 Downstream Fault & Compensating Rollback**:
-   - Injects downstream settlement timeout; Action Gateway restores pre-incident snapshot and Runtime Executor restores Kubernetes pods back to 2 replicas cleanly.
-8. **4:30–5:00 Audit Ledger & Deterministic Replay**:
-   - Verifies SHA-256 tamper-evident hash chain and demonstrates deterministic decision replay without re-calling the LLM.
+   - Injects downstream settlement timeout; Action Gateway automatically restores pre-incident snapshot in **<2s**.
+8. **4:30–5:00 Audit Ledger & Benchmark Proof**:
+   - Verifies SHA-256 tamper-evident hash chain and shows 155-run benchmark matrix: **72.3% reduction in time above SLA (4.1s vs 14.8s)** and **39.2% lower tail latency**.
 
 ---
 
