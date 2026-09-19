@@ -1,4 +1,4 @@
-.PHONY: demo benchmark benchmark-smoke benchmark-quick adversarial test audit-verify
+.PHONY: demo benchmark benchmark-smoke benchmark-quick adversarial test audit-verify rbench rbench-locked rbench-smoke rbench-ablations
 
 demo:
 	./scripts/demo.sh
@@ -20,3 +20,16 @@ test:
 
 audit-verify:
 	cargo test --test tamper_detection_test -- --nocapture
+
+rbench:
+	PYTHONPATH=. python3 -m arc_reasoner.esa_rbench.runner --locked
+
+rbench-locked:
+	PYTHONPATH=. python3 -m arc_reasoner.esa_rbench.runner --locked
+
+rbench-smoke:
+	PYTHONPATH=. python3 -m arc_reasoner.esa_rbench.runner --smoke
+
+rbench-ablations:
+	PYTHONPATH=. python3 -m arc_reasoner.esa_rbench.runner --ablations
+

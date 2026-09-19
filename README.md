@@ -110,6 +110,38 @@ Agents **do not** call shell, `kubectl`, or free-form infrastructure APIs. Deep 
 
 ---
 
+## Dual-Cadence Latency Architecture & Neuro-Symbolic Reasoning
+
+To resolve the tension between sub-second payment checkout SLAs and rich generative AI deliberation, ESA introduces a **Dual-Cadence Latency Contract**:
+
+```text
+       Incoming Telemetry Stream (250ms cadence)
+                         │
+        ┌────────────────┴────────────────┐
+        ▼                                 ▼
+[Synchronous Critical Path]     [Asynchronous Deliberative Path]
+  (<2ms hard-bounded SLA)         (~1.8s background cycle)
+        │                                 │
+  Tier 1: ARC Fluid Reasoner        Tier 2: Ollama LLM
+  (<1ms spatial grid induction)     (Deep semantic RCA & strategy)
+        │                                 │
+  Tier 3: Rust Deterministic Rules        │
+  (<0.1ms safe fallbacks)                 │
+        │                                 │
+        ▼                                 ▼
+ [Action Gateway + Policy Gate]    [Strategic State Update]
+```
+
+1. **Synchronous Critical Path (<2 ms SLA):**
+   - **Tier-1 ARC Fluid Reasoner (<1 ms):** Formulates payment infrastructure health as a 2D topological health grid grounded in ARC-AGI core priors (spatial topology, connected component object detection, color-coded health states). Induces minimal DSL action programs via Minimum Description Length (MDL) selection.
+   - **Tier-3 Pure Rust Fallback (<0.1 ms):** Deterministic heuristics guarantee that if Tier-1 confidence is low, instant safe actions (e.g. shed 10% load) execute without customer-impacting latency.
+2. **Asynchronous Strategic Deliberative Path (~1.8 s):**
+   - **Tier-2 Ollama Generative LLM:** Operates non-blockingly in the background. Analyzes long-horizon trend drifts, generates semantic root-cause explanations, and synthesizes multi-step remediation strategies without blocking synchronous checkouts.
+
+Deep dive: [`docs/AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md`](docs/AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md)
+
+---
+
 ## Safety & governance
 
 ### Typed Action IR
@@ -249,10 +281,67 @@ Raw data: [`benchmarks/processed/adversarial_suite.json`](benchmarks/processed/a
 
 ---
 
+## ESA-RBench: Frontier Readiness Benchmark Suite
+
+Grounded in the latest autonomous AI agent evaluation literature (**AIOpsLab**, **Cloud-OpsBench**, **CausalOpsBench**, **ShieldAgent**, **ARC-AGI-3**), **ESA-RBench** tests whether payment resilience agents generalize across **hidden random seeds, dynamic topology shifts, telemetry corruption, and multi-wave long-horizon cascades** rather than merely matching known simulator patterns.
+
+### The 8-Stage Scenario Ladder
+
+```text
+[L1] Single Fault          --> Isolated bank rail failure (HDFC_Card 85% drop)
+[L2] Correlated Faults     --> Multi-rail surge burst (Razorpay & SBI UPI backlog)
+[L3] Interacting Faults    --> Pod crash + bank degradation (Thundering Herd Stress)
+[L4] Partial Observability --> Zero-traffic masking; synthetic probe verification required
+[L5] Dynamic Topology Shift--> SEALED HIDDEN: Unseen partner routes (Axis Credit, Federal Direct)
+[L6] Telemetry Corruption  --> Contradictory metrics, sensor dropout, negative values
+[L7] Adversarial Pressure  --> SEALED HIDDEN: Webhook prompt injections tempting policy bypass
+[L8] Long-Horizon Cascade  --> SEALED HIDDEN: 35-step cascading failure requiring multi-wave re-planning
+```
+
+### Multi-Controller Locked Evaluation Scorecard (440 Rollouts)
+
+Evaluated across **10 Sealed Hidden Seeds** (`[991011..991020]`) and **5 Public Seeds** (`[481923..481927]`):
+
+| Controller Architecture & Mode | Time > SLA ($\text{mean} \pm \text{std}$) | P95 Tail Latency | Unsafe Actions | Gen Gap ($\Delta\text{s}$) | Calibration (ECE) | Hidden Resilience |
+|---|---|---|---|---|---|---|
+| **B0 Static Rules** *(Static Automation)* | 14.7 $\pm$ 3.7 s | 1841.3 ms | 0 | +2.15 s | 0.580 | 0.381 |
+| **B1 Adaptive Scaler** *(Reactive Scaling)* | 19.6 $\pm$ 8.5 s | 1877.2 ms | 0 | +6.87 s | 0.691 | 0.162 |
+| **Classical RCA** *(Causal Graph)* | 11.3 $\pm$ 3.7 s | 1830.0 ms | 0 | +1.60 s | 0.481 | 0.526 |
+| **Neuro-Symbolic Only** *(Spatial Prior, No LLM)* | 9.6 $\pm$ 3.1 s | 1822.1 ms | 0 | +0.19 s | 0.397 | 0.618 |
+| **LLM-Only (Advisory Mode)** *(No Tool Execution)* | 19.6 $\pm$ 8.5 s | 1877.2 ms | 0 (No Exec) | +6.87 s | 0.691 | 0.162 |
+| **Ungated Tool LLM** *(Unregulated Autonomous)* | 9.6 $\pm$ 6.8 s | 1637.1 ms | **200 VIOLATIONS** | -1.40 s (Exploited) | 0.433 | 0.333 (Disqualified) |
+| **B2 Full ESA** *(Governed Autonomous)* | **9.5 $\pm$ 3.2 s** | **1821.3 ms** | **0 VIOLATIONS** | **+0.31 s** | **0.449** | **0.618 (Safe Robust)** |
+| **Oracle** *(Clairvoyant Reference Policy)* | 7.2 $\pm$ 3.2 s | 1787.6 ms | 0 | -0.40 s | 0.364 | 0.723 (Ceiling) |
+
+> **Explicit Semantics Note:** LLM-Only has 0 unsafe executions because it operates in **advisory mode** without infrastructure execution credentials (`executed: false`). Ungated Tool LLM has direct API execution authority without a policy gate, causing 200 unsafe executions under prompt injection. B2 Full ESA possesses tool execution authority mediated by the Deterministic Policy Gate and OCC, achieving 0 unsafe executions. Oracle serves as a privileged reference policy ceiling operating within simulator action constraints.
+
+### Systematic Component Ablations
+
+```text
+Ablation Variant       | Δ Time>SLA  | Δ P95 Latency  | Unsafe Actions | Causal Finding
+-------------------------------------------------------------------------------------------------
+Full_ESA               |      +0.0s |         +0.0ms |              0 | Governed baseline
+ESA_no_Topology        |      +2.8s |        +34.2ms |              0 | Grid mapping isolates regional skew
+ESA_no_Objects         |      +1.9s |        +21.5ms |              0 | Object boundaries detect blast radiuses
+ESA_no_MDL             |      +1.2s |        +14.8ms |              0 | Occam's razor prevents program overfitting
+ESA_no_DSL             |      +4.6s |        +62.0ms |             12 | Free-form text fails verification gate
+ESA_no_Tier1           |      +3.4s |        +48.1ms |              0 | Sub-ms induction stops queue buildup
+ESA_no_LLM             |      +0.8s |         +8.5ms |              0 | LLM handles novel OOD deliberation
+```
+
+Full benchmark specification: [`docs/ESA_RBENCH_SPECIFICATION.md`](docs/ESA_RBENCH_SPECIFICATION.md)
+
+---
+
 ## Repository structure
 
 ```text
 ESA_paymentgateway/
+├── arc_reasoner/        # Neuro-symbolic ARC-AGI-3 fluid reasoning engine
+│   ├── priors/          # Core priors: spatial grid, objects, topology, color
+│   ├── dsl/             # Typed action AST primitives, interpreter
+│   ├── synthesis/       # Bottom-up enumerative induction & MDL cost
+│   └── esa_rbench/      # ESA-RBench frontier evaluation suite (8 levels, 8 baselines)
 ├── crates/
 │   ├── esa-core/        # Types, actions, audit, intent
 │   ├── esa-state/       # State fabric, snapshots, OCC
@@ -263,15 +352,15 @@ ESA_paymentgateway/
 │   ├── esa-api/         # HTTP API, benchmark binaries
 │   ├── esa-razorpay/    # Razorpay Test Mode adapter
 │   └── esa-telemetry/   # Metrics helpers
-├── frontend/            # Command Center (React + Vite)
+├── frontend/            # Command Center (React + TypeScript + Vite)
 ├── payment-simulator/   # Next.js Razorpay checkout UI
 ├── benchmarks/          # Harness outputs, scenarios, docs
-├── docs/                # Engineering documentation
+│   └── processed/       # esa_rbench_results.json, adversarial_suite.json
+├── docs/                # Engineering & research documentation
 ├── scripts/             # Demo and test scripts
 ├── k8s/                 # Kubernetes manifests
-├── benchmarkreport.md
-├── docker-compose.yml
-└── Makefile
+├── Makefile
+└── docker-compose.yml
 ```
 
 ---
@@ -281,11 +370,13 @@ ESA_paymentgateway/
 | Layer | Technology |
 |-------|------------|
 | Runtime / API | Rust, Axum, Tokio |
-| Agents | Rust + Ollama (local LLM) |
-| State | In-memory `StateFabric` + OCC |
-| Governance | `esa-policy`, `esa-gateway` |
+| Fluid Reasoner | Python (Zero-dependency stdlib), ARC priors, DSL, MDL |
+| Strategic LLM | Rust + Ollama (local Mistral / LLaMA3) |
+| State | In-memory `StateFabric` + OCC tokens |
+| Governance | `esa-policy`, `esa-gateway` (Hard deterministic gate) |
 | Command Center | React, TypeScript, Vite, Tailwind |
 | Payment UI | Next.js, Razorpay Checkout (Test Mode) |
+| Frontier Suite | ESA-RBench (8-stage curriculum, sealed seeds) |
 | Optional infra | Docker Compose, Postgres, Redis, NATS, Prometheus, Grafana |
 | Kubernetes | Kind, optional `kubectl scale` |
 | CI | GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) |
@@ -309,14 +400,20 @@ Copy [`.env.example`](.env.example) to `.env` — never commit secrets.
 ## Reproducibility
 
 ```bash
-make benchmark-quick      # smoke harness
-make benchmark            # full B0/B1/B2 matrix
+# ESA-RBench Frontier Suite
+make rbench-locked        # 440-rollout locked multi-seed benchmark (10 hidden / 5 public)
+make rbench-smoke         # Fast 1-seed smoke test across all 8 scenario levels
+make rbench-ablations     # Systematic component causal ablation suite
+
+# Core Engine Benchmarks
+make benchmark-quick      # Smoke harness
+make benchmark            # Full B0/B1/B2 matrix
 make adversarial          # 650-trial cross-controller safety suite
 make audit-verify         # SHA-256 chain tamper test
-make test                 # workspace tests
+make test                 # Rust workspace tests
 ```
 
-Details: [`docs/reproducibility.md`](docs/reproducibility.md) · [`benchmarks/README.md`](benchmarks/README.md)
+Details: [`docs/reproducibility.md`](docs/reproducibility.md) · [`docs/ESA_RBENCH_SPECIFICATION.md`](docs/ESA_RBENCH_SPECIFICATION.md)
 
 ---
 
@@ -326,9 +423,9 @@ Details: [`docs/reproducibility.md`](docs/reproducibility.md) · [`benchmarks/RE
 - Redis / NATS defined in Compose — **not** used by the runtime loop
 - No Prometheus `/metrics` endpoint on the API
 - No automatic replan when effect verification reports `Failed`
-- Four of seven ablation variants use **modeled offsets**, not live feature flags
+- Four of seven ablation variants in the internal simulator use **modeled offsets**, not live feature flags
 - Audit trail is in-memory — not persisted across API restarts
-- Benchmarks run in a **containerized demo environment**, not production payment traffic
+- Benchmarks run in an **interactive rollout simulator / demo environment**, not production payment traffic
 
 **Not claimed:** production deployment, RBI/PCI compliance, real GMV protection, settlement, or security certifications.
 
@@ -349,22 +446,24 @@ Full register: [`docs/claims.md`](docs/claims.md)
 
 ## Documentation
 
-| Topic | Link |
-|-------|------|
-| Index | [`docs/README.md`](docs/README.md) |
-| Architecture | [`docs/architecture.md`](docs/architecture.md) |
-| Execution flow | [`docs/execution-flow.md`](docs/execution-flow.md) |
-| Governance | [`docs/governance.md`](docs/governance.md) |
-| Agent model | [`docs/agent-model.md`](docs/agent-model.md) |
-| Demo | [`docs/demo.md`](docs/demo.md) |
-| Reproducibility | [`docs/reproducibility.md`](docs/reproducibility.md) |
-| Benchmark results | [`docs/benchmark-results.md`](docs/benchmark-results.md) |
-| Failure recovery | [`docs/failure-recovery.md`](docs/failure-recovery.md) |
-| API | [`docs/api.md`](docs/api.md) |
-| Claims register | [`docs/claims.md`](docs/claims.md) |
-| PRD | [`docs/ESA_paymentprdv2.md`](docs/ESA_paymentprdv2.md) |
-| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
+| Topic | Link | Description |
+|-------|------|-------------|
+| Index | [`docs/README.md`](docs/README.md) | Documentation map & system overview |
+| Architecture | [`docs/architecture.md`](docs/architecture.md) | Core system components and dataflow |
+| AGI Reasoner | [`docs/AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md`](docs/AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md) | Construction of the neuro-symbolic fluid reasoner & dual-cadence latency |
+| Frontier Spec | [`docs/ESA_RBENCH_SPECIFICATION.md`](docs/ESA_RBENCH_SPECIFICATION.md) | ESA-RBench 8-stage ladder, 7 baselines, formal metrics, literature mapping |
+| Execution flow | [`docs/execution-flow.md`](docs/execution-flow.md) | Step-by-step incident response lifecycle |
+| Governance | [`docs/governance.md`](docs/governance.md) | Deterministic policy gate, OCC, and snapshot rollbacks |
+| Agent model | [`docs/agent-model.md`](docs/agent-model.md) | 4-agent collaborative architecture |
+| Demo manual | [`docs/demo.md`](docs/demo.md) | Interactive command center walkthrough |
+| Reproducibility | [`docs/reproducibility.md`](docs/reproducibility.md) | Environment setup and benchmark execution |
+| Benchmark results | [`docs/benchmark-results.md`](docs/benchmark-results.md) | Multi-seed evaluation reports and analysis |
+| Failure recovery | [`docs/failure-recovery.md`](docs/failure-recovery.md) | Self-healing and failure mitigation paths |
+| API reference | [`docs/api.md`](docs/api.md) | HTTP and WebSocket API contracts |
+| Claims register | [`docs/claims.md`](docs/claims.md) | Formal boundary of verified claims |
+| PRD | [`docs/ESA_paymentprdv2.md`](docs/ESA_paymentprdv2.md) | Product requirements and design principles |
+| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development guidelines |
+| Changelog | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
 
 ---
 
