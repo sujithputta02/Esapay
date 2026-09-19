@@ -4,6 +4,13 @@ Engineering and research documentation for the ESA + Razorpay Buildathon prototy
 
 **Rule:** All claims must match [claims.md](claims.md) and [../benchmarkreport.md](../benchmarkreport.md).
 
+## Frontier Reasoning & Evaluation
+
+| Document | Description |
+|----------|-------------|
+| [AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md](AGI_REASONER_ARCHITECTURE_AND_CONSTRUCTION.md) | Construction of the neuro-symbolic fluid reasoner (ARC priors, DSL, MDL) & dual-cadence latency contract |
+| [ESA_RBENCH_SPECIFICATION.md](ESA_RBENCH_SPECIFICATION.md) | ESA-RBench 8-stage ladder, 7 baselines + privileged reference policy, formal metrics, literature mapping |
+
 ## Architecture & execution
 
 | Document | Description |
