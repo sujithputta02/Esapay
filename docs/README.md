@@ -1,6 +1,6 @@
 # ESA Documentation
 
-Engineering and research documentation for the ESA + Razorpay Buildathon prototype.
+Engineering and research documentation for the ESA (Executable State Architecture) platform.
 
 **Rule:** All claims must match [claims.md](claims.md) and [../benchmarkreport.md](../benchmarkreport.md).
 

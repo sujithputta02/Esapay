@@ -1,7 +1,7 @@
 # ESA (Executable State Architecture) — Ultimate 5-Minute Video Pitch & Demo Script
 **Speaker:** Sujith Putta  
-**Event:** Razorpay AI Buildathon  
-**Track:** Track 05 — Open Track: *"Build what you believe should exist"*  
+**Project:** ESA (Executable State Architecture)  
+**Vision:** Autonomous Multi-Gateway Payment Infrastructure & Self-Healing Resilience Engine  
 **5-Minute Demo Video:** [https://youtu.be/77qjP2yK7Og](https://youtu.be/77qjP2yK7Og)  
 **Target Duration:** Exactly 5:00 Minutes (100% Focused Live Pitch & Demo)  
 
@@ -34,7 +34,7 @@
 *(Mouse: Point to Merchant Wallet, Payment Split Donut, and authentic Razorpay Card)*
 
 #### 🗣️ Read This Aloud:
-> *"Hello Razorpay AI Buildathon! I'm **Sujith Putta**. For **Track 05 — Open Track**, I built what fundamentally needs to exist in mission-critical financial systems: **ESA (Executable State Architecture)** — an autonomous payment infrastructure resilience engine.*
+> *"Hello everyone! I'm **Sujith Putta**. Today I am presenting **ESA (Executable State Architecture)** — an autonomous payment infrastructure resilience engine.*
 >
 > *Every year during Diwali flash sales or IPL finals, payment gateways face sudden traffic surges paired with downstream bank rail degradation. Traditional cloud autoscalers take **`[ 3 to 5 Minutes ]`** to react. Worse, they scale compute blindly—sending more traffic to a dying bank rail and worsening the outage.*
 >

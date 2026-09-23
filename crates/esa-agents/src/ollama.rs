@@ -64,6 +64,7 @@ impl OllamaClient {
                 top_p: 0.85,
                 num_predict: 128,
             }),
+            keep_alive: Some("-1".to_string()),
         };
 
         info!(
@@ -193,8 +194,13 @@ struct OllamaRequest {
     model: String,
     prompt: String,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    /// Keep model in memory indefinitely (24/7) to avoid cold-boot latency
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

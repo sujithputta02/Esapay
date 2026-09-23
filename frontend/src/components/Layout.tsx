@@ -1,10 +1,11 @@
+import { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useEsaStore } from '@/lib/store';
 import { queryClient } from '@/lib/queryClient';
 import { useQuery } from '@tanstack/react-query';
-import { apiClient } from '@/lib/api';
+import { apiClient, getApiBaseUrl, setApiBaseUrl } from '@/lib/api';
 import type { TelemetryMessage } from '@/types';
 
 const navigation = [
@@ -71,6 +72,8 @@ function invalidateLiveQueries(type?: string) {
 export function Layout() {
   const location = useLocation();
   const { updateWorkload, appendVitals, updateAgentStatus, addCondition, addExecution } = useEsaStore();
+  const [showServerModal, setShowServerModal] = useState(false);
+  const [customServerInput, setCustomServerInput] = useState(() => getApiBaseUrl() || 'http://localhost:8080');
 
   const { data: workloads } = useQuery({
     queryKey: ['workloads'],
@@ -243,6 +246,18 @@ export function Layout() {
               </span>
             </div>
 
+            {/* Server Endpoint Switcher Pill */}
+            <button
+              onClick={() => setShowServerModal(true)}
+              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] hover:bg-[#333333] border border-white/[0.06] text-xs transition-colors cursor-pointer"
+              title="Click to point dashboard to your own ESA server"
+            >
+              <span className="text-text-muted text-[11px]">Server:</span>
+              <span className="text-accent font-mono text-[11px] max-w-[140px] truncate">
+                {getApiBaseUrl() ? getApiBaseUrl().replace(/^https?:\/\//, '') : 'local:8080'}
+              </span>
+            </button>
+
             {/* Quick Action Pill Button (JOIN NOW / TRIGGER SPIKE style) */}
             <button
               onClick={async () => {
@@ -285,6 +300,80 @@ export function Layout() {
       <main className="w-[min(100%-48px,1952px)] mx-auto px-2 sm:px-4 md:px-12 py-8 md:py-10">
         <Outlet />
       </main>
+
+      {/* Server Switcher Modal */}
+      {showServerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="bg-[#1f1f1f] border border-white/10 rounded-2xl w-full max-w-lg p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-4 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">⚡</span>
+                <h3 className="font-bold text-white text-base">Connect to ESA Server</h3>
+              </div>
+              <button
+                onClick={() => setShowServerModal(false)}
+                className="text-text-muted hover:text-white text-sm px-2 py-1 rounded"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-text-secondary mt-3 leading-relaxed">
+              Point this dashboard to your own <strong>Executable State Architecture (ESA)</strong> instance — whether running on localhost, in Kubernetes, or on a remote server.
+            </p>
+
+            <div className="mt-4 space-y-2">
+              <label className="text-xs font-semibold text-text-secondary">ESA Server Base URL</label>
+              <input
+                type="text"
+                value={customServerInput}
+                onChange={(e) => setCustomServerInput(e.target.value)}
+                placeholder="http://localhost:8080 or https://api.yourdomain.com"
+                className="w-full px-4 py-2.5 bg-[#141414] border border-white/10 rounded-xl text-sm font-mono text-white placeholder-text-muted focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 mt-3 text-xs text-text-muted">
+              <span>Quick Presets:</span>
+              <button
+                type="button"
+                onClick={() => setCustomServerInput('http://localhost:8080')}
+                className="px-2.5 py-1 rounded bg-[#2b2b2b] hover:bg-[#383838] text-white transition-colors"
+              >
+                localhost:8080
+              </button>
+              <button
+                type="button"
+                onClick={() => setCustomServerInput('')}
+                className="px-2.5 py-1 rounded bg-[#2b2b2b] hover:bg-[#383838] text-white transition-colors"
+              >
+                Same-Origin (Default)
+              </button>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setShowServerModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-text-secondary hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setApiBaseUrl(customServerInput);
+                  setShowServerModal(false);
+                  queryClient.invalidateQueries();
+                }}
+                className="px-5 py-2 rounded-xl bg-accent hover:bg-accent/90 text-black text-xs font-bold transition-all"
+              >
+                Connect & Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

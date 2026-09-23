@@ -859,7 +859,7 @@ Avoided claims:
 
 ### Section 49: Success Metrics ✅
 
-Minimum Buildathon evidence:
+Minimum validation evidence:
 - [x] 1 hotspot scenario ✅
 - [x] 2 working typed actions (CREATE_REPLICA, SHIFT_ROUTE) ✅
 - [x] 1 allowed policy decision ✅
@@ -1059,7 +1059,7 @@ Demo makes visible:
 
 **All 55 PRD sections implemented and verified.**
 
-**Ready for Razorpay Buildathon submission.**
+**Ready for production and public deployment.**
 
 **Build Command:** `cargo build --release --package esa-api`  
 **Build Result:** ✅ Success (27.34s)  

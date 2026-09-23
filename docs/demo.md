@@ -1,6 +1,6 @@
 # Demo walkthrough
 
-Operator / judge manual for the ESA + Razorpay buildathon demo. All steps use **Test Mode** and the **local benchmark runtime** — not production payment settlement.
+Operator guide and walkthrough manual for the ESA payment resilience demo. All steps use **Test Mode** and the **local benchmark runtime** — not production payment settlement.
 
 ## Prerequisites
 

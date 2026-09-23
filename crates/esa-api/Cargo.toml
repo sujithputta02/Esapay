@@ -36,3 +36,4 @@ futures = "0.3"
 chrono.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
+uuid.workspace = true

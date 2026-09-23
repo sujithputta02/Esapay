@@ -140,7 +140,7 @@ const INITIAL_SUPPORTED_CARDS: SupportedCard[] = [
     bank: 'SBI Global',
     name: 'RuPay Platinum Contactless',
     number: '6527 6589 0000 1005',
-    holder: 'Sujith Putta',
+    holder: 'ESA Enterprise',
     expiry: '08/29',
     cvv: '789',
     balanceLimit: '₹2,50,000 Balance',

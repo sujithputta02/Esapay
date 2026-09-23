@@ -48,6 +48,62 @@ pub enum PaymentMethodClass {
     Wallet,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+pub enum PaymentGateway {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "razorpay")]
+    Razorpay,
+    #[serde(rename = "stripe")]
+    Stripe,
+    #[serde(rename = "phonepe")]
+    PhonePe,
+    #[serde(rename = "cashfree")]
+    Cashfree,
+    #[serde(rename = "paytm")]
+    Paytm,
+    #[serde(rename = "adyen")]
+    Adyen,
+}
+
+impl PaymentGateway {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PaymentGateway::Auto => "auto",
+            PaymentGateway::Razorpay => "razorpay",
+            PaymentGateway::Stripe => "stripe",
+            PaymentGateway::PhonePe => "phonepe",
+            PaymentGateway::Cashfree => "cashfree",
+            PaymentGateway::Paytm => "paytm",
+            PaymentGateway::Adyen => "adyen",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayHealth {
+    pub gateway: PaymentGateway,
+    pub name: String,
+    pub status: WorkloadState,
+    pub p95_latency_ms: f64,
+    pub success_rate: f64,
+    pub active_traffic_pct: f64,
+    pub is_healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRouteDecision {
+    pub transaction_id: String,
+    pub amount: u64,
+    pub currency: String,
+    pub requested_gateway: PaymentGateway,
+    pub routed_gateway: PaymentGateway,
+    pub failover_triggered: bool,
+    pub routing_reason: String,
+    pub checkout_url: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WorkloadState {
     #[serde(rename = "HEALTHY")]

@@ -1,0 +1,23 @@
+# ==============================================================================
+# ESA Payment Gateway - 24/7 Live Dockerized Ollama
+# ==============================================================================
+FROM ollama/ollama:latest
+
+# Keep models in memory indefinitely (never unload after idle period)
+ENV OLLAMA_KEEP_ALIVE=-1
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_MODEL=qwen2.5:0.5b
+
+# Install curl for healthchecks and model warming
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copy entrypoint script
+COPY scripts/ollama-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Persistent storage for models
+VOLUME ["/root/.ollama"]
+
+EXPOSE 11434
+
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

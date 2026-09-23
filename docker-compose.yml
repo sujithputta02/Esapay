@@ -75,12 +75,24 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: esa-ollama
+    restart: always
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+      - ./scripts/ollama-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
+      - OLLAMA_MODELS=${OLLAMA_MODELS:-qwen2.5:0.5b llama3.2:1b}
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/ollama list > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   esa-api:
     build:
@@ -94,7 +106,7 @@ services:
       REDIS_URL: redis://redis:6379
       NATS_URL: nats://nats:4222
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen2.5:0.5b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b}
       RUST_LOG: info
     depends_on:
       postgres:
@@ -104,7 +116,7 @@ services:
       nats:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:

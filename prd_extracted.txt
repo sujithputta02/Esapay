@@ -1,7 +1,7 @@
 Executable State Architecture (ESA)
 Policy-Bounded Multi-Agent Runtime for Adaptive Payment Infrastructure
 Detailed Product Requirements Document
-Buildathon / Prototype Edition | Prepared from the existing ESA PRD and adapted for a payment-infrastructure Open Track submission
+Platform Launch / Prototype Edition | Prepared from the existing ESA PRD and adapted for a payment-infrastructure Open Track submission
 Document Control
 1. Executive Summary
 ESA is a policy-bounded autonomous runtime designed for payment infrastructure that must adapt to rapidly changing traffic, latency, availability, cost, and failure conditions. The system treats operational state as active and executable rather than passive data. Each state entity carries the information needed to influence placement, replication, lifecycle, security, and execution, while the runtime enforces deterministic safety boundaries.
@@ -31,7 +31,7 @@ Demonstrate at least one measurable improvement in latency, recovery time, or re
 Replace Razorpay or another payment gateway.
 Access or modify Razorpay production infrastructure.
 Process real card data or expose sensitive payment credentials to AI models.
-Build a full production-grade distributed database in the Buildathon prototype.
+Build a full production-grade distributed database in the Platform Launch prototype.
 Claim perfect security, zero downtime, or autonomous operation without limits.
 Use unrestricted shell, kubectl, SQL, or administrative execution by agents.
 Build every capability described in the long-term 12-month ESA roadmap before submission.
@@ -166,17 +166,17 @@ Figure 2. Recommended end-to-end demo workflow.
 10.  Runtime executes the change and metrics improve.
 11.  Audit dashboard shows the complete decision lineage.
 12.  Optionally inject an execution failure and demonstrate rollback.
-23. MVP Scope for the Razorpay Buildathon
-The existing ESA PRD is intentionally broader than the Buildathon submission. For the Buildathon, the MVP should focus on one complete, measurable loop rather than implementing every planned research feature.
-24. Buildathon Demo Scope and September 5, 2026 Freeze
-Purpose: This section defines the smallest end-to-end ESA payment-infrastructure prototype that must be implemented and demo-ready by 5 September 2026. It is an internal delivery target for the Razorpay Buildathon submission and is intentionally narrower than the full six-month ESA roadmap.
+23. MVP Scope for the ESA Platform Launch
+The existing ESA PRD is intentionally broader than the Platform Launch submission. For the Platform Launch, the MVP should focus on one complete, measurable loop rather than implementing every planned research feature.
+24. Platform Launch Demo Scope and September 5, 2026 Freeze
+Purpose: This section defines the smallest end-to-end ESA payment-infrastructure prototype that must be implemented and demo-ready by 5 September 2026. It is an internal delivery target for the ESA Platform Launch submission and is intentionally narrower than the full six-month ESA roadmap.
 24.1 Demo Objective
 Demonstrate one complete, observable, and measurable loop in which a controlled payment-workload condition is detected, analyzed by bounded agents, converted into a typed action, deterministically verified, safely executed on the prototype runtime, and recorded in an auditable decision trail.
 24.2 Mandatory Demo Scenario
 The primary scenario is a regional payment-workload hotspot. A synthetic payment workload and/or Razorpay Test Mode event stream creates a controlled load increase or regional skew. The runtime detects rising P95 latency and queue pressure, the agent system diagnoses the hotspot, proposes a bounded topology action, and the safety layer approves or rejects it before execution.
 24.3 Demo Architecture Scope
 24.4 Definition of Done - September 5
-The Buildathon demo is considered complete only when all mandatory items below pass in a clean end-to-end run:
+The Platform Launch demo is considered complete only when all mandatory items below pass in a clean end-to-end run:
 A controlled payment workload can be generated repeatedly and produces deterministic test data.
 At least one workload condition (regional hotspot/burst) is detected automatically.
 The four bounded agents produce an understandable diagnosis, typed action proposal, and safety decision.
@@ -219,8 +219,8 @@ Do not claim zero fraud, zero downtime, zero risk, or “unhackable” infrastru
 Do not claim that Open Track is easier than the predefined tracks.
 Do not present the SLM as having unrestricted infrastructure access.
 30. Relationship to the Existing ESA PRD
-This document preserves the core ESA architecture and safety philosophy from the existing PRD while narrowing the Buildathon narrative around payment infrastructure. The original PRD defines executable state entities, AI-governed runtime control, deterministic safety, typed action contracts, rollback, auditability, intent-driven interaction, token-cost optimization, and distributed runtime layers. [See Existing ESA PRD]
-The payment-angle PRD adds a concrete operating context, payment event integration, payment workload state modeling, payment-specific scenarios, a bounded multi-agent design, a Buildathon MVP boundary, and a six-month execution plan. It does not replace the longer-term ESA research roadmap.
+This document preserves the core ESA architecture and safety philosophy from the existing PRD while narrowing the Platform Launch narrative around payment infrastructure. The original PRD defines executable state entities, AI-governed runtime control, deterministic safety, typed action contracts, rollback, auditability, intent-driven interaction, token-cost optimization, and distributed runtime layers. [See Existing ESA PRD]
+The payment-angle PRD adds a concrete operating context, payment event integration, payment workload state modeling, payment-specific scenarios, a bounded multi-agent design, a Platform Launch MVP boundary, and a six-month execution plan. It does not replace the longer-term ESA research roadmap.
 31. External Reference Notes
 The following official Razorpay documentation was used only to ground the payment integration boundary and event model. It does not imply access to or knowledge of Razorpay internal infrastructure.
 Razorpay API Reference Guide: https://razorpay.com/docs/api/ - REST API structure and Test Mode/API testing context.
@@ -237,11 +237,11 @@ Payment workloads can change faster than static infrastructure rules can safely 
 Field | Value
 Project | Executable State Architecture (ESA)
 Prototype domain | Payment infrastructure adaptation and operational resilience
-Track | Razorpay Buildathon - Open Track
+Track | ESA Platform Launch - Open Track
 Primary artifact | Working prototype + public repository + 5-minute pitch + architecture
 Status | Detailed PRD for implementation
 Primary constraint | Do not claim access to or control of Razorpay production infrastructure
-Buildathon thesis
+Platform Launch thesis
 AI should not be granted unrestricted control over payment infrastructure. AI should propose bounded infrastructure actions from live state; deterministic controls should verify, modify, deny, execute, and audit those actions.
 Vision element | Target outcome
 Adaptive | React to workload and failure conditions without waiting for manual intervention for low-risk actions.
@@ -349,7 +349,7 @@ Agent service | 1 service | Hosts the four bounded agents.
 Policy service | 2 replicas | Stateless deterministic checks.
 Runtime workers | 3-6 workers | Scale in/out during the demo.
 Metrics stack | 1 stack | Prometheus + Grafana + OpenTelemetry collector.
-Message bus | 3-node NATS optional | Use single-node for simplest Buildathon demo if needed.
+Message bus | 3-node NATS optional | Use single-node for simplest Platform Launch demo if needed.
 Failure | Detection | Recovery behavior
 Duplicate webhook | Duplicate event ID / idempotency check | Ignore duplicate execution; preserve audit trail.
 Out-of-order event | Event timestamp/sequence mismatch | Store, reconcile, or defer transition.
@@ -382,7 +382,7 @@ Regional skew | One region receives disproportionate traffic.
 Node failure | One runtime node removed or degraded.
 Queue buildup | Event processing rate becomes slower than arrival rate.
 Mixed incident | Burst + one unhealthy node + increased latency.
-Buildathon MVP | Defer to later ESA research
+Platform Launch MVP | Defer to later ESA research
 Payment event ingestion | Full custom storage engine
 3-4 bounded agents | Complex multi-cluster consensus research
 Policy Engine + Action Gateway | Complete WASM entity ecosystem
@@ -391,7 +391,7 @@ One distributed hotspot scenario | Full global placement optimization
 Audit + rollback | Production-grade secrets platform
 Benchmark vs rule-only baseline | Advanced quantum extensions
 Success condition
-A small but convincing system that works end to end is stronger than a large architecture with incomplete execution. The Buildathon demo should prioritize evidence of action, safety, and measurable value.
+A small but convincing system that works end to end is stronger than a large architecture with incomplete execution. The Platform Launch demo should prioritize evidence of action, safety, and measurable value.
 Step | Demo behavior | Evidence shown
 1 | Generate payment workload using synthetic events and, where practical, Razorpay Test Mode events. | Event stream and workload dashboard.
 2 | Inject regional skew or a controlled 3x-5x workload burst. | Traffic/load panel and scenario marker.
@@ -418,7 +418,7 @@ Action Gateway | Yes | Single execution path for agent-approved mutations.
 Runtime Executor | Yes | Local Kubernetes/minikube/kind or equivalent multi-service simulation.
 Observability | Yes | OpenTelemetry + Prometheus + Grafana, with a lightweight audit view.
 Rollback Manager | Yes | At least one demonstrated recovery path after an injected execution failure.
-WASM entity runtime | No | Defer beyond the Buildathon demo unless already stable.
+WASM entity runtime | No | Defer beyond the Platform Launch demo unless already stable.
 Raft/advanced distributed consensus | No | Use the minimum coordination mechanism required for the demo; defer full research implementation.
 Predictive scaling model | No | Defer; rule/metric-triggered adaptation is sufficient for the first demo.
 Metric | Minimum evidence
@@ -467,5 +467,5 @@ Unsafe autonomous mutation | High | Single Action Gateway + Policy Engine + Deci
 Reviewer misunderstands concept | Medium | Use one concrete payment hotspot story before architecture depth.
 One-sentence definition
 ESA is a policy-bounded multi-agent runtime that converts payment-workload signals into verified, typed infrastructure actions, executes them through a controlled gateway, and measures every outcome.
-Buildathon-ready framing
+Platform Launch-ready framing
 Open Track | Payment infrastructure resilience | Executable state + bounded agents + deterministic safety | Working prototype with measurable improvement over rule-only orchestration

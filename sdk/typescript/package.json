@@ -1,0 +1,48 @@
+{
+  "name": "esapay",
+  "version": "1.0.1",
+  "description": "Official TypeScript & Node.js SDK for ESA (Executable State Architecture) Autonomous Payment Resilience",
+  "main": "./dist/client.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun x tsc",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "esa",
+    "executable-state-architecture",
+    "payments",
+    "razorpay",
+    "phonepe",
+    "paytm",
+    "cashfree",
+    "resilience",
+    "self-healing",
+    "fintech",
+    "sdk"
+  ],
+  "author": "ESA Engineering",
+  "license": "MIT",
+  "homepage": "https://github.com/sujithputta02/Esapay#readme",
+  "bugs": {
+    "url": "https://github.com/sujithputta02/Esapay/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sujithputta02/Esapay.git"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

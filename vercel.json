@@ -1,0 +1,10 @@
+{
+  "buildCommand": "cd frontend && (bun run build || npm run build)",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

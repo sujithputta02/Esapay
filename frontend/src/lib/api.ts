@@ -1,31 +1,57 @@
 // API Client for ESA Backend
 import type { WorkloadEntity, TokenStats, VitalsSnapshot } from '@/types';
 
-// Empty string uses same-origin + Vite proxy in dev (/api → :8080)
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+export function getApiBaseUrl(): string {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const paramServer = params.get('server') || params.get('api');
+    if (paramServer) {
+      const clean = paramServer.replace(/\/$/, '');
+      localStorage.setItem('esa_server_url', clean);
+      return clean;
+    }
+    const saved = localStorage.getItem('esa_server_url');
+    if (saved) {
+      return saved.replace(/\/$/, '');
+    }
+  }
+  return (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+}
+
+export function setApiBaseUrl(url: string) {
+  if (typeof window !== 'undefined') {
+    const clean = url.trim().replace(/\/$/, '');
+    localStorage.setItem('esa_server_url', clean);
+    window.dispatchEvent(new CustomEvent('esa-server-changed', { detail: clean }));
+  }
+}
 
 export class ApiClient {
-  private baseUrl: string;
+  private customBaseUrl?: string;
 
-  constructor(baseUrl: string = API_BASE_URL) {
-    this.baseUrl = baseUrl;
+  constructor(customBaseUrl?: string) {
+    this.customBaseUrl = customBaseUrl;
+  }
+
+  getBaseUrl(): string {
+    return this.customBaseUrl || getApiBaseUrl();
   }
 
   async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`);
+    const response = await fetch(`${this.getBaseUrl()}${path}`);
     if (!response.ok) {
       throw new Error(`API error: ${response.statusText}`);
     }
     return response.json();
   }
 
-  async post<T>(path: string, data: any): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
+  async post<T>(path: string, data?: any): Promise<T> {
+    const response = await fetch(`${this.getBaseUrl()}${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(data),
+      body: data !== undefined ? JSON.stringify(data) : undefined,
     });
     if (!response.ok) {
       throw new Error(`API error: ${response.statusText}`);
@@ -123,6 +149,19 @@ export class ApiClient {
   // Demo scenario triggers
   async triggerScenario(scenario: string, intensity?: number) {
     return this.post(`/api/demo/scenario/${scenario}`, { intensity });
+  }
+
+  // Multi-Gateway Corridors
+  async getGateways() {
+    return this.get<any[]>('/api/gateways');
+  }
+
+  async toggleGateway(name: string) {
+    return this.post<any>(`/api/gateways/${name}/toggle`);
+  }
+
+  async checkout(params: { amount: number; currency?: string; gateway?: string; method?: string }) {
+    return this.post<any>('/api/payments/checkout', params);
   }
 }
 
