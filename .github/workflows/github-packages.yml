@@ -43,6 +43,7 @@ jobs:
         working-directory: ./sdk/typescript
         run: |
           npm pkg set name="@sujithputta02/esapay"
+          npm pkg set version="1.0.2"
           npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
