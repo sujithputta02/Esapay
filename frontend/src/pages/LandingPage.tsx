@@ -129,7 +129,7 @@ function DueIndiaGlobeCanvas({
     }
 
     let angleY = 0;
-    let angleX = 0.26;
+    const angleX = 0.26;
     let mouseX = 0;
     let mouseY = 0;
     const baseSpeedY = 0.003;

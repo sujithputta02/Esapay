@@ -385,9 +385,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/audit/trail", get(get_audit_trail))
         .route("/api/audit/verify-chain", get(verify_audit_chain))
         .route("/api/audit/decision/:decision_id", get(get_decision_detail))
-        .route("/api/audit/replay/:decision_id", post(replay_decision).get(replay_decision))
+        .route(
+            "/api/audit/replay/:decision_id",
+            post(replay_decision).get(replay_decision),
+        )
         // Benchmark & Ablation endpoints
-        .route("/api/benchmark/ablations", post(run_benchmark_ablations).get(get_benchmark_ablations))
+        .route(
+            "/api/benchmark/ablations",
+            post(run_benchmark_ablations).get(get_benchmark_ablations),
+        )
         // NEW: Effect Measurement endpoints
         .route("/api/effects/measurements", get(get_effect_measurements))
         .route("/api/effects/recent", get(get_recent_effects))
@@ -1638,7 +1644,10 @@ fn default_method() -> String {
 }
 
 async fn list_gateways(State(state): State<AppState>) -> Json<Vec<GatewayHealth>> {
-    let overrides = state.gateway_overrides.read().unwrap_or_else(|e| e.into_inner());
+    let overrides = state
+        .gateway_overrides
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     let rzp_workload = state.state_fabric.get_workload("payment-upi-india-south");
     let rzp_is_degraded = rzp_workload
@@ -1789,7 +1798,10 @@ async fn universal_checkout(
         .as_ref()
         .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
         .unwrap_or(false);
-    let rzp_healthy = overrides.get("razorpay").copied().unwrap_or(!rzp_is_degraded);
+    let rzp_healthy = overrides
+        .get("razorpay")
+        .copied()
+        .unwrap_or(!rzp_is_degraded);
 
     let (routed, failover, reason) = match requested {
         PaymentGateway::Auto => {
