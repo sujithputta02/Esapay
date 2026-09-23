@@ -34,4 +34,4 @@
 
 ## Reporting
 
-For buildathon / research prototype issues, open an issue in the repository with reproduction steps.
+For issues or vulnerability disclosures, open an issue in the repository with reproduction steps.

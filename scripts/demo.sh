@@ -2,7 +2,7 @@
 set -e
 
 # ==============================================================================
-# ESA: 5-Minute Killer Demo for Razorpay Buildathon
+# ESA: 5-Minute Killer Demo for Autonomous Multi-Gateway Resilience
 # Demonstrates: Incident -> AI Diagnosis -> Stale OCC Block -> Live K8s Mutation
 #               -> Effect Verification -> Failure Rollback -> SHA-256 Audit Replay
 # ==============================================================================

@@ -1,0 +1,43 @@
+{
+  "name": "esapay-cli",
+  "version": "1.0.1",
+  "description": "Official CLI for ESA (Executable State Architecture) — Autonomous Multi-Gateway Payment Resilience",
+  "bin": {
+    "esapay": "bin/esa.js",
+    "esa": "bin/esa.js",
+    "esapay-cli": "bin/esa.js"
+  },
+  "main": "./bin/esa.js",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "esa",
+    "esa-cli",
+    "executable-state-architecture",
+    "fintech",
+    "payments",
+    "razorpay",
+    "phonepe",
+    "paytm",
+    "cashfree",
+    "resilience",
+    "self-healing",
+    "cli"
+  ],
+  "author": "ESA Engineering",
+  "license": "MIT",
+  "homepage": "https://github.com/sujithputta02/Esapay#readme",
+  "bugs": {
+    "url": "https://github.com/sujithputta02/Esapay/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sujithputta02/Esapay.git"
+  }
+}

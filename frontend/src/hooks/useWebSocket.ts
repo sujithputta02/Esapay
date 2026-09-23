@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TelemetryMessage } from '@/types';
+import { getApiBaseUrl } from '@/lib/api';
 
 function getWebSocketBaseUrl(): string {
+  const apiBase = getApiBaseUrl();
+  if (apiBase) {
+    return apiBase.replace(/^http/, 'ws');
+  }
   if (import.meta.env.VITE_WS_URL) {
     return import.meta.env.VITE_WS_URL;
   }

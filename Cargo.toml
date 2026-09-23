@@ -10,6 +10,7 @@ members = [
     "crates/esa-api",
     "crates/esa-razorpay",
     "crates/esa-telemetry",
+    "crates/esa-cli",
 ]
 
 [workspace.package]

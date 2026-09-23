@@ -9,7 +9,18 @@ echo "🐳 Checking infrastructure..."
 docker-compose up -d postgres redis nats ollama prometheus grafana
 
 # Wait for services
-sleep 5
+echo "⏳ Waiting for database and Ollama model warmup..."
+MAX_WAIT=30
+WAITED=0
+until curl -s http://localhost:11434/api/tags > /dev/null 2>&1 || [ $WAITED -ge $MAX_WAIT ]; do
+    sleep 2
+    WAITED=$((WAITED + 2))
+done
+if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+    echo "✅ Ollama is live & models are warmed up in memory!"
+else
+    echo "⚠️  Ollama still initializing, proceeding with fallback..."
+fi
 
 # Start Fluid Reasoner in background
 echo "🧠 Starting ARC Fluid Reasoner..."

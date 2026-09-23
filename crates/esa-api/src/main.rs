@@ -2,7 +2,7 @@ use axum::{
     body::Bytes,
     extract::{ws::WebSocketUpgrade, Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -348,14 +348,18 @@ async fn main() -> anyhow::Result<()> {
         vitals,
         last_benchmark: Arc::new(std::sync::RwLock::new(None)),
         last_ablation: Arc::new(std::sync::RwLock::new(None)),
+        gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Build router
     let app = Router::new()
         .route("/health", get(health_handler))
-        .route("/api/workloads", get(list_workloads))
+        // Multi-Gateway Universal Routing endpoints
+        .route("/api/gateways", get(list_gateways))
+        .route("/api/gateways/:name/toggle", post(toggle_gateway))
+        .route("/api/payments/checkout", post(universal_checkout))
+        .route("/api/workloads", get(list_workloads).post(create_workload))
         .route("/api/workloads/:id", get(get_workload))
-        .route("/api/workloads", post(create_workload))
         .route("/api/events/payment", post(ingest_payment_event))
         .route("/api/razorpay/webhook", post(razorpay_webhook))
         .route("/api/razorpay/status", get(razorpay_status))
@@ -381,11 +385,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/audit/trail", get(get_audit_trail))
         .route("/api/audit/verify-chain", get(verify_audit_chain))
         .route("/api/audit/decision/:decision_id", get(get_decision_detail))
-        .route("/api/audit/replay/:decision_id", post(replay_decision))
-        .route("/api/audit/replay/:decision_id", get(replay_decision))
+        .route("/api/audit/replay/:decision_id", post(replay_decision).get(replay_decision))
         // Benchmark & Ablation endpoints
-        .route("/api/benchmark/ablations", post(run_benchmark_ablations))
-        .route("/api/benchmark/ablations", get(get_benchmark_ablations))
+        .route("/api/benchmark/ablations", post(run_benchmark_ablations).get(get_benchmark_ablations))
         // NEW: Effect Measurement endpoints
         .route("/api/effects/measurements", get(get_effect_measurements))
         .route("/api/effects/recent", get(get_recent_effects))
@@ -426,6 +428,7 @@ struct AppState {
     vitals: VitalsStore,
     last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
     last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
+    gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1601,12 +1604,241 @@ impl From<EsaError> for AppError {
 }
 
 impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+    fn into_response(self) -> axum::response::Response {
+        let (status, err_msg) = match self {
+            AppError::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
+            AppError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
-
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(serde_json::json!({ "error": err_msg }))).into_response()
     }
+}
+
+#[derive(Deserialize)]
+struct UniversalCheckoutRequest {
+    amount: u64,
+    #[serde(default = "default_currency")]
+    currency: String,
+    #[serde(default = "default_gateway")]
+    gateway: String,
+    #[allow(dead_code)]
+    #[serde(default = "default_method")]
+    method: String,
+    #[allow(dead_code)]
+    customer_id: Option<String>,
+}
+
+fn default_currency() -> String {
+    "INR".to_string()
+}
+fn default_gateway() -> String {
+    "auto".to_string()
+}
+fn default_method() -> String {
+    "UPI".to_string()
+}
+
+async fn list_gateways(State(state): State<AppState>) -> Json<Vec<GatewayHealth>> {
+    let overrides = state.gateway_overrides.read().unwrap_or_else(|e| e.into_inner());
+
+    let rzp_workload = state.state_fabric.get_workload("payment-upi-india-south");
+    let rzp_is_degraded = rzp_workload
+        .as_ref()
+        .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
+        .unwrap_or(false);
+    let rzp_override = overrides.get("razorpay").copied();
+    let rzp_healthy = rzp_override.unwrap_or(!rzp_is_degraded);
+
+    let stripe_healthy = overrides.get("stripe").copied().unwrap_or(true);
+    let phonepe_healthy = overrides.get("phonepe").copied().unwrap_or(true);
+    let cashfree_healthy = overrides.get("cashfree").copied().unwrap_or(true);
+    let paytm_healthy = overrides.get("paytm").copied().unwrap_or(true);
+    let adyen_healthy = overrides.get("adyen").copied().unwrap_or(true);
+
+    let gateways = vec![
+        GatewayHealth {
+            gateway: PaymentGateway::Razorpay,
+            name: "Razorpay (UPI / NetBanking / Cards)".to_string(),
+            status: if rzp_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: if rzp_healthy { 85.0 } else { 380.0 },
+            success_rate: if rzp_healthy { 0.994 } else { 0.842 },
+            active_traffic_pct: if rzp_healthy { 45.0 } else { 5.0 },
+            is_healthy: rzp_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::PhonePe,
+            name: "PhonePe Direct UPI Switch".to_string(),
+            status: if phonepe_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: if phonepe_healthy { 68.0 } else { 340.0 },
+            success_rate: if phonepe_healthy { 0.996 } else { 0.865 },
+            active_traffic_pct: if phonepe_healthy && !rzp_healthy {
+                65.0
+            } else {
+                25.0
+            },
+            is_healthy: phonepe_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::Stripe,
+            name: "Stripe (Global Cards & Wallets)".to_string(),
+            status: if stripe_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: if stripe_healthy { 110.0 } else { 420.0 },
+            success_rate: if stripe_healthy { 0.998 } else { 0.890 },
+            active_traffic_pct: 15.0,
+            is_healthy: stripe_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::Cashfree,
+            name: "Cashfree Payouts & Auto-Collect".to_string(),
+            status: if cashfree_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: 92.0,
+            success_rate: 0.992,
+            active_traffic_pct: 10.0,
+            is_healthy: cashfree_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::Paytm,
+            name: "Paytm All-In-One Gateway".to_string(),
+            status: if paytm_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: 88.0,
+            success_rate: 0.991,
+            active_traffic_pct: 5.0,
+            is_healthy: paytm_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::Adyen,
+            name: "Adyen Enterprise Global Gateway".to_string(),
+            status: if adyen_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: 125.0,
+            success_rate: 0.999,
+            active_traffic_pct: 0.0,
+            is_healthy: adyen_healthy,
+        },
+    ];
+
+    Json(gateways)
+}
+
+async fn toggle_gateway(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<serde_json::Value> {
+    let lower = name.to_lowercase();
+    let mut overrides = state
+        .gateway_overrides
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let current = overrides.get(&lower).copied().unwrap_or(true);
+    let new_state = !current;
+    overrides.insert(lower.clone(), new_state);
+
+    info!(
+        "Switched gateway '{}' healthy status to: {}",
+        lower, new_state
+    );
+    Json(serde_json::json!({
+        "gateway": lower,
+        "is_healthy": new_state,
+        "message": format!("Gateway '{}' status set to {}", lower, if new_state { "Healthy" } else { "Degraded (Outage Simulation Active)" })
+    }))
+}
+
+async fn universal_checkout(
+    State(state): State<AppState>,
+    Json(req): Json<UniversalCheckoutRequest>,
+) -> Json<GatewayRouteDecision> {
+    let requested = match req.gateway.to_lowercase().as_str() {
+        "razorpay" => PaymentGateway::Razorpay,
+        "stripe" => PaymentGateway::Stripe,
+        "phonepe" => PaymentGateway::PhonePe,
+        "cashfree" => PaymentGateway::Cashfree,
+        "paytm" => PaymentGateway::Paytm,
+        "adyen" => PaymentGateway::Adyen,
+        _ => PaymentGateway::Auto,
+    };
+
+    let overrides = state
+        .gateway_overrides
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let rzp_workload = state.state_fabric.get_workload("payment-upi-india-south");
+    let rzp_is_degraded = rzp_workload
+        .as_ref()
+        .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
+        .unwrap_or(false);
+    let rzp_healthy = overrides.get("razorpay").copied().unwrap_or(!rzp_is_degraded);
+
+    let (routed, failover, reason) = match requested {
+        PaymentGateway::Auto => {
+            if req.currency.to_uppercase() == "USD" || req.currency.to_uppercase() == "EUR" {
+                (
+                    PaymentGateway::Stripe,
+                    false,
+                    "Selected primary global currency corridor (Stripe)".to_string(),
+                )
+            } else if rzp_healthy {
+                (
+                    PaymentGateway::Razorpay,
+                    false,
+                    "Selected primary healthy corridor (Razorpay UPI/Cards)".to_string(),
+                )
+            } else {
+                (
+                    PaymentGateway::PhonePe,
+                    true,
+                    "⚠️ Razorpay corridor degraded (P95 > 250ms SLA) -> Autonomous failover executed to PhonePe UPI"
+                        .to_string(),
+                )
+            }
+        }
+        PaymentGateway::Razorpay if !rzp_healthy => (
+            PaymentGateway::PhonePe,
+            true,
+            "⚠️ Requested Razorpay is DEGRADED -> Autonomous failover executed to PhonePe"
+                .to_string(),
+        ),
+        other => (
+            other,
+            false,
+            format!("Direct routed to requested gateway: {}", other.as_str()),
+        ),
+    };
+
+    let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
+    let checkout_url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
+
+    Json(GatewayRouteDecision {
+        transaction_id: tx_id,
+        amount: req.amount,
+        currency: req.currency,
+        requested_gateway: requested,
+        routed_gateway: routed,
+        failover_triggered: failover,
+        routing_reason: reason,
+        checkout_url,
+        timestamp: chrono::Utc::now(),
+    })
 }

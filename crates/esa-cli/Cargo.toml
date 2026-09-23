@@ -1,0 +1,27 @@
+[package]
+name = "esa-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "⚡ Command Line Interface for ESA (Executable State Architecture) — Autonomous Multi-Gateway Payment Resilience"
+repository = "https://github.com/sujithputta02/Esapay"
+homepage = "https://github.com/sujithputta02/Esapay"
+
+[[bin]]
+name = "esa"
+path = "src/main.rs"
+
+[dependencies]
+esa-core = { path = "../esa-core", version = "0.1.0" }
+
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+chrono = { workspace = true, features = ["serde"] }
+anyhow.workspace = true
+
+# CLI & terminal styling
+clap = { version = "4.4", features = ["derive", "env"] }
+colored = "2.1"

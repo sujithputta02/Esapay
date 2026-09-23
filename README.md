@@ -2,11 +2,26 @@
 
 > **An autonomous incident remediation engine for payment gateways: LLM agents diagnose multi-signal payment failures and propose joint recovery actions, while a deterministic Rust safety gate ensures zero unverified mutations.**
 
-**Razorpay Buildathon 2026 — Track 05: Open Track**
+**Autonomous Multi-Gateway Resilience & Self-Healing Financial Infrastructure**
 
+[![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF&label=npm%20esapay)](https://www.npmjs.com/package/esapay)
+[![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF&label=npm%20esapay-cli)](https://www.npmjs.com/package/esapay-cli)
+[![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=PyPI%20esapay)](https://pypi.org/project/esapay/)
+[![Bun compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![Rust](https://img.shields.io/badge/Rust-workspace-orange)](https://www.rust-lang.org/)
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-blue)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+---
+
+## 📦 Official Public Packages & Direct Links
+
+All client libraries and developer tools are published live across public registries:
+
+| Package | Target / Runtime | Registry & Version | Instant Install | Live Links |
+| :--- | :--- | :--- | :--- | :--- |
+| **`esapay`** | TypeScript, Node.js, Bun | [![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF)](https://www.npmjs.com/package/esapay) | `npm i esapay`<br/>`bun add esapay` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay) · [Documentation](sdk/typescript/README.md) |
+| **`esapay-cli`** | Terminal CLI & DevTool | [![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF)](https://www.npmjs.com/package/esapay-cli) | `npx esapay-cli`<br/>`npm i -g esapay-cli` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay-cli) · [Documentation](packages/esa-cli/README.md) |
+| **`esapay`** | Python 3.8+ (Zero Deps) | [![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF)](https://pypi.org/project/esapay/) | `pip install esapay`<br/>`uv add esapay` | 🔗 [PyPI Project](https://pypi.org/project/esapay/) · [Documentation](sdk/python/README.md) |
 
 ---
 
@@ -208,25 +223,141 @@ Per-agent docs: [`docs/agents/monitor.md`](docs/agents/monitor.md) · [`docs/age
 
 ## Quick start
 
-### Minimal — API only
+### ⚡ Option 1: Universal CLI (`npx esapay-cli` or `npm install -g esapay-cli`)
+
+Run directly without installing, or install globally for instant terminal access:
+
+```bash
+# Run immediately via NPX or BunX (Zero install / No Rust required)
+npx esapay-cli health
+# or
+bunx esapay-cli health
+
+# Or install globally across macOS, Linux, and Windows
+npm install -g esapay-cli
+# or
+bun add -g esapay-cli
+```
+
+Once installed, use the `esapay` command:
+
+```bash
+# Check control plane & cluster health
+esapay health
+
+# Inspect all multi-gateway corridors (Razorpay, PhonePe, Paytm, Cashfree)
+esapay gateways
+
+# Simulate an outage on Razorpay (degraded P95 latency & dropped success rate)
+esapay gateways --toggle razorpay
+
+# Execute a payment — observe automated autonomous failover to PhonePe UPI!
+esapay checkout --amount 50000 --currency INR --gateway auto --method UPI
+
+# Mathematically verify the SHA-256 Merkle audit chain
+esapay audit verify
+
+# Open the ESA Web Dashboard connected directly to your server
+esapay dashboard
+```
+
+---
+
+### 📦 Option 2: TypeScript / Node.js & Bun SDK (`esapay`)
+
+Install the official SDK in your Node.js, Bun, or Next.js app:
+
+```bash
+npm install esapay
+# or
+bun add esapay
+```
+
+```typescript
+import { EsaGateway } from 'esapay';
+
+const esa = new EsaGateway({
+  apiUrl: process.env.ESA_API_URL || 'http://localhost:8080',
+  apiKey: process.env.ESA_API_KEY,
+});
+
+// 1. Fetch live Indian payment corridors & P95 latencies
+const gateways = await esa.gateways.list();
+console.table(gateways);
+
+// 2. Execute universal checkout with autonomous failover (₹500.00 via UPI)
+const order = await esa.checkout({
+  amount: 50000,       // in paise (₹500.00)
+  currency: 'INR',
+  gateway: 'auto',     // Automatically routes to best SLA corridor
+  method: 'UPI',       // UPI | CARD | NETBANKING
+});
+
+console.log(`Routed to: ${order.routed_gateway}`);
+if (order.failover_triggered) {
+  console.warn(`Failover active: ${order.routing_reason}`);
+}
+
+// 3. Cryptographically verify the SHA-256 audit ledger
+const audit = await esa.audit.verifyChain();
+console.log('Audit Integrity Verified:', audit.valid);
+```
+
+---
+
+### 🐍 Option 3: Python SDK (`esapay` — Zero External Dependencies)
+
+Install the pure Python standard library SDK:
+
+```bash
+pip install esapay
+# or
+uv add esapay
+```
+
+```python
+from esapay import EsaGateway
+
+esa = EsaGateway(api_url="http://localhost:8080")
+
+# 1. Check cluster health
+print("Cluster Health:", esa.health())
+
+# 2. Inspect active corridors (PhonePe, Razorpay, Paytm, Cashfree)
+corridors = esa.gateways.list()
+for gw in corridors:
+    print(f"[{gw.status}] {gw.name} - P95: {gw.p95_latency_ms:.1f}ms")
+
+# 3. Execute an autonomous resilient checkout (₹500.00 via UPI)
+decision = esa.checkout(
+    amount=50000,    # In paise (₹500.00)
+    currency="INR",
+    gateway="auto",  # Autonomous failover across Indian rails
+    method="UPI"
+)
+
+print(f"Settled via: {decision.routed_gateway} (Failover: {decision.failover_triggered})")
+print(f"Transaction ID: {decision.transaction_id}")
+```
+
+---
+
+### 💻 Option 4: Full Stack Demo & Local Development
 
 ```bash
 cp .env.example .env
-ollama serve   # optional; rule fallback if unavailable
-cargo run --bin esa-api    # http://localhost:8080
+make ollama-up                                         # 24/7 live Dockerized Ollama with pre-warmed models
+cargo run --bin esa-api                                # :8080 (Control Plane & Gateway Router)
+cd frontend && bun install && bun run dev              # :3000 (React Web Dashboard)
 ```
 
-### Full demo stack
+**Connect Dashboard to Custom Backend:**
+The ESA Web Dashboard dynamically connects to any server URL. Users can connect via:
+- URL parameter: `http://localhost:3000/?server=http://YOUR_SERVER_IP:8080`
+- Top navbar: Click the **ESA Server Endpoint** pill badge to switch endpoints with real-time WebSocket reconnection
+- CLI command: `esa dashboard --dashboard-url http://localhost:3000`
 
-```bash
-cp .env.example .env
-ollama serve
-cargo run --bin esa-api                              # :8080
-cd frontend && npm install && npm run dev            # :3000
-cd payment-simulator && npm install && npm run dev   # :5173
-```
-
-One-shot: [`scripts/start-demo.sh`](scripts/start-demo.sh) · Smoke: [`scripts/run-demo-test.sh`](scripts/run-demo-test.sh)
+One-shot runner: [`scripts/start-demo.sh`](scripts/start-demo.sh) · Smoke test: [`scripts/run-demo-test.sh`](scripts/run-demo-test.sh)
 
 More: [`docs/reproducibility.md`](docs/reproducibility.md) · [`docs/demo.md`](docs/demo.md)
 

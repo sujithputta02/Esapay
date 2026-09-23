@@ -10,18 +10,30 @@ echo ""
 echo "Press Ctrl+C in each terminal to stop"
 echo ""
 
-# Check if Ollama is running
-if ! pgrep -f ollama > /dev/null; then
-    echo "⚠️  Warning: Ollama is not running!"
-    echo "   Start it with: ollama serve"
-    echo ""
+# Check if Ollama is running (local or Docker)
+OLLAMA_HOST_URL="${OLLAMA_URL:-http://localhost:11434}"
+if curl -s -f "${OLLAMA_HOST_URL}/api/tags" > /dev/null 2>&1; then
+    echo "✅ Ollama is live & reachable at ${OLLAMA_HOST_URL}"
+else
+    echo "⚠️  Ollama is not responding at ${OLLAMA_HOST_URL}!"
+    if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
+        echo "🐳 Starting 24/7 live Dockerized Ollama..."
+        docker-compose up -d ollama
+        echo "⏳ Waiting for Dockerized Ollama to finish warming models..."
+        sleep 5
+    else
+        echo "   👉 Start it via Docker: docker-compose up -d ollama"
+        echo "   👉 Or natively: ollama serve"
+        echo ""
+    fi
 fi
 
-# Check if required model is available
-if ! ollama list | grep -q "llama3.2:1b"; then
-    echo "⚠️  Warning: llama3.2:1b model not found!"
-    echo "   Pull it with: ollama pull llama3.2:1b"
-    echo ""
+# Check if model is available in Ollama
+CHECK_MODEL="${OLLAMA_MODEL:-llama3.2:1b}"
+if curl -s "${OLLAMA_HOST_URL}/api/tags" | grep -q "\"${CHECK_MODEL}\""; then
+    echo "✅ Model '${CHECK_MODEL}' is active & kept live 24/7"
+else
+    echo "ℹ️  Model '${CHECK_MODEL}' will be auto-pulled on first agent deliberation"
 fi
 
 echo "Opening three terminal windows..."

@@ -1,6 +1,5 @@
 # Contributing
-
-Short guide for buildathon contributors and reviewers.
+Short guide for contributors and reviewers.
 
 ## Development setup
 

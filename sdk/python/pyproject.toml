@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esapay"
+version = "1.0.1"
+authors = [
+  { name = "ESA Engineering" },
+]
+description = "Official Python SDK for Executable State Architecture (ESA) Autonomous Payment Resilience"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["esa", "payments", "fintech", "razorpay", "phonepe", "resilience", "autonomous"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial :: Point-Of-Sale",
+]
+dependencies = []
+
+[project.urls]
+"Homepage" = "https://github.com/sujithputta02/Esapay"
+"Documentation" = "https://github.com/sujithputta02/Esapay#readme"
+"Repository" = "https://github.com/sujithputta02/Esapay.git"
+"Bug Tracker" = "https://github.com/sujithputta02/Esapay/issues"

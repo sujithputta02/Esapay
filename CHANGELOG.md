@@ -2,7 +2,7 @@
 
 Meaningful milestones only — no fabricated history.
 
-## v1.0 — Buildathon submission (2026)
+## v1.0 — Public Launch (2026)
 
 - Full documentation set: architecture, governance, agents, benchmarks, claims register
 - B0/B1/B2 benchmark harness with 155-trial matrix

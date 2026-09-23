@@ -1,9 +1,9 @@
 # ESA — Universal Adaptive Runtime
 
-## Payment Infrastructure Implementation & Razorpay Buildathon PRD
+## Payment Infrastructure Implementation PRD
 
 **Project:** Executable State Architecture (ESA)
-**Submission:** Razorpay Open Track
+**Domain:** Autonomous Multi-Gateway Payment Infrastructure & Self-Healing Resilience
 **Primary Domain:** Payment infrastructure resilience
 **Architecture Type:** Policy-bounded adaptive runtime
 **Implementation Target:** Working local prototype with reproducible end-to-end demo
@@ -1297,7 +1297,7 @@ variance or spread where practical
 best/worst where useful
 ```
 
-For the buildathon, the goal is not statistically perfect research.
+For the MVP launch, the goal is not statistically perfect research.
 
 The goal is credible engineering evidence.
 
@@ -2006,7 +2006,7 @@ Do not claim:
 
 # 49. SUCCESS METRICS
 
-Minimum Buildathon evidence:
+Minimum validation evidence:
 
 ```text
 1 hotspot scenario
