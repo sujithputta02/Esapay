@@ -1,0 +1,48 @@
+name: Publish to GitHub Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/github-packages.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-github-package:
+    name: Publish @sujithputta02/esapay to GitHub Packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@sujithputta02'
+
+      - name: Build TypeScript SDK
+        working-directory: ./sdk/typescript
+        run: |
+          bun install
+          bun run build
+
+      - name: Publish Scoped Package to GitHub Packages
+        working-directory: ./sdk/typescript
+        run: |
+          npm pkg set name="@sujithputta02/esapay"
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
