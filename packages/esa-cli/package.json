@@ -1,6 +1,6 @@
 {
   "name": "esapay-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Official CLI for ESA (Executable State Architecture) — Autonomous Multi-Gateway Payment Resilience",
   "bin": {
     "esapay": "bin/esa.js",
