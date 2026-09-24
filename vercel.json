@@ -1,4 +1,5 @@
 {
+  "installCommand": "cd frontend && (bun install || npm install)",
   "buildCommand": "cd frontend && (bun run build || npm run build)",
   "outputDirectory": "frontend/dist",
   "rewrites": [
