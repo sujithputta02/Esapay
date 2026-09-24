@@ -19,7 +19,7 @@ class TestChaos(unittest.TestCase):
         self.assertLessEqual(jittered["p95_latency_ms"], 320.0)
 
     def test_hysteresis_filter_suppresses_transient_spike(self):
-        filter = HysteresisFilter(alpha=0.4, debounce_window=3)
+        filter = HysteresisFilter(alpha=0.6, debounce_window=3)
         workload = "gateway-hdfc"
 
         # Baseline: 200ms
@@ -35,6 +35,7 @@ class TestChaos(unittest.TestCase):
 
         # Two more sustained high readings
         filter.update(workload, {"p95_latency_ms": 320.0})
+        self.assertFalse(filter.is_true_anomaly(workload, "p95_latency_ms", 250.0))
         filter.update(workload, {"p95_latency_ms": 330.0})
 
         # Now sustained breach is confirmed

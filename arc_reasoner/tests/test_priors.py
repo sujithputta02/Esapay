@@ -65,6 +65,8 @@ class TestPriors(unittest.TestCase):
             [0, 0, 0, 0],
         ])
         bbox = get_bounding_box(grid, background_color=0)
+        self.assertIsNotNone(bbox)
+        assert bbox is not None
         self.assertEqual(bbox, (1, 1, 2, 2))
         cropped = crop(grid, *bbox)
         self.assertEqual(cropped, to_grid([

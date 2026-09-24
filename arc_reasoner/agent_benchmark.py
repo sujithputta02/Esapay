@@ -10,11 +10,18 @@ Implements and evaluates all 4 levels:
 import hashlib
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict
 
 from arc_reasoner.priors.grid import Grid, to_grid
 from arc_reasoner.priors.topology import find_enclosed_holes
 from arc_reasoner.synthesis.cost import compute_grid_mismatch_loss
+
+
+class RouteMetric(TypedDict):
+    route: str
+    latency: float
+    error_rate: float
+    queue: int
 
 
 # ANSI Color formatting
@@ -35,7 +42,7 @@ def run_level_1_1() -> Tuple[bool, Grid, Tuple[int, str]]:
     Question 1.1: Telemetry Discretization & Grid Representation
     Discretizes Razorpay, HDFC, ICICI metrics into a 3x3 matrix.
     """
-    raw_metrics = [
+    raw_metrics: List[RouteMetric] = [
         {"route": "Razorpay_UPI", "latency": 120, "error_rate": 0.005, "queue": 15},
         {"route": "HDFC_Card", "latency": 1850, "error_rate": 0.142, "queue": 450},
         {"route": "ICICI_Netbanking", "latency": 450, "error_rate": 0.011, "queue": 80},

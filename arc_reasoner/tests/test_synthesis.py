@@ -28,6 +28,7 @@ class TestSynthesis(unittest.TestCase):
         synthesizer = ProgramSynthesizer(max_depth=1)
         program = synthesizer.synthesize(train)
         self.assertIsNotNone(program)
+        assert program is not None
         score, is_exact = compute_program_score(program, train)
         self.assertTrue(is_exact)
 

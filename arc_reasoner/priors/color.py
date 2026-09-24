@@ -2,7 +2,7 @@
 Color priors and palette definitions for ARC-AGI.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from collections import Counter
 
 # Standard ARC-AGI 10-color palette mapping
@@ -58,7 +58,7 @@ def detect_background_color(grid: Grid) -> int:
     return border_counter.most_common(1)[0][0]
 
 
-def get_foreground_colors(grid: Grid, bg_color: int = None) -> List[int]:
+def get_foreground_colors(grid: Grid, bg_color: Optional[int] = None) -> List[int]:
     """Returns all colors present excluding the background color."""
     if bg_color is None:
         bg_color = detect_background_color(grid)
