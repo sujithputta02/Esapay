@@ -15,6 +15,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, Level};
 
 mod benchmark;
@@ -406,7 +407,38 @@ async fn main() -> anyhow::Result<()> {
         // NEW: Intent & Constraints endpoints
         .route("/api/intent/active", get(get_active_intents))
         .route("/api/intent/violations", get(get_constraint_violations))
-        .route("/ws/telemetry", get(ws_telemetry_handler))
+        .route("/ws/telemetry", get(ws_telemetry_handler));
+
+    let candidate_paths = [
+        "frontend/dist",
+        "../frontend/dist",
+        "/Users/sujithputta/ESA_paymentgateway/frontend/dist",
+    ];
+    let app = if let Some(&dist) = candidate_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+        info!("Serving ESA Web Dashboard from: {}", dist);
+        let serve_service = ServeDir::new(dist)
+            .not_found_service(ServeFile::new(format!("{}/index.html", dist)));
+        app.fallback_service(serve_service)
+    } else {
+        app.fallback(get(|| async {
+            axum::response::Html(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><title>ESA Control Plane</title>
+<style>body{background:#0a0d14;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style>
+</head>
+<body>
+<div style="text-align:center;">
+<h1>⚡ ESA Control Plane Backend (Port 8080)</h1>
+<p style="color:#00f2fe;">Backend API is healthy and running.</p>
+<p>To view the full React Dashboard, run: <code>cd frontend && npm run dev</code> (or build: <code>npm run build</code>)</p>
+</div>
+</body>
+</html>"#)
+        }))
+    };
+
+    let app = app
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -1841,6 +1873,30 @@ async fn universal_checkout(
 
     let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
     let checkout_url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
+
+    // Ingest the transaction into StateFabric so real customer payments drive live vitals and spikes!
+    let payment_event = PaymentEvent {
+        event_id: tx_id.clone(),
+        event_type: PaymentEventType::PaymentAuthorized,
+        timestamp: chrono::Utc::now(),
+        region: match routed {
+            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => Region::IndiaSouth,
+            PaymentGateway::Paytm => Region::IndiaNorth,
+            _ => Region::IndiaWest,
+        },
+        payment_method_class: match req.method.to_lowercase().as_str() {
+            "card" => PaymentMethodClass::Card,
+            "netbanking" => PaymentMethodClass::NetBanking,
+            "wallet" => PaymentMethodClass::Wallet,
+            _ => PaymentMethodClass::Upi,
+        },
+        pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
+        amount_cents: Some(req.amount),
+        processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
+        success: true,
+    };
+    let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+    publish_payment_side_effects(&state, &apply_res);
 
     Json(GatewayRouteDecision {
         transaction_id: tx_id,

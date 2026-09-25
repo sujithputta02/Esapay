@@ -17,14 +17,14 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <Routes>
-          {/* Standalone Landing Page for public deployment / evaluation */}
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/landing" element={<LandingPage />} />
-
-          {/* Operator Command Center & Internal Views wrapped in Layout */}
+          {/* ESA Command Center as the primary home route for server operators */}
+          <Route path="/" element={<Layout />}>
+            <Route index element={<Dashboard />} />
+          </Route>
           <Route path="/dashboard" element={<Layout />}>
             <Route index element={<Dashboard />} />
           </Route>
+          <Route path="/landing" element={<LandingPage />} />
           <Route path="/app" element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="dashboard" element={<Dashboard />} />
