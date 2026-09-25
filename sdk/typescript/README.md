@@ -1,6 +1,7 @@
 # esapay ⚡
 
 [![NPM Version](https://img.shields.io/npm/v/esapay?color=1F51FF&label=npm)](https://www.npmjs.com/package/esapay)
+[![Version](https://img.shields.io/badge/version-v1.0.2-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.2)
 [![Bun Compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict%20Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)

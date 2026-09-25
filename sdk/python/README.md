@@ -1,6 +1,7 @@
 # esapay ⚡
 
-[![PyPI Version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=pypi)](https://pypi.org/project/esapay/)
+[![PyPI Version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=pypi)](https://pypi.org/project/esapay/1.0.2/)
+[![Version](https://img.shields.io/badge/version-v1.0.2-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.2)
 [![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero%20(stdlib%20only)-success.svg)](https://docs.python.org/3/library/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -81,6 +82,8 @@ Install `esapay` using pip, uv, or poetry:
 ### Using pip
 ```bash
 pip install esapay
+# Or install specific version
+pip install esapay==1.0.2
 ```
 
 ### Using uv

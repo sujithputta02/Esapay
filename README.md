@@ -6,7 +6,8 @@
 
 [![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF&label=npm%20esapay)](https://www.npmjs.com/package/esapay)
 [![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF&label=npm%20esapay-cli)](https://www.npmjs.com/package/esapay-cli)
-[![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=PyPI%20esapay)](https://pypi.org/project/esapay/)
+[![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=PyPI%20esapay)](https://pypi.org/project/esapay/1.0.2/)
+[![Latest Release](https://img.shields.io/badge/release-v1.0.2-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.2)
 [![Bun compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![Rust](https://img.shields.io/badge/Rust-workspace-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -15,13 +16,13 @@
 
 ## 📦 Official Public Packages & Direct Links
 
-All client libraries and developer tools are published live across public registries:
+All client libraries and developer tools are published live across public registries (**Latest: `v1.0.2`**):
 
 | Package | Target / Runtime | Registry & Version | Instant Install | Live Links |
 | :--- | :--- | :--- | :--- | :--- |
-| **`esapay`** | TypeScript, Node.js, Bun | [![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF)](https://www.npmjs.com/package/esapay) | `npm i esapay`<br/>`bun add esapay` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay) · [Documentation](sdk/typescript/README.md) |
-| **`esapay-cli`** | Terminal CLI & DevTool | [![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF)](https://www.npmjs.com/package/esapay-cli) | `npx esapay-cli`<br/>`npm i -g esapay-cli` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay-cli) · [Documentation](packages/esa-cli/README.md) |
-| **`esapay`** | Python 3.8+ (Zero Deps) | [![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF)](https://pypi.org/project/esapay/) | `pip install esapay`<br/>`uv add esapay` | 🔗 [PyPI Project](https://pypi.org/project/esapay/) · [Documentation](sdk/python/README.md) |
+| **`esapay`** | TypeScript, Node.js, Bun | [![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF)](https://www.npmjs.com/package/esapay) `1.0.2` | `npm i esapay@latest`<br/>`bun add esapay` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay) · [Documentation](sdk/typescript/README.md) |
+| **`esapay-cli`** | Terminal CLI & DevTool | [![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF)](https://www.npmjs.com/package/esapay-cli) `1.0.2` | `npx esapay-cli@latest`<br/>`npm i -g esapay-cli` | 🔗 [NPM Registry](https://www.npmjs.com/package/esapay-cli) · [Documentation](packages/esa-cli/README.md) |
+| **`esapay`** | Python 3.8+ (Zero Deps) | [![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF)](https://pypi.org/project/esapay/1.0.2/) `1.0.2` | `pip install esapay`<br/>`uv add esapay` | 🔗 [PyPI Project](https://pypi.org/project/esapay/1.0.2/) · [Documentation](sdk/python/README.md) |
 
 ---
 
