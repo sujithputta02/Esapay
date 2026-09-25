@@ -2,6 +2,20 @@
 
 Meaningful milestones only — no fabricated history.
 
+## v1.0.2 — Resilient Standalone Mode & Command Center Direct Serve (2026)
+
+- **Universal CLI (`esapay-cli@1.0.2`)**: Autonomous client-side Standalone Evaluation Mode when offline; graceful fallbacks for `gateways`, `health`, `workloads`, `agents`, `checkout`, and `doctor`.
+- **TypeScript SDK (`esapay@1.0.2`)**: Dual-mode ESM (`import`) and CommonJS (`require`) export mappings.
+- **ESA Command Center at `/`**: Backend directly serves the live Command Center on `http://localhost:8080/` via same-origin static file service (`ServeDir`).
+- **Transaction-Driven Telemetry & Spikes**: Real customer payments (`POST /api/payments/checkout`) drive live StateFabric workload metrics, P95 tail latency, queue depth, and sub-second failovers.
+- **Custom Server Selector**: Connect Command Center to any remote cluster, local port, or Kubernetes service.
+
+## v1.0.1 — Public Open Source Release (2026)
+
+- Published `esapay-cli` and `esapay` to NPM Registry.
+- Published `esapay` Python SDK to PyPI.
+- Added GitHub Actions publishing pipelines and automated verification.
+
 ## v1.0 — Public Launch (2026)
 
 - Full documentation set: architecture, governance, agents, benchmarks, claims register
