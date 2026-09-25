@@ -414,10 +414,13 @@ async fn main() -> anyhow::Result<()> {
         "../frontend/dist",
         "/Users/sujithputta/ESA_paymentgateway/frontend/dist",
     ];
-    let app = if let Some(&dist) = candidate_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+    let app = if let Some(&dist) = candidate_paths
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+    {
         info!("Serving ESA Web Dashboard from: {}", dist);
-        let serve_service = ServeDir::new(dist)
-            .not_found_service(ServeFile::new(format!("{}/index.html", dist)));
+        let serve_service =
+            ServeDir::new(dist).not_found_service(ServeFile::new(format!("{}/index.html", dist)));
         app.fallback_service(serve_service)
     } else {
         app.fallback(get(|| async {
@@ -438,9 +441,7 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
 
-    let app = app
-        .layer(CorsLayer::permissive())
-        .with_state(app_state);
+    let app = app.layer(CorsLayer::permissive()).with_state(app_state);
 
     let addr = "0.0.0.0:8080";
     info!("ESA API listening on {}", addr);
@@ -1880,7 +1881,9 @@ async fn universal_checkout(
         event_type: PaymentEventType::PaymentAuthorized,
         timestamp: chrono::Utc::now(),
         region: match routed {
-            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => Region::IndiaSouth,
+            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
+                Region::IndiaSouth
+            }
             PaymentGateway::Paytm => Region::IndiaNorth,
             _ => Region::IndiaWest,
         },

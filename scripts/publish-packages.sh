@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # ⚡ ESA Package & CLI Submission Script
-# Publishes esa-cli and @esa/sdk to NPM and crates.io
+# Publishes esapay-cli and esapay to NPM and crates.io
 # ==============================================================================
 
 set -e
@@ -21,18 +21,18 @@ echo -e "${CYAN}================================================================
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 1. Build TypeScript SDK
-echo -e "\n${BOLD}1. Building TypeScript SDK (@esa/sdk)...${RESET}"
+echo -e "\n${BOLD}1. Building TypeScript SDK (esapay)...${RESET}"
 cd "$WORKSPACE_ROOT/sdk/typescript"
 bun run build
 
 # 2. Package / Publish SDK
-echo -e "\n${BOLD}2. Validating NPM Package: @esa/sdk...${RESET}"
+echo -e "\n${BOLD}2. Validating NPM Package: esapay...${RESET}"
 if [ "$MODE" == "--publish" ]; then
   npm publish --access public
-  echo -e "${GREEN}✅ @esa/sdk published to NPM!${RESET}"
+  echo -e "${GREEN}✅ esapay published to NPM!${RESET}"
 else
   npm pack --dry-run
-  echo -e "${GREEN}✅ @esa/sdk tarball validated!${RESET}"
+  echo -e "${GREEN}✅ esapay tarball validated!${RESET}"
 fi
 
 # 3. Package / Publish esa-cli
