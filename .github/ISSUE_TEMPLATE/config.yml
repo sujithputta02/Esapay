@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security Vulnerability Reporting
+    url: https://github.com/sujithputta02/Esapay/security/policy
+    about: Please report security vulnerabilities privately according to our security policy.
