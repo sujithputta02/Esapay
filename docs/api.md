@@ -228,6 +228,19 @@ curl http://localhost:8080/api/audit/verify-chain
 
 ---
 
+## Official Client SDKs & CLI
+
+ESA provides officially maintained client packages for TypeScript/JavaScript, Python, and the Terminal CLI:
+
+| Package | Ecosystem | Registry | Install Command |
+|---|---|---|---|
+| **`esapay`** | TypeScript / Node.js / Bun | [npm](https://www.npmjs.com/package/esapay) | `npm i esapay` or `bun add esapay` |
+| **`esapay-cli`** | Command Line Tool | [npm](https://www.npmjs.com/package/esapay-cli) | `npm i -g esapay-cli` or `npx esapay-cli` |
+| **`esapay`** | Python 3.8+ | [PyPI](https://pypi.org/project/esapay/) | `pip install esapay` or `uv add esapay` |
+
+---
+
 ## Source
 
 Route registration: `crates/esa-api/src/main.rs`.
+

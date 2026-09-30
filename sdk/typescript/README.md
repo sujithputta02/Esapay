@@ -1,39 +1,39 @@
 # esapay ⚡
 
 [![NPM Version](https://img.shields.io/npm/v/esapay?color=1F51FF&label=npm)](https://www.npmjs.com/package/esapay)
-[![Version](https://img.shields.io/badge/version-v1.0.3-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.3)
+[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.4)
 [![Bun Compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict%20Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![TypeScript: Strict Ready](https://img.shields.io/badge/TypeScript-Strict%20Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js->=18.0.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 
-The official TypeScript, Node.js, and Bun SDK for **ESA (Executable State Architecture)** — Autonomous Multi-Gateway Payment Resilience and Self-Healing Financial Infrastructure for Sovereign Indian Rails.
+The official TypeScript, Node.js, and Bun SDK for **ESA (Executable State Architecture)** — Autonomous Multi-Gateway Payment Resilience and Self-Healing Financial Infrastructure for Sovereign Indian & Global Rails.
 
 ---
 
 ## 📑 Table of Contents
 
-- [Overview](#-overview)
-- [Why ESA?](#-why-esa)
-- [Installation](#-installation)
-- [Quickstart (TypeScript & Bun)](#-quickstart-typescript--bun)
-- [Sovereign Indian Rails Support](#-sovereign-indian-rails-support)
-- [Complete API Reference](#-complete-api-reference)
+- [⚡ Overview](#-overview)
+- [🚀 Why ESA?](#-why-esa)
+- [📦 Installation](#-installation)
+- [🔑 Zero-Config Authentication](#-zero-config-authentication)
+- [⚡ Quickstart (TypeScript & Bun)](#-quickstart-typescript--bun)
+- [🇮🇳 Sovereign Indian Rails Support](#-sovereign-indian-rails-support)
+- [🛠️ Complete API Reference](#️-complete-api-reference)
   - [Initialization (`new EsaGateway`)](#1-initialization)
   - [Universal Checkout (`esa.checkout`)](#2-universal-checkout)
   - [Gateway Telemetry & Health (`esa.gateways`)](#3-gateway-telemetry--health)
   - [Cryptographic Audit Ledger (`esa.audit`)](#4-cryptographic-audit-ledger)
   - [Live Telemetry Stream (`esa.vitals`)](#5-live-telemetry-stream)
   - [Chaos Engineering (`esa.chaos`)](#6-chaos-engineering)
-- [Production Framework Recipes](#-production-framework-recipes)
+- [🌐 Production Framework Recipes](#-production-framework-recipes)
   - [Next.js App Router (Route Handler)](#nextjs-app-router-route-handler)
   - [Express / Fastify Backend](#express--fastify-backend)
   - [Bun Native HTTP Server](#bun-native-http-server)
-- [Webhook Verification & Security](#-webhook-verification--security)
-- [Error Handling](#-error-handling)
-- [TypeScript Definitions](#-typescript-definitions)
-- [Related Packages](#-related-packages)
-- [License](#-license)
+- [🔒 Webhook Verification & Security](#-webhook-verification--security)
+- [🛡️ Error Handling](#️-error-handling)
+- [📦 Related Packages](#-related-packages)
+- [📄 License](#-license)
 
 ---
 
@@ -104,15 +104,24 @@ yarn add esapay
 
 ---
 
+## 🔑 Zero-Config Authentication
+
+The `esapay` SDK automatically discovers your authenticated credentials through multiple tiers:
+
+1. **CLI Credentials**: If you ran `npx esapay-cli login` or `npx esapay-cli login --guest`, the SDK automatically reads `~/.esa/credentials.json`. Zero manual configuration required!
+2. **Environment Variables**: Set `ESA_API_KEY` (`esa_live_...` or sandbox `esa_test_...`) and optional `ESA_API_URL`.
+3. **Constructor Arguments**: Pass explicit credentials directly to `new EsaGateway({ apiKey, apiUrl })`.
+
+---
+
 ## ⚡ Quickstart (TypeScript & Bun)
 
 ```typescript
-import { EsaGateway } from 'esapay';
+import { EsaGateway, EsaClient } from 'esapay';
 
-// 1. Initialize client pointed at your ESA cluster
+// 1. Initialize client (defaults to https://esapay-api.onrender.com or ~/.esa credentials)
 const esa = new EsaGateway({
-  apiUrl: process.env.ESA_API_URL || 'http://localhost:8080',
-  apiKey: process.env.ESA_API_KEY,
+  apiKey: process.env.ESA_API_KEY, // Optional if logged in via CLI
   timeoutMs: 8000,
 });
 
@@ -172,23 +181,22 @@ main().catch(console.error);
 ### 1. Initialization
 
 ```typescript
-import { EsaGateway, ESAClient } from 'esapay';
+import { EsaGateway, EsaClient } from 'esapay';
 
 const esa = new EsaGateway({
-  apiUrl: 'http://localhost:8080', // ESA Control Plane URL (defaults to http://localhost:8080)
-  wsUrl: 'ws://localhost:8080',    // Telemetry WebSocket URL (auto-inferred if omitted)
-  apiKey: 'secret_live_...',       // Optional Bearer token for protected clusters
-  timeoutMs: 10000,                // HTTP request timeout in milliseconds (default: 10000)
+  apiUrl: 'https://esapay-api.onrender.com', // Defaults to live cluster (or http://localhost:8080)
+  apiKey: 'esa_live_...',                  // Optional Bearer token / API key
+  timeoutMs: 10000,                        // HTTP request timeout in milliseconds (default: 10000)
 });
 ```
 
-*(Note: `ESAClient` is an exact alias of `EsaGateway` for backwards compatibility).*
+*(Note: `EsaClient` is an exact alias of `EsaGateway` for backwards compatibility).*
 
 ---
 
 ### 2. Universal Checkout
 
-#### `esa.checkout(params)` / `esa.payments.checkout(params)`
+#### `esa.checkout(params)`
 Initiates an autonomous payment session. If the requested gateway is degraded or in `'auto'` mode, the router dynamically selects the optimal Indian corridor.
 
 ```typescript
@@ -264,7 +272,7 @@ Mathematically validates the cryptographic SHA-256 Merkle chain of all payment r
 ```typescript
 const verification = await esa.audit.verifyChain();
 console.log(verification);
-// { valid: true, block_count: 1420, message: "Chain mathematically verified" }
+// { valid: true, block_count: 142, message: "Chain mathematically verified" }
 ```
 
 #### `esa.audit.getTrail(limit?)`
@@ -289,7 +297,7 @@ const unsubscribe = esa.vitals.subscribe((vitals) => {
   console.log(`TPS: ${vitals.total_tps} | P95: ${vitals.avg_p95_ms}ms | Errors: ${vitals.avg_error_rate}`);
 });
 
-// To disconnect later:
+// To disconnect:
 // unsubscribe();
 ```
 
@@ -323,7 +331,7 @@ import { NextResponse } from 'next/server';
 import { EsaGateway } from 'esapay';
 
 const esa = new EsaGateway({
-  apiUrl: process.env.ESA_API_URL || 'http://localhost:8080',
+  apiUrl: process.env.ESA_API_URL || 'https://esapay-api.onrender.com',
   apiKey: process.env.ESA_API_KEY,
 });
 
@@ -363,7 +371,7 @@ const app = express();
 app.use(express.json());
 
 const esa = new EsaGateway({
-  apiUrl: process.env.ESA_API_URL || 'http://localhost:8080',
+  apiUrl: process.env.ESA_API_URL || 'https://esapay-api.onrender.com',
 });
 
 app.post('/api/pay', async (req, res) => {
@@ -391,7 +399,7 @@ app.listen(4000, () => console.log('Payment service listening on :4000'));
 ```typescript
 import { EsaGateway } from 'esapay';
 
-const esa = new EsaGateway({ apiUrl: 'http://localhost:8080' });
+const esa = new EsaGateway();
 
 Bun.serve({
   port: 3001,
@@ -459,7 +467,7 @@ The SDK throws descriptive errors with status codes and upstream gateway diagnos
 ```typescript
 import { EsaGateway } from 'esapay';
 
-const esa = new EsaGateway({ apiUrl: 'http://localhost:8080' });
+const esa = new EsaGateway();
 
 try {
   await esa.checkout({ amount: 100, currency: 'INR' });
@@ -473,12 +481,12 @@ try {
 
 ## 📦 Related Packages
 
-- **CLI Tool**: [`esapay-cli`](https://www.npmjs.com/package/esapay-cli) — Terminal dashboard, health checks, and chaos failover testing (`npx esapay-cli`).
-- **Python SDK**: [`esapay`](https://pypi.org/project/esapay) — Official Python client with standard library zero-dependency engine.
-- **GitHub Repository**: [https://github.com/sujithputta02/Esapay](https://github.com/sujithputta02/Esapay)
+- [**`esapay-cli` (Command Line Interface)**](https://www.npmjs.com/package/esapay-cli) — Terminal dashboard, health checks, and chaos failover testing (`npx esapay-cli`).
+- [**`esapay` (Python SDK on PyPI)**](https://pypi.org/project/esapay) — Official Python client with standard library zero-dependency engine.
+- [**GitHub Repository**](https://github.com/sujithputta02/Esapay) — Source code, benchmark specifications, and local development instructions.
 
 ---
 
 ## 📄 License
 
-MIT © ESA Engineering
+MIT © [Sujith Putta](https://github.com/sujithputta02)

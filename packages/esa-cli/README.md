@@ -1,12 +1,12 @@
 # esapay-cli ⚡
 
 [![NPM Version](https://img.shields.io/npm/v/esapay-cli?color=1F51FF&label=npm)](https://www.npmjs.com/package/esapay-cli)
-[![Version](https://img.shields.io/badge/version-v1.0.3-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.3)
+[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.4)
 [![Bun Compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js->=18.0.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 
-Official Command Line Interface & DevTool for **ESA (Executable State Architecture)** — Autonomous Multi-Gateway Payment Resilience, Self-Healing Corridors, and Cryptographic SHA-256 Merkle Ledger.
+Official Command Line Interface & DevTool for **ESA (Executable State Architecture)** — Autonomous Multi-Gateway Payment Resilience, Self-Healing Corridors, and Cryptographic SHA-256 Merkle Ledger for Sovereign Indian & Global Rails.
 
 ---
 
@@ -14,10 +14,16 @@ Official Command Line Interface & DevTool for **ESA (Executable State Architectu
 
 - [⚡ Zero-Install Instant Execution](#-zero-install-instant-execution)
 - [📦 Global Installation](#-global-installation)
+- [🔐 Authentication & API Key Management](#-authentication--api-key-management)
+  - [Interactive Browser Login (`login`)](#1-interactive-browser-login)
+  - [Instant Guest Sandbox (`login --guest`)](#2-instant-guest-sandbox-no-signup-needed)
+  - [Direct Token Login (`login --key`)](#3-direct-api-key-login)
+  - [Session Identity (`whoami`)](#4-session-identity-whoami)
+  - [Logout & Revocation (`logout`)](#5-logout--revocation)
 - [🛠️ Complete Command Reference](#️-complete-command-reference)
   - [`health`: Control Plane Connectivity](#1-health)
   - [`status`: StateFabric Vitals & TPS](#2-status)
-  - [`gateways`: Multi-Gateway Telemetry & Chaos Toggle](#3-gateways)
+  - [`gateways`: Multi-Gateway Telemetry & Outage Toggle](#3-gateways)
   - [`checkout`: Autonomous Resilient Payment](#4-checkout)
   - [`doctor`: Deep Infrastructure Diagnostics](#5-doctor)
   - [`audit`: Cryptographic Merkle Chain Verification](#6-audit)
@@ -26,7 +32,7 @@ Official Command Line Interface & DevTool for **ESA (Executable State Architectu
   - [`logs`: Real-time Remediations & Decision Stream](#9-logs)
 - [💡 Simulated Outage Walkthrough](#-simulated-outage-walkthrough)
 - [🤖 Scripting & CI/CD JSON Pipelines](#-scripting--cicd-json-pipelines)
-- [⚙️ Configuration & Environment Variables](#️-configuration--environment-variables)
+- [⚙️ Global Options & Configuration](#️-global-options--configuration)
 - [🔗 Related Packages](#-related-packages)
 - [📄 License](#-license)
 
@@ -37,19 +43,22 @@ Official Command Line Interface & DevTool for **ESA (Executable State Architectu
 Run commands instantly without installing anything via `npx` or `bunx`:
 
 ```bash
-# 1. Inspect live Indian payment corridors (PhonePe, Razorpay, Paytm, Cashfree)
+# 1. Connect instantly in Sandbox test mode (zero setup)
+npx esapay-cli login --guest
+
+# 2. Inspect live Indian payment corridors (PhonePe, Razorpay, Paytm, Cashfree)
 npx esapay-cli gateways
 
-# 2. Check cluster health & response latency
+# 3. Check cluster health & response latency
 npx esapay-cli health
 
-# 3. Execute an autonomous resilient checkout (₹500.00 via UPI)
+# 4. Execute an autonomous resilient checkout (₹500.00 via UPI)
 npx esapay-cli checkout --amount 50000 --currency INR --gateway auto
 
-# 4. Verify cryptographic SHA-256 Merkle audit chain
+# 5. Verify cryptographic SHA-256 Merkle audit chain
 npx esapay-cli audit verify
 
-# 5. Run full environment & Ollama engine diagnostics
+# 6. Run full environment & AI deliberation diagnostics
 npx esapay-cli doctor
 ```
 
@@ -59,7 +68,7 @@ npx esapay-cli doctor
 
 ## 📦 Global Installation
 
-Install globally to have `esapay`, `esa`, and `esapay-cli` available everywhere in your shell:
+Install globally to have `esapay`, `esa`, and `esapay-cli` available everywhere in your terminal:
 
 ### Using NPM
 ```bash
@@ -78,11 +87,69 @@ pnpm add -g esapay-cli
 yarn global add esapay-cli
 ```
 
-Once installed globally, you can invoke:
+Once installed globally, you can invoke any alias (`esapay`, `esa`, or `esapay-cli`):
 ```bash
 esapay health
+esapay status
 esapay gateways
-esapay checkout --amount 50000
+esapay checkout --amount 50000 --gateway auto
+```
+
+---
+
+## 🔐 Authentication & API Key Management
+
+`esapay-cli` features a modern authentication engine (modeled after Claude Code and the Stripe CLI) with support for interactive browser login, instant guest sandbox keys, and direct token authentication.
+
+Credentials are saved securely to `~/.esa/credentials.json` and are **automatically shared with the TypeScript and Python SDKs**!
+
+### 1. Interactive Browser Login
+Launches a local listener on `http://localhost:8765/callback` and opens the ESAPay Web Dashboard:
+```bash
+esapay login
+```
+*Once authorized in the browser, your credentials are automatically saved.*
+
+### 2. Instant Guest Sandbox (No Signup Needed)
+Instantly generate a guest test evaluation key (`esa_test_demo_...`) with pre-funded test corridors:
+```bash
+esapay login --guest
+```
+*Output:*
+```
+✅ Connected in Instant Guest Sandbox Mode!
+  • Active API Key:  esa_test_demo_8a7bc12e4f01
+  • Environment:     Sandbox (No Signup Needed)
+  • Saved to:        ~/.esa/credentials.json
+```
+
+### 3. Direct API Key Login
+Store your production (`esa_live_...`) or sandbox (`esa_test_...`) key directly:
+```bash
+esapay login --key esa_live_9f82b71c04a2d8e3
+```
+
+### 4. Session Identity (`whoami`)
+Inspect your currently active merchant identity, environment, and configuration:
+```bash
+esapay whoami
+```
+*Output:*
+```
+================================================================================
+  ⚡ ESAPay CLI — Authenticated Merchant Session
+================================================================================
+  Merchant User:  merchant@company.com
+  Environment:    live (Production)
+  Active Key:     esa_live_9f82b... [REDACTED]
+  API Endpoint:   https://esapay-api.onrender.com
+  Config File:    ~/.esa/credentials.json
+```
+
+### 5. Logout & Revocation
+Purge locally stored credentials from your machine:
+```bash
+esapay logout
 ```
 
 ---
@@ -91,9 +158,12 @@ esapay checkout --amount 50000
 
 | Command | Arguments / Flags | Description |
 | :--- | :--- | :--- |
+| `esapay login` | `[--guest \| --key <key>]` | Authenticate with Supabase / Web Portal or generate instant guest test sandbox key. |
+| `esapay whoami` | `[--json]` | Display active authenticated merchant session, role, and API key status. |
+| `esapay logout` | — | Remove local credentials from `~/.esa/credentials.json`. |
 | `esapay health` | `[--url <url>] [--json]` | Verify connectivity to the ESA control plane cluster. |
 | `esapay status` | `[--url <url>] [--json]` | Real-time StateFabric TPS, P95 latency, error rates, and workload replicas. |
-| `esapay gateways` | `[--toggle <gateway>] [--json]` | List monitored corridors, P95 latency, and SLA success rates. Pass `--toggle <name>` to simulate bank rail outages. |
+| `esapay gateways` | `[--toggle <corridor>] [--json]` | Monitored payment corridors (PhonePe, Razorpay, Paytm, Cashfree). Pass `--toggle <name>` to simulate bank rail outages. |
 | `esapay checkout` | `--amount <paise> [--gateway auto] [--method UPI]` | Execute an autonomous routing decision with sub-second failover. |
 | `esapay doctor` | `[--url <url>]` | Comprehensive system health audit (API, Ollama 24/7 engine, StateFabric, DBs). |
 | `esapay audit verify` | `[--url <url>]` | Mathematically verifies cryptographic SHA-256 Merkle chain integrity. |
@@ -113,7 +183,7 @@ esapay health
 ```
 *Output:*
 ```
-✅ ESA Control Plane is HEALTHY at http://localhost:8080
+✅ ESA Control Plane is HEALTHY at https://esapay-api.onrender.com
 ```
 
 ---
@@ -128,7 +198,7 @@ esapay status
 ================================================================================
   ⚡ ESA (Executable State Architecture) — Live System Vitals
 ================================================================================
-  StateFabric TPS:    184.2
+  StateFabric TPS:    4120.0
   P95 Latency:        42.1ms
   Error Rate:         0.01%
   Queue Backlog:      0 msgs
@@ -162,7 +232,7 @@ esapay gateways
   cashfree    Healthy    52.0ms     99.5%         15%
 ```
 
-To toggle an outage on Razorpay:
+To toggle a synthetic outage on Razorpay:
 ```bash
 esapay gateways --toggle razorpay
 ```
@@ -189,7 +259,7 @@ esapay checkout --amount 50000 --currency INR --gateway auto --method UPI
   Routed Gateway:      phonepe
   Failover Triggered:  false
   Routing Rationale:   Optimal UPI latency (38ms) via PhonePe Indian corridor
-  Checkout URL:        http://localhost:3000/pay/tx_live_948f93e2a0b1
+  Checkout URL:        https://esapay.io/pay/tx_live_948f93e2a0b1
 ```
 
 ---
@@ -204,7 +274,7 @@ esapay doctor
 ================================================================================
   ⚡ ESA System Doctor Diagnostics
 ================================================================================
-  [PASS] ESA REST API Control Plane (HTTP 200 at http://localhost:8080)
+  [PASS] ESA REST API Control Plane (HTTP 200 at https://esapay-api.onrender.com)
   [PASS] Ollama 24/7 AI Deliberation Engine (llama3 running)
   [PASS] StateFabric In-Memory Event Stream (250ms cadence)
   [PASS] SHA-256 Merkle Ledger Integrity (All blocks verified)
@@ -220,70 +290,72 @@ esapay audit verify
 ```
 *Output:*
 ```
-🔐 Verifying SHA-256 Cryptographic Audit Chain...
-✅ Blockchain Integrity: VERIFIED
-  Blocks Validated: 1,482
-  Status: All cryptographic Merkle parent hashes match perfectly.
+🔐 Verifying SHA-256 Merkle Audit Chain...
+✅ Audit Chain Integrity: VALID (All 142 block hashes match root 9e8a...3f01)
 ```
 
 ---
 
 ## 💡 Simulated Outage Walkthrough
 
-Test sub-second failover locally in 3 steps:
+Test ESA's self-healing circuit breaker in under 60 seconds:
 
-1. **Simulate Razorpay Outage**:
-   ```bash
-   esapay gateways --toggle razorpay
-   ```
-2. **Execute Checkout**:
-   ```bash
-   esapay checkout --amount 50000 --gateway auto
-   ```
-   *Notice `Failover Triggered: true` and traffic instantly routed to `phonepe` UPI corridor in <1.68s.*
-3. **Restore Razorpay Corridor**:
-   ```bash
-   esapay gateways --toggle razorpay
-   ```
+```bash
+# Step 1: Check baseline corridor health
+esapay gateways
+
+# Step 2: Trigger synthetic degradation on PhonePe
+esapay gateways --toggle phonepe
+
+# Step 3: Execute a checkout — watch it autonomously route to Razorpay
+esapay checkout --amount 100000 --gateway auto
+
+# Step 4: Verify the decision rationale & cryptographic audit record
+esapay audit trail --limit 1
+
+# Step 5: Restore PhonePe corridor
+esapay gateways --toggle phonepe
+```
 
 ---
 
 ## 🤖 Scripting & CI/CD JSON Pipelines
 
-Use `--json` and pipe to `jq` for automated integration tests and GitHub Actions:
+Every command accepts `--json` for direct ingestion into `jq`, automated health monitors, or CI/CD pipelines:
 
 ```bash
-# Assert cluster health in CI
-STATUS=$(esapay health --json | jq -r .status)
-if [ "$STATUS" != "healthy" ]; then
-  echo "Cluster unhealthy!" && exit 1
-fi
+# Extract current StateFabric TPS
+npx esapay-cli status --json | jq '.vitals[-1].total_tps'
 
-# Extract routed gateway from checkout
-ROUTED=$(esapay checkout --amount 10000 --json | jq -r .routed_gateway)
-echo "Transaction was routed through: $ROUTED"
+# Assert audit chain validity in GitHub Actions
+npx esapay-cli audit verify --json | jq -e '.valid == true'
+
+# Pipe healthy gateway list into monitoring
+npx esapay-cli gateways --json | jq '.[] | select(.status == "Healthy") | .name'
 ```
 
 ---
 
-## ⚙️ Configuration & Environment Variables
+## ⚙️ Global Options & Configuration
 
-| Variable | Default | Purpose |
-| :--- | :--- | :--- |
-| `ESA_API_URL` | `http://localhost:8080` | Base URL of the ESA Control Plane cluster |
-| `ESA_API_KEY` | *(None)* | Bearer authorization token if cluster authentication is enabled |
-| `ESA_DASHBOARD_URL` | `http://localhost:3000` | Target URL for the web control dashboard |
+| Flag | Env Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-u, --url <URL>` | `ESA_API_URL` | `https://esapay-api.onrender.com` | Target ESA cluster control plane URL. |
+| `-k, --key <KEY>` | `ESA_API_KEY` | `~/.esa/credentials.json` | API Key (`esa_live_...` or `esa_test_...`). |
+| `--json` | — | `false` | Return structured JSON output for automation. |
+| `-V, --version` | — | — | Print CLI version (`1.0.4`). |
+| `-h, --help` | — | — | Display comprehensive help menu. |
 
 ---
 
 ## 🔗 Related Packages
 
-- **TypeScript SDK**: [`esapay`](https://www.npmjs.com/package/esapay) — Official Node.js and Bun SDK.
-- **Python SDK**: [`esapay`](https://pypi.org/project/esapay) — Official Python SDK.
-- **GitHub Repository**: [https://github.com/sujithputta02/Esapay](https://github.com/sujithputta02/Esapay)
+- [**`esapay` (TypeScript / Node / Bun SDK)**](https://www.npmjs.com/package/esapay) — Official SDK with strict TypeScript types, automatic credential inheritance, and sub-second checkout failover.
+- [**`esapay` (Python SDK on PyPI)**](https://pypi.org/project/esapay/) — Zero-dependency Python 3.8+ package for FastAPI, Django, Flask, and AWS Lambda.
+- [**GitHub Repository**](https://github.com/sujithputta02/Esapay) — Source code, benchmark specifications, and local development instructions.
 
 ---
 
 ## 📄 License
 
-MIT © ESA Engineering
+MIT © [Sujith Putta](https://github.com/sujithputta02)

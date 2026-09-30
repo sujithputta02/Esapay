@@ -4,9 +4,9 @@
  * ⚡ ESA (Executable State Architecture) — Universal Command Line Interface
  *
  * Can be installed globally via:
- *   npm install -g esa-cli
+ *   npm install -g esapay-cli
  * Or run instantly via:
- *   npx esa-cli <command>
+ *   npx esapay-cli <command>
  */
 
 import { exec } from 'node:child_process';
@@ -71,7 +71,7 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--help' || arg === '-h') {
     if (!command) command = 'help';
   } else if (arg === '--version' || arg === '-V') {
-    console.log('esapay-cli 1.0.3 (Executable State Architecture)');
+    console.log('esapay-cli 1.0.4 (Executable State Architecture)');
     process.exit(0);
   } else if (!command) {
     command = arg;
@@ -87,8 +87,9 @@ function printHelp() {
 ${BOLD}⚡ ESA (Executable State Architecture) — Command Line Interface${RESET}
 
 ${BOLD}USAGE:${RESET}
+  esapay [OPTIONS] <COMMAND>
   esa [OPTIONS] <COMMAND>
-  npx esa-cli [OPTIONS] <COMMAND>
+  npx esapay-cli [OPTIONS] <COMMAND>
 
 ${BOLD}COMMANDS:${RESET}
   ${CYAN}login [--guest|--key <k>]${RESET}  Authenticate with Supabase (Claude Code / Stripe style)
