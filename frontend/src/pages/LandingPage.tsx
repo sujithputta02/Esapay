@@ -853,6 +853,13 @@ print(f"Transaction ID: {decision.transaction_id}")`,
             >
               BENCHMARKS
             </a>
+            <a
+              href="/dashboard"
+              className="hidden sm:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
+              title="Open ESA Command Center Console"
+            >
+              CONSOLE
+            </a>
             <button
               onClick={() => handleExecuteCheckout(true)}
               className="bg-white text-black hover:bg-slate-100 rounded-full px-4 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"

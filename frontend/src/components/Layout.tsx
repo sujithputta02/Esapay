@@ -203,7 +203,7 @@ export function Layout() {
             {navigation.map((item) => {
               const isActive =
                 location.pathname === item.path ||
-                (item.path === '/dashboard' && location.pathname === '/');
+                (item.path === '/dashboard' && location.pathname === '/app');
 
               return (
                 <Link
@@ -224,6 +224,15 @@ export function Layout() {
 
           {/* Zone 3: Actions & Kubernetes Pods Badge (Right) */}
           <div className="flex items-center gap-3 sm:gap-4">
+            {/* Landing Page Link */}
+            <Link
+              to="/"
+              className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] hover:bg-[#333333] border border-white/[0.06] text-xs transition-colors text-text-secondary hover:text-white"
+              title="Return to Public Landing Page"
+            >
+              <span>← Landing Page</span>
+            </Link>
+
             {/* Kubernetes Pods Counter Badge */}
             <div className="hidden sm:flex items-center gap-2 px-3.5 py-2 rounded-full bg-[#272727] border border-white/[0.06] text-xs">
               <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
