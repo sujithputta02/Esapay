@@ -103,7 +103,11 @@ jobs:
 
       - name: Publish to NPM
         working-directory: ./sdk/typescript
-        run: npm publish --access public
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          npm whoami
+          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -122,7 +126,11 @@ jobs:
 
       - name: Publish CLI to NPM
         working-directory: ./packages/esa-cli
-        run: npm publish --access public
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          npm whoami
+          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -152,5 +160,5 @@ jobs:
       - name: Publish to PyPI
         working-directory: ./sdk/python
         run: |
-          twine upload --username __token__ --password ${{ secrets.PYPI_API_TOKEN }} dist/*
+          twine upload --skip-existing --username __token__ --password ${{ secrets.PYPI_API_TOKEN }} dist/*
 
