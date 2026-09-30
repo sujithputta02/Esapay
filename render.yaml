@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: esapay-api
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: RUST_LOG
+        value: info
+      - key: HF_AI_BRAIN_URL
+        value: https://sujithputta-esa-ai-brain.hf.space
+      - key: OLLAMA_MODEL
+        value: qwen2.5:0.5b
+      - key: RAZORPAY_MODE
+        value: test
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
