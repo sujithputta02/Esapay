@@ -26,6 +26,31 @@ export function setApiBaseUrl(url: string) {
   }
 }
 
+export function getApiKey(): string {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const paramKey = params.get('key') || params.get('api_key');
+    if (paramKey) {
+      localStorage.setItem('esa_api_key', paramKey.trim());
+      return paramKey.trim();
+    }
+    return localStorage.getItem('esa_api_key') || '';
+  }
+  return '';
+}
+
+export function setApiKey(key: string) {
+  if (typeof window !== 'undefined') {
+    const clean = key.trim();
+    if (clean) {
+      localStorage.setItem('esa_api_key', clean);
+    } else {
+      localStorage.removeItem('esa_api_key');
+    }
+    window.dispatchEvent(new CustomEvent('esa-key-changed', { detail: clean }));
+  }
+}
+
 export class ApiClient {
   private customBaseUrl?: string;
 
@@ -37,8 +62,22 @@ export class ApiClient {
     return this.customBaseUrl || getApiBaseUrl();
   }
 
+  private getHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...customHeaders,
+    };
+    const key = getApiKey();
+    if (key) {
+      headers['Authorization'] = `Bearer ${key}`;
+    }
+    return headers;
+  }
+
   async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.getBaseUrl()}${path}`);
+    const response = await fetch(`${this.getBaseUrl()}${path}`, {
+      headers: this.getHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`API error: ${response.statusText}`);
     }
@@ -48,9 +87,7 @@ export class ApiClient {
   async post<T>(path: string, data?: any): Promise<T> {
     const response = await fetch(`${this.getBaseUrl()}${path}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: this.getHeaders(),
       body: data !== undefined ? JSON.stringify(data) : undefined,
     });
     if (!response.ok) {

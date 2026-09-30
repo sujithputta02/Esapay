@@ -18,10 +18,12 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, Level};
 
+mod api_keys;
 mod benchmark;
 mod benchmark_harness;
 mod live_data;
 mod payment;
+mod rate_limiter;
 mod vitals;
 mod websocket;
 use live_data::{
@@ -336,6 +338,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize fluid reasoner client
     let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
 
+    // Initialize API rate limiter (Token-bucket protection against abuse/DDoS)
+    let rate_limiter = rate_limiter::ApiRateLimiter::new();
+
     // Create app state
     let app_state = AppState {
         state_fabric,
@@ -347,47 +352,81 @@ async fn main() -> anyhow::Result<()> {
         agent_status,
         razorpay,
         vitals,
+        rate_limiter,
         last_benchmark: Arc::new(std::sync::RwLock::new(None)),
         last_ablation: Arc::new(std::sync::RwLock::new(None)),
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
-    // Build router
+    // Build router with full /api/v1/ versioning and backwards-compatible /api/ aliases
     let app = Router::new()
         .route("/health", get(health_handler))
         // Multi-Gateway Universal Routing endpoints
         .route("/api/gateways", get(list_gateways))
+        .route("/api/v1/gateways", get(list_gateways))
         .route("/api/gateways/:name/toggle", post(toggle_gateway))
+        .route("/api/v1/gateways/:name/toggle", post(toggle_gateway))
         .route("/api/payments/checkout", post(universal_checkout))
+        .route("/api/v1/payments/checkout", post(universal_checkout))
         .route("/api/workloads", get(list_workloads).post(create_workload))
+        .route("/api/v1/workloads", get(list_workloads).post(create_workload))
         .route("/api/workloads/:id", get(get_workload))
+        .route("/api/v1/workloads/:id", get(get_workload))
         .route("/api/events/payment", post(ingest_payment_event))
+        .route("/api/v1/events/payment", post(ingest_payment_event))
         .route("/api/razorpay/webhook", post(razorpay_webhook))
+        .route("/api/v1/razorpay/webhook", post(razorpay_webhook))
         .route("/api/razorpay/status", get(razorpay_status))
+        .route("/api/v1/razorpay/status", get(razorpay_status))
         .route("/api/razorpay/orders", post(razorpay_create_order))
+        .route("/api/v1/razorpay/orders", post(razorpay_create_order))
         .route("/api/razorpay/verify", post(razorpay_verify_keys))
+        .route("/api/v1/razorpay/verify", post(razorpay_verify_keys))
         .route("/api/razorpay/confirm", post(razorpay_confirm_payment))
+        .route("/api/v1/razorpay/confirm", post(razorpay_confirm_payment))
         .route("/api/vitals/history", get(get_vitals_history))
+        .route("/api/v1/vitals/history", get(get_vitals_history))
         .route("/api/demo/trigger-spike", post(trigger_spike))
+        .route("/api/v1/demo/trigger-spike", post(trigger_spike))
         .route("/api/demo/seed", post(seed_demo_data))
+        .route("/api/v1/demo/seed", post(seed_demo_data))
         .route("/api/demo/scenario/:scenario", post(trigger_scenario))
+        .route("/api/v1/demo/scenario/:scenario", post(trigger_scenario))
         .route("/api/benchmark/run", post(run_benchmark))
+        .route("/api/v1/benchmark/run", post(run_benchmark))
         .route("/api/benchmark/harness", post(run_benchmark_harness))
+        .route("/api/v1/benchmark/harness", post(run_benchmark_harness))
         .route("/api/benchmark/latest", get(get_benchmark_latest))
+        .route("/api/v1/benchmark/latest", get(get_benchmark_latest))
         .route("/api/metrics/tokens", get(get_token_metrics))
+        .route("/api/v1/metrics/tokens", get(get_token_metrics))
         .route("/api/agents/status", get(get_agents_status))
+        .route("/api/v1/agents/status", get(get_agents_status))
         .route("/api/agents/activity", get(get_agent_activity))
+        .route("/api/v1/agents/activity", get(get_agent_activity))
         .route(
             "/api/agents/fluid-reasoner/status",
             get(get_fluid_reasoner_status),
         )
+        .route(
+            "/api/v1/agents/fluid-reasoner/status",
+            get(get_fluid_reasoner_status),
+        )
         .route("/api/actions/recent", get(get_recent_actions))
-        // NEW: Audit Trail endpoints
+        .route("/api/v1/actions/recent", get(get_recent_actions))
+        // Audit Trail endpoints
         .route("/api/audit/trail", get(get_audit_trail))
+        .route("/api/v1/audit/trail", get(get_audit_trail))
         .route("/api/audit/verify-chain", get(verify_audit_chain))
+        .route("/api/v1/audit/verify-chain", get(verify_audit_chain))
         .route("/api/audit/decision/:decision_id", get(get_decision_detail))
+        .route("/api/v1/audit/decision/:decision_id", get(get_decision_detail))
         .route(
             "/api/audit/replay/:decision_id",
+            post(replay_decision).get(replay_decision),
+        )
+        .route(
+            "/api/v1/audit/replay/:decision_id",
             post(replay_decision).get(replay_decision),
         )
         // Benchmark & Ablation endpoints
@@ -395,18 +434,38 @@ async fn main() -> anyhow::Result<()> {
             "/api/benchmark/ablations",
             post(run_benchmark_ablations).get(get_benchmark_ablations),
         )
-        // NEW: Effect Measurement endpoints
+        .route(
+            "/api/v1/benchmark/ablations",
+            post(run_benchmark_ablations).get(get_benchmark_ablations),
+        )
+        // Effect Measurement endpoints
         .route("/api/effects/measurements", get(get_effect_measurements))
+        .route("/api/v1/effects/measurements", get(get_effect_measurements))
         .route("/api/effects/recent", get(get_recent_effects))
-        // NEW: AI Cost endpoints
+        .route("/api/v1/effects/recent", get(get_recent_effects))
+        // AI Cost endpoints
         .route("/api/costs/ai", get(get_ai_costs))
+        .route("/api/v1/costs/ai", get(get_ai_costs))
         .route("/api/costs/per-agent", get(get_costs_per_agent))
-        // NEW: Policy Verdict endpoints
+        .route("/api/v1/costs/per-agent", get(get_costs_per_agent))
+        // Policy Verdict endpoints
         .route("/api/verdicts/recent", get(get_recent_verdicts))
+        .route("/api/v1/verdicts/recent", get(get_recent_verdicts))
         .route("/api/verdicts/stats", get(get_verdict_stats))
-        // NEW: Intent & Constraints endpoints
+        .route("/api/v1/verdicts/stats", get(get_verdict_stats))
+        // Intent & Constraints endpoints
         .route("/api/intent/active", get(get_active_intents))
+        .route("/api/v1/intent/active", get(get_active_intents))
         .route("/api/intent/violations", get(get_constraint_violations))
+        .route("/api/v1/intent/violations", get(get_constraint_violations))
+        // API Key Management & Sandbox Access
+        .route("/api/v1/keys/generate-sandbox", post(api_keys::generate_sandbox_key_handler))
+        .route("/api/keys/generate-sandbox", post(api_keys::generate_sandbox_key_handler))
+        .route("/api/v1/keys/validate", post(api_keys::validate_key_handler))
+        .route("/api/keys/validate", post(api_keys::validate_key_handler))
+        // Authentication Identity (Supabase JWT & API Key introspection)
+        .route("/api/v1/auth/me", get(api_keys::auth_me_handler))
+        .route("/api/auth/me", get(api_keys::auth_me_handler))
         .route("/ws/telemetry", get(ws_telemetry_handler));
 
     let candidate_paths = [
@@ -441,9 +500,22 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
 
-    let app = app.layer(CorsLayer::permissive()).with_state(app_state);
+    let app = app
+        .layer(axum::middleware::from_fn(|req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let mut res = next.run(req).await;
+            let headers = res.headers_mut();
+            headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+            headers.insert("x-frame-options", "DENY".parse().unwrap());
+            headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+            headers.insert("strict-transport-security", "max-age=31536000; includeSubDomains".parse().unwrap());
+            headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+            res
+        }))
+        .layer(CorsLayer::permissive())
+        .with_state(app_state);
 
-    let addr = "0.0.0.0:8080";
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
     info!("ESA API listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -465,6 +537,7 @@ struct AppState {
     agent_status: Arc<std::sync::RwLock<AgentStatusState>>,
     razorpay: Option<Arc<RazorpayAdapter>>,
     vitals: VitalsStore,
+    rate_limiter: rate_limiter::ApiRateLimiter,
     last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
     last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
     gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
@@ -852,9 +925,17 @@ async fn trigger_spike(
     State(state): State<AppState>,
     Json(req): Json<TriggerSpikeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Rate limit demo/spike endpoint to prevent abuse
+    if let Err((_status, err_json)) = state.rate_limiter.check_demo() {
+        return Ok((StatusCode::TOO_MANY_REQUESTS, err_json).into_response());
+    }
+
+    // Input sanitization & bounds check (clamp between 1.0 and 20.0x)
+    let multiplier = req.multiplier.clamp(1.0, 20.0);
+
     info!(
         "🧪 Manual spike test triggered with multiplier {}",
-        req.multiplier
+        multiplier
     );
     info!("ℹ️  Note: In production, spikes occur automatically from payment transaction volume");
 
@@ -864,9 +945,9 @@ async fn trigger_spike(
 
     for mut workload in all_workloads {
         // Increase metrics to simulate spike
-        workload.metrics.rate_per_min *= req.multiplier;
-        workload.metrics.p95_latency_ms *= req.multiplier * 0.8;
-        workload.metrics.p99_latency_ms *= req.multiplier * 0.9;
+        workload.metrics.rate_per_min *= multiplier;
+        workload.metrics.p95_latency_ms *= multiplier * 0.8;
+        workload.metrics.p99_latency_ms *= multiplier * 0.9;
         workload.metrics.queue_depth =
             (workload.metrics.queue_depth as f64 * req.multiplier) as u64;
         workload.metrics.error_rate =
@@ -901,9 +982,9 @@ async fn trigger_spike(
     Ok(Json(serde_json::json!({
         "status": "spike_triggered",
         "affected_workloads": affected_count,
-        "multiplier": req.multiplier,
+        "multiplier": multiplier,
         "note": "Autonomous recovery system will detect and recover automatically"
-    })))
+    })).into_response())
 }
 
 async fn get_token_metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -1810,8 +1891,47 @@ async fn toggle_gateway(
 
 async fn universal_checkout(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<UniversalCheckoutRequest>,
-) -> Json<GatewayRouteDecision> {
+) -> Result<Json<GatewayRouteDecision>, (StatusCode, Json<serde_json::Value>)> {
+    // 1. Rate Limiting Check (Token Bucket protection against DDoS/scraping)
+    state.rate_limiter.check_checkout()?;
+
+    // 2. Input Validation & Sanitization (Strict bounds check)
+    if req.amount == 0 || req.amount > 100_000_000_000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_amount",
+                "message": "Amount must be greater than 0 and under 100,000,000,000 cents."
+            })),
+        ));
+    }
+
+    let clean_currency = req.currency.trim().to_uppercase();
+    if clean_currency.len() != 3 || !clean_currency.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_currency",
+                "message": "Currency must be a valid 3-letter alphabetic ISO code (e.g. INR, USD, EUR)."
+            })),
+        ));
+    }
+
+    // 3. Optional Authorization check (validates Bearer token or API key if provided)
+    if let Some(token) = api_keys::extract_bearer_token(&headers) {
+        if !api_keys::is_key_authorized(&token) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized",
+                    "message": "Provided Authorization Bearer token is invalid or expired."
+                })),
+            ));
+        }
+    }
+
     let requested = match req.gateway.to_lowercase().as_str() {
         "razorpay" => PaymentGateway::Razorpay,
         "stripe" => PaymentGateway::Stripe,
@@ -1901,7 +2021,7 @@ async fn universal_checkout(
     let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
     publish_payment_side_effects(&state, &apply_res);
 
-    Json(GatewayRouteDecision {
+    Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
         amount: req.amount,
         currency: req.currency,
@@ -1911,5 +2031,5 @@ async fn universal_checkout(
         routing_reason: reason,
         checkout_url,
         timestamp: chrono::Utc::now(),
-    })
+    }))
 }

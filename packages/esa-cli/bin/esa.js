@@ -11,6 +11,10 @@
 
 import { exec } from 'node:child_process';
 import process from 'node:process';
+import fs from 'node:fs';
+import os from 'node:os';
+import http from 'node:http';
+import path from 'node:path';
 
 const BOLD = '\x1b[1m';
 const GREEN = '\x1b[32m';
@@ -21,10 +25,37 @@ const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 const UNDERLINE = '\x1b[4m';
 
+function getCredentialsPath() {
+  const dir = path.join(os.homedir(), '.esa');
+  if (!fs.existsSync(dir)) {
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  }
+  return path.join(dir, 'credentials.json');
+}
+
+function loadStoredCredentials() {
+  try {
+    const p = getCredentialsPath();
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, 'utf-8'));
+    }
+  } catch {}
+  return null;
+}
+
+function saveCredentials(data) {
+  try {
+    const p = getCredentialsPath();
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
+  } catch {}
+}
+
 // Parse arguments
 const args = process.argv.slice(2);
 
 let apiUrl = process.env.ESA_API_URL || 'http://localhost:8080';
+let storedCreds = loadStoredCredentials();
+let apiKey = process.env.ESA_API_KEY || (storedCreds ? storedCreds.api_key : '');
 let jsonOutput = false;
 let command = '';
 let subargs = [];
@@ -33,6 +64,8 @@ for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--url' || arg === '-u') {
     apiUrl = args[++i] || apiUrl;
+  } else if (arg === '--key' || arg === '-k') {
+    apiKey = args[++i] || apiKey;
   } else if (arg === '--json') {
     jsonOutput = true;
   } else if (arg === '--help' || arg === '-h') {
@@ -58,24 +91,28 @@ ${BOLD}USAGE:${RESET}
   npx esa-cli [OPTIONS] <COMMAND>
 
 ${BOLD}COMMANDS:${RESET}
-  ${CYAN}health${RESET}                      Health check for the ESA control plane
-  ${CYAN}status${RESET}                      Live Executable State vitals, workloads, and AI agents
-  ${CYAN}gateways${RESET}                    Multi-gateway corridors (Razorpay, Stripe, PhonePe, Cashfree, Paytm, Adyen)
-  ${CYAN}gateways --toggle <name>${RESET}   Simulate outage / degradation on a gateway
-  ${CYAN}checkout [options]${RESET}          Universal payment checkout with autonomous failover
-  ${CYAN}workloads [list|get <id>]${RESET}  Workload entities in StateFabric
-  ${CYAN}agents${RESET}                      AI agent deliberation status & inference metrics
-  ${CYAN}audit [verify|trail]${RESET}       SHA-256 cryptographic audit chain verification
+  ${CYAN}login [--guest|--key <k>]${RESET}  Authenticate with Supabase (Claude Code / Stripe style)
+  ${CYAN}whoami${RESET}                     Show currently authenticated merchant session
+  ${CYAN}logout${RESET}                     Clear stored authentication credentials
+  ${CYAN}health${RESET}                     Health check for the ESA control plane
+  ${CYAN}status${RESET}                     Live Executable State vitals, workloads, and AI agents
+  ${CYAN}gateways${RESET}                   Multi-gateway corridors (Razorpay, Stripe, PhonePe, Cashfree, Paytm, Adyen)
+  ${CYAN}gateways --toggle <name>${RESET}  Simulate outage / degradation on a gateway
+  ${CYAN}checkout [options]${RESET}         Universal payment checkout with autonomous failover
+  ${CYAN}workloads [list|get <id>]${RESET} Workload entities in StateFabric
+  ${CYAN}agents${RESET}                     AI agent deliberation status & inference metrics
+  ${CYAN}audit [verify|trail]${RESET}      SHA-256 cryptographic audit chain verification
   ${CYAN}chaos [spike|scenario <name>]${RESET} Inject synthetic failures / load spikes
-  ${CYAN}dashboard${RESET}                   Launch Web Dashboard connected to your server
-  ${CYAN}doctor${RESET}                      Environment diagnostics (API, Ollama 24/7, DBs)
-  ${CYAN}config [key] [val]${RESET}             View or update CLI default configuration
-  ${CYAN}benchmark [run|latest]${RESET}         Multi-seed benchmark evaluation (B0 vs B1 vs B2)
-  ${CYAN}logs [--limit N]${RESET}               Recent actions and remediation event stream
-  ${CYAN}docs${RESET}                        Open documentation and guides
+  ${CYAN}dashboard${RESET}                  Launch Web Dashboard connected to your server
+  ${CYAN}doctor${RESET}                     Environment diagnostics (API, Ollama 24/7, DBs)
+  ${CYAN}config [key] [val]${RESET}            View or update CLI default configuration
+  ${CYAN}benchmark [run|latest]${RESET}        Multi-seed benchmark evaluation (B0 vs B1 vs B2)
+  ${CYAN}logs [--limit N]${RESET}              Recent actions and remediation event stream
+  ${CYAN}docs${RESET}                       Open documentation and guides
 
 ${BOLD}OPTIONS:${RESET}
   -u, --url <URL>             ESA API Base URL [default: http://localhost:8080] [env: ESA_API_URL]
+  -k, --key <KEY>             ESAPay API Key [env: ESA_API_KEY]
       --json                  Output raw JSON instead of formatted text
   -h, --help                  Print this help message
   -V, --version               Print version
@@ -87,6 +124,7 @@ async function request(path, options = {}) {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
       ...(options.headers || {}),
     },
   });
@@ -739,8 +777,126 @@ async function handleDocs() {
   console.log(`✅ Opened documentation in default browser!\n`);
 }
 
+async function handleLogin() {
+  const mode = subargs[0];
+  if (mode === '--guest' || mode === 'guest') {
+    const guestKey = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+    const creds = {
+      api_key: guestKey,
+      user: 'guest-evaluator@sandbox.esapay.io',
+      environment: 'sandbox',
+      logged_in_at: new Date().toISOString(),
+    };
+    saveCredentials(creds);
+    console.log(`\n${GREEN}✅ Connected in Instant Guest Sandbox Mode!${RESET}`);
+    console.log(`  • Active API Key:  ${BOLD}${guestKey}${RESET}`);
+    console.log(`  • Environment:     ${CYAN}Sandbox (No Signup Needed)${RESET}`);
+    console.log(`  • Saved to:        ${DIM}~/.esa/credentials.json${RESET}\n`);
+    return;
+  }
+
+  if (mode === '--key' || mode === '-k') {
+    const key = subargs[1];
+    if (!key) {
+      console.error(`${RED}Please provide an API key: esa login --key <key>${RESET}`);
+      process.exit(1);
+    }
+    const env = key.startsWith('esa_live_') ? 'live' : 'test';
+    const creds = {
+      api_key: key,
+      user: 'merchant@esapay.internal',
+      environment: env,
+      logged_in_at: new Date().toISOString(),
+    };
+    saveCredentials(creds);
+    console.log(`\n${GREEN}✅ Successfully saved API key!${RESET}`);
+    console.log(`  • Active Key:   ${BOLD}${key.substring(0, 16)}...${RESET}`);
+    console.log(`  • Environment:  ${CYAN}${env}${RESET}`);
+    console.log(`  • Saved to:     ${DIM}~/.esa/credentials.json${RESET}\n`);
+    return;
+  }
+
+  // Claude Code / Stripe CLI style Browser OAuth Login
+  console.log(`\n${CYAN}================================================================================${RESET}`);
+  console.log(`${BOLD}  ⚡ ESAPay CLI — Browser Authentication${RESET}`);
+  console.log(`${CYAN}================================================================================${RESET}`);
+  console.log(`  Starting local callback listener on http://localhost:8765 ...`);
+
+  const server = http.createServer((req, res) => {
+    const reqUrl = new URL(req.url, 'http://localhost:8765');
+    if (reqUrl.pathname === '/callback') {
+      const key = reqUrl.searchParams.get('key') || reqUrl.searchParams.get('api_key') || 'esa_test_demo_web_auth';
+      const user = reqUrl.searchParams.get('email') || reqUrl.searchParams.get('user') || 'merchant@esapay.io';
+      const env = key.startsWith('esa_live_') ? 'live' : 'test';
+
+      saveCredentials({
+        api_key: key,
+        user,
+        environment: env,
+        logged_in_at: new Date().toISOString(),
+      });
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!DOCTYPE html><html><body style="background:#0a0d14;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h1 style="color:#00f2fe;">&#10004; Authenticated Successfully!</h1><p>You can close this tab and return to your terminal.</p></div></body></html>`);
+
+      console.log(`\n${GREEN}✅ Successfully authenticated via browser!${RESET}`);
+      console.log(`  • User:         ${BOLD}${user}${RESET}`);
+      console.log(`  • Active Key:   ${BOLD}${key.substring(0, 16)}...${RESET}`);
+      console.log(`  • Saved to:     ${DIM}~/.esa/credentials.json${RESET}\n`);
+
+      server.close();
+      process.exit(0);
+    }
+  });
+
+  server.listen(8765, () => {
+    const authUrl = `https://esapay.vercel.app/landing?cli=8765`;
+    console.log(`  Opening browser to: ${UNDERLINE}${authUrl}${RESET}`);
+    console.log(`  ${DIM}(Waiting for authorization... Press Ctrl+C to cancel)${RESET}`);
+    console.log(`  ${DIM}(Tip: For instant offline demo, run: esa login --guest)${RESET}\n`);
+
+    const platform = process.platform;
+    const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
+    exec(`${cmd} "${authUrl}"`, (err) => {
+      if (err) {
+        console.log(`  ⚠️ Please open this URL manually in your browser:\n  ${CYAN}${authUrl}${RESET}\n`);
+      }
+    });
+  });
+}
+
+async function handleWhoami() {
+  const creds = loadStoredCredentials();
+  if (!creds || !creds.api_key) {
+    console.log(`\n${YELLOW}Not logged in.${RESET} Run ${BOLD}esa login${RESET} or ${BOLD}esa login --guest${RESET}\n`);
+    return;
+  }
+  console.log(`\n${BOLD}⚡ Active ESAPay Session:${RESET}`);
+  console.log(`  • User:         ${GREEN}${creds.user || 'Merchant'}${RESET}`);
+  console.log(`  • Environment:  ${CYAN}${creds.environment || 'test'}${RESET}`);
+  console.log(`  • API Key:      ${BOLD}${creds.api_key.substring(0, 18)}...${RESET}`);
+  console.log(`  • Credentials:  ${DIM}~/.esa/credentials.json${RESET}\n`);
+}
+
+async function handleLogout() {
+  const p = getCredentialsPath();
+  if (fs.existsSync(p)) {
+    fs.unlinkSync(p);
+  }
+  console.log(`\n${GREEN}✓ Logged out successfully.${RESET} Stored credentials cleared.\n`);
+}
+
 // Router
 switch (command) {
+  case 'login':
+    await handleLogin();
+    break;
+  case 'whoami':
+    await handleWhoami();
+    break;
+  case 'logout':
+    await handleLogout();
+    break;
   case 'health':
     await handleHealth();
     break;

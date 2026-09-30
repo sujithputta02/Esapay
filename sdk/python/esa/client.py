@@ -1,3 +1,4 @@
+import os
 import json
 import urllib.request
 import urllib.error
@@ -73,6 +74,17 @@ class EsaGateway:
         corridors: Optional[List[str]] = None,
     ):
         self.api_url = api_url.rstrip("/")
+        if not api_key:
+            api_key = os.environ.get("ESA_API_KEY")
+            if not api_key:
+                cred_path = os.path.expanduser("~/.esa/credentials.json")
+                if os.path.exists(cred_path):
+                    try:
+                        with open(cred_path, "r", encoding="utf-8") as f:
+                            creds = json.load(f)
+                            api_key = creds.get("api_key")
+                    except Exception:
+                        pass
         self.api_key = api_key
         self.timeout = timeout
         self.auto_failover = auto_failover

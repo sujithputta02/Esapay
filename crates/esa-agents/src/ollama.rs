@@ -16,16 +16,30 @@ pub struct OllamaClient {
     client: reqwest::Client,
     token_counter: Arc<TokenCounter>,
     cost_tracker: Arc<AICostTracker>,
+    concurrency_semaphore: Arc<tokio::sync::Semaphore>,
+    consecutive_failures: Arc<AtomicUsize>,
+    circuit_open_until: Arc<Mutex<Option<std::time::Instant>>>,
+    response_cache: Arc<Mutex<HashMap<String, (OllamaResponse, std::time::Instant)>>>,
 }
 
 impl OllamaClient {
     pub fn new(base_url: String, model: String) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(25))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             base_url,
             model,
-            client: reqwest::Client::new(),
+            client,
             token_counter: Arc::new(TokenCounter::new()),
             cost_tracker: Arc::new(AICostTracker::new()),
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            consecutive_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_open_until: Arc::new(Mutex::new(None)),
+            response_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -34,12 +48,22 @@ impl OllamaClient {
         model: String,
         cost_tracker: Arc<AICostTracker>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(25))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             base_url,
             model,
-            client: reqwest::Client::new(),
+            client,
             token_counter: Arc::new(TokenCounter::new()),
             cost_tracker,
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            consecutive_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_open_until: Arc::new(Mutex::new(None)),
+            response_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -52,6 +76,35 @@ impl OllamaClient {
         agent_id: &str,
         prompt: String,
     ) -> Result<OllamaResponse> {
+        // 1. Semantic / Deterministic Response Cache Check (Rule 10 & 20)
+        let cache_key = format!("{}:{}:{}", self.model, agent_id, prompt.trim());
+        if let Ok(cache) = self.response_cache.lock() {
+            if let Some((cached_res, timestamp)) = cache.get(&cache_key) {
+                if timestamp.elapsed() < std::time::Duration::from_secs(60) {
+                    info!("⚡ AI Cache HIT for agent '{}' (saved upstream inference)", agent_id);
+                    return Ok(cached_res.clone());
+                }
+            }
+        }
+
+        // 2. Circuit Breaker Check (Rule 17)
+        if let Ok(guard) = self.circuit_open_until.lock() {
+            if let Some(open_until) = *guard {
+                if std::time::Instant::now() < open_until {
+                    return Err(anyhow::anyhow!(
+                        "Ollama circuit breaker is OPEN due to repeated upstream failures. Fast-failing to deterministic rules."
+                    ));
+                }
+            }
+        }
+
+        // 3. Concurrency Limiter (Rule 12)
+        let _permit = self
+            .concurrency_semaphore
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("Ollama concurrency semaphore error: {}", e))?;
+
         let start_time = std::time::Instant::now();
 
         let request = OllamaRequest {
@@ -64,7 +117,11 @@ impl OllamaClient {
                 top_p: 0.85,
                 num_predict: 128,
             }),
-            keep_alive: Some("-1".to_string()),
+            keep_alive: Some(
+                std::env::var("OLLAMA_KEEP_ALIVE")
+                    .map(|v| if v == "-1" { "24h".to_string() } else { v })
+                    .unwrap_or_else(|_| "24h".to_string()),
+            ),
         };
 
         info!(
@@ -72,80 +129,113 @@ impl OllamaClient {
             self.model, agent_id
         );
 
-        let response_result = self
-            .client
-            .post(format!("{}/api/generate", self.base_url))
-            .json(&request)
-            .send()
-            .await;
+        let mut attempts = 0;
+        let max_attempts = 2;
+        let mut last_error_text = String::new();
 
-        let latency_ms = start_time.elapsed().as_millis() as u64;
+        while attempts < max_attempts {
+            attempts += 1;
+            let response_result = self
+                .client
+                .post(format!("{}/api/generate", self.base_url))
+                .json(&request)
+                .send()
+                .await;
 
-        match response_result {
-            Ok(response) => {
-                let status = response.status();
-                if !status.is_success() {
-                    let error_text = response.text().await?;
-                    warn!("Ollama error response: {}", error_text);
+            let latency_ms = start_time.elapsed().as_millis() as u64;
 
-                    // Record failed request
-                    self.cost_tracker.record_inference(
-                        &self.model,
-                        agent_id,
-                        &prompt,
-                        "",
-                        latency_ms,
-                        Some(format!("HTTP {}: {}", status, error_text)),
-                    );
+            match response_result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        // Reset circuit breaker upon successful response
+                        self.consecutive_failures.store(0, Ordering::SeqCst);
+                        if let Ok(mut guard) = self.circuit_open_until.lock() {
+                            *guard = None;
+                        }
 
-                    return Err(anyhow::anyhow!("Ollama request failed: {}", error_text));
+                        let ollama_response: OllamaResponse = response.json().await?;
+
+                        // Save to response cache (Rule 10 & 20)
+                        if let Ok(mut cache) = self.response_cache.lock() {
+                            if cache.len() > 500 {
+                                cache.clear();
+                            }
+                            cache.insert(cache_key, (ollama_response.clone(), std::time::Instant::now()));
+                        }
+
+                        // Estimate token usage
+                        let input_tokens = self.estimate_tokens(&prompt);
+                        let output_tokens = self.estimate_tokens(&ollama_response.response);
+
+                        // Update legacy token counter
+                        self.token_counter.add_request(input_tokens, output_tokens);
+
+                        // Record comprehensive metrics
+                        self.cost_tracker.record_inference(
+                            &self.model,
+                            agent_id,
+                            &prompt,
+                            &ollama_response.response,
+                            latency_ms,
+                            None,
+                        );
+
+                        info!(
+                            "✅ Ollama response received. Tokens: {}+{}={}, Latency: {}ms",
+                            input_tokens,
+                            output_tokens,
+                            input_tokens + output_tokens,
+                            latency_ms
+                        );
+
+                        return Ok(ollama_response);
+                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < max_attempts {
+                        // Upstream 429: Exponential backoff with random jitter (Rule 8 & 16)
+                        let jitter = (chrono::Utc::now().timestamp_subsec_millis() % 200) as u64;
+                        let delay = std::time::Duration::from_millis(300 * attempts as u64 + jitter);
+                        warn!("⚠️ Upstream 429 rate limit. Backing off for {}ms before retry...", delay.as_millis());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    } else {
+                        last_error_text = response.text().await.unwrap_or_else(|_| format!("HTTP {}", status));
+                        warn!("Ollama error response: {}", last_error_text);
+                        break;
+                    }
                 }
-
-                let ollama_response: OllamaResponse = response.json().await?;
-
-                // Estimate token usage
-                let input_tokens = self.estimate_tokens(&prompt);
-                let output_tokens = self.estimate_tokens(&ollama_response.response);
-
-                // Update legacy token counter
-                self.token_counter.add_request(input_tokens, output_tokens);
-
-                // Record comprehensive metrics
-                self.cost_tracker.record_inference(
-                    &self.model,
-                    agent_id,
-                    &prompt,
-                    &ollama_response.response,
-                    latency_ms,
-                    None,
-                );
-
-                info!(
-                    "✅ Ollama response received. Tokens: {}+{}={}, Latency: {}ms",
-                    input_tokens,
-                    output_tokens,
-                    input_tokens + output_tokens,
-                    latency_ms
-                );
-
-                Ok(ollama_response)
-            }
-            Err(e) => {
-                warn!("Ollama request failed: {}", e);
-
-                // Record failed request
-                self.cost_tracker.record_inference(
-                    &self.model,
-                    agent_id,
-                    &prompt,
-                    "",
-                    latency_ms,
-                    Some(e.to_string()),
-                );
-
-                Err(e.into())
+                Err(e) => {
+                    last_error_text = e.to_string();
+                    warn!("Ollama request attempt {} failed: {}", attempts, e);
+                    if attempts < max_attempts {
+                        let delay = std::time::Duration::from_millis(250);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    break;
+                }
             }
         }
+
+        // Trip circuit breaker on repeated failures (Rule 17)
+        let fails = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if fails >= 5 {
+            if let Ok(mut guard) = self.circuit_open_until.lock() {
+                *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                warn!("⚠️ Ollama circuit breaker TRIPPED for 30s after {} consecutive failures", fails);
+            }
+        }
+
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+        self.cost_tracker.record_inference(
+            &self.model,
+            agent_id,
+            &prompt,
+            "",
+            latency_ms,
+            Some(last_error_text.clone()),
+        );
+
+        Err(anyhow::anyhow!("Ollama upstream failure: {}", last_error_text))
     }
 
     fn estimate_tokens(&self, text: &str) -> usize {
@@ -210,7 +300,7 @@ struct OllamaOptions {
     num_predict: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaResponse {
     pub model: String,
     pub response: String,

@@ -22,7 +22,7 @@ export class ESAClient {
   constructor(config: ESAClientConfig = {}) {
     this.apiUrl = (config.apiUrl || 'http://localhost:8080').replace(/\/$/, '');
     this.wsUrl = (config.wsUrl || this.apiUrl.replace(/^http/, 'ws')).replace(/\/$/, '');
-    this.apiKey = config.apiKey;
+    this.apiKey = config.apiKey || ((globalThis as any).process?.env?.ESA_API_KEY as string | undefined);
     this.timeoutMs = config.timeoutMs || 10000;
   }
 
