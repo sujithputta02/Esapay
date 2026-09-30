@@ -81,7 +81,10 @@ impl OllamaClient {
         if let Ok(cache) = self.response_cache.lock() {
             if let Some((cached_res, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < std::time::Duration::from_secs(60) {
-                    info!("⚡ AI Cache HIT for agent '{}' (saved upstream inference)", agent_id);
+                    info!(
+                        "⚡ AI Cache HIT for agent '{}' (saved upstream inference)",
+                        agent_id
+                    );
                     return Ok(cached_res.clone());
                 }
             }
@@ -161,7 +164,10 @@ impl OllamaClient {
                             if cache.len() > 500 {
                                 cache.clear();
                             }
-                            cache.insert(cache_key, (ollama_response.clone(), std::time::Instant::now()));
+                            cache.insert(
+                                cache_key,
+                                (ollama_response.clone(), std::time::Instant::now()),
+                            );
                         }
 
                         // Estimate token usage
@@ -190,15 +196,24 @@ impl OllamaClient {
                         );
 
                         return Ok(ollama_response);
-                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < max_attempts {
+                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && attempts < max_attempts
+                    {
                         // Upstream 429: Exponential backoff with random jitter (Rule 8 & 16)
                         let jitter = (chrono::Utc::now().timestamp_subsec_millis() % 200) as u64;
-                        let delay = std::time::Duration::from_millis(300 * attempts as u64 + jitter);
-                        warn!("⚠️ Upstream 429 rate limit. Backing off for {}ms before retry...", delay.as_millis());
+                        let delay =
+                            std::time::Duration::from_millis(300 * attempts as u64 + jitter);
+                        warn!(
+                            "⚠️ Upstream 429 rate limit. Backing off for {}ms before retry...",
+                            delay.as_millis()
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     } else {
-                        last_error_text = response.text().await.unwrap_or_else(|_| format!("HTTP {}", status));
+                        last_error_text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| format!("HTTP {}", status));
                         warn!("Ollama error response: {}", last_error_text);
                         break;
                     }
@@ -221,7 +236,10 @@ impl OllamaClient {
         if fails >= 5 {
             if let Ok(mut guard) = self.circuit_open_until.lock() {
                 *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
-                warn!("⚠️ Ollama circuit breaker TRIPPED for 30s after {} consecutive failures", fails);
+                warn!(
+                    "⚠️ Ollama circuit breaker TRIPPED for 30s after {} consecutive failures",
+                    fails
+                );
             }
         }
 
@@ -235,7 +253,10 @@ impl OllamaClient {
             Some(last_error_text.clone()),
         );
 
-        Err(anyhow::anyhow!("Ollama upstream failure: {}", last_error_text))
+        Err(anyhow::anyhow!(
+            "Ollama upstream failure: {}",
+            last_error_text
+        ))
     }
 
     fn estimate_tokens(&self, text: &str) -> usize {

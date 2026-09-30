@@ -152,21 +152,26 @@ pub async fn generate_sandbox_key_handler() -> impl IntoResponse {
         key_prefix,
         environment: "sandbox".to_string(),
         expires_in: "24h (Unlimited renewals)".to_string(),
-        message: "Instant Sandbox Key active. Ready for Command Center, CLI, and SDK evaluation.".to_string(),
+        message: "Instant Sandbox Key active. Ready for Command Center, CLI, and SDK evaluation."
+            .to_string(),
     })
 }
 
 /// POST /api/v1/keys/validate
-pub async fn validate_key_handler(
-    Json(payload): Json<ValidateKeyRequest>,
-) -> impl IntoResponse {
+pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> impl IntoResponse {
     let key = payload.api_key.trim();
 
     // Check for Supabase JWT
     if let Some(claims) = parse_supabase_jwt(key) {
         let user_id = claims.sub.unwrap_or_else(|| "user_unknown".to_string());
-        let email = claims.email.unwrap_or_else(|| "authenticated_user".to_string());
-        let short_id = if user_id.len() >= 12 { &user_id[..12] } else { &user_id };
+        let email = claims
+            .email
+            .unwrap_or_else(|| "authenticated_user".to_string());
+        let short_id = if user_id.len() >= 12 {
+            &user_id[..12]
+        } else {
+            &user_id
+        };
 
         return (
             StatusCode::OK,

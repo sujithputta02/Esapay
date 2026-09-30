@@ -369,7 +369,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/payments/checkout", post(universal_checkout))
         .route("/api/v1/payments/checkout", post(universal_checkout))
         .route("/api/workloads", get(list_workloads).post(create_workload))
-        .route("/api/v1/workloads", get(list_workloads).post(create_workload))
+        .route(
+            "/api/v1/workloads",
+            get(list_workloads).post(create_workload),
+        )
         .route("/api/workloads/:id", get(get_workload))
         .route("/api/v1/workloads/:id", get(get_workload))
         .route("/api/events/payment", post(ingest_payment_event))
@@ -420,7 +423,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/audit/verify-chain", get(verify_audit_chain))
         .route("/api/v1/audit/verify-chain", get(verify_audit_chain))
         .route("/api/audit/decision/:decision_id", get(get_decision_detail))
-        .route("/api/v1/audit/decision/:decision_id", get(get_decision_detail))
+        .route(
+            "/api/v1/audit/decision/:decision_id",
+            get(get_decision_detail),
+        )
         .route(
             "/api/audit/replay/:decision_id",
             post(replay_decision).get(replay_decision),
@@ -459,9 +465,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/intent/violations", get(get_constraint_violations))
         .route("/api/v1/intent/violations", get(get_constraint_violations))
         // API Key Management & Sandbox Access
-        .route("/api/v1/keys/generate-sandbox", post(api_keys::generate_sandbox_key_handler))
-        .route("/api/keys/generate-sandbox", post(api_keys::generate_sandbox_key_handler))
-        .route("/api/v1/keys/validate", post(api_keys::validate_key_handler))
+        .route(
+            "/api/v1/keys/generate-sandbox",
+            post(api_keys::generate_sandbox_key_handler),
+        )
+        .route(
+            "/api/keys/generate-sandbox",
+            post(api_keys::generate_sandbox_key_handler),
+        )
+        .route(
+            "/api/v1/keys/validate",
+            post(api_keys::validate_key_handler),
+        )
         .route("/api/keys/validate", post(api_keys::validate_key_handler))
         // Authentication Identity (Supabase JWT & API Key introspection)
         .route("/api/v1/auth/me", get(api_keys::auth_me_handler))
@@ -501,16 +516,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = app
-        .layer(axum::middleware::from_fn(|req: axum::extract::Request, next: axum::middleware::Next| async move {
-            let mut res = next.run(req).await;
-            let headers = res.headers_mut();
-            headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-            headers.insert("x-frame-options", "DENY".parse().unwrap());
-            headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
-            headers.insert("strict-transport-security", "max-age=31536000; includeSubDomains".parse().unwrap());
-            headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
-            res
-        }))
+        .layer(axum::middleware::from_fn(
+            |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let mut res = next.run(req).await;
+                let headers = res.headers_mut();
+                headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+                headers.insert("x-frame-options", "DENY".parse().unwrap());
+                headers.insert(
+                    "referrer-policy",
+                    "strict-origin-when-cross-origin".parse().unwrap(),
+                );
+                headers.insert(
+                    "strict-transport-security",
+                    "max-age=31536000; includeSubDomains".parse().unwrap(),
+                );
+                headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+                res
+            },
+        ))
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -984,7 +1007,8 @@ async fn trigger_spike(
         "affected_workloads": affected_count,
         "multiplier": multiplier,
         "note": "Autonomous recovery system will detect and recover automatically"
-    })).into_response())
+    }))
+    .into_response())
 }
 
 async fn get_token_metrics(State(state): State<AppState>) -> impl IntoResponse {
