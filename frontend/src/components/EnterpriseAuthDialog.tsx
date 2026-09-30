@@ -141,7 +141,7 @@ export function EnterpriseAuthDialog({
   };
 
   const content = (
-    <div className="w-full max-w-xl mx-auto bg-[#0B0F19]/95 backdrop-blur-2xl border border-white/[0.12] rounded-3xl shadow-[0_32px_120px_rgba(0,0,0,0.85)] text-white overflow-hidden relative">
+    <div className="w-full max-w-xl mx-auto bg-[#0B0F19]/95 backdrop-blur-2xl border border-white/[0.12] rounded-3xl shadow-[0_32px_120px_rgba(0,0,0,0.85)] text-white relative max-h-[92vh] flex flex-col overflow-hidden">
       {/* Top Subtle Ambient Brand Glow */}
       <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-96 h-48 bg-[#1F51FF]/25 blur-[90px] rounded-full" />
       <div className="pointer-events-none absolute -bottom-24 right-0 w-64 h-48 bg-emerald-500/10 blur-[80px] rounded-full" />
@@ -201,7 +201,7 @@ export function EnterpriseAuthDialog({
         </div>
       </div>
 
-      <div className="p-6 sm:p-8 space-y-6 relative z-10">
+      <div className="p-5 sm:p-8 space-y-5 sm:space-y-6 relative z-10 overflow-y-auto">
         {/* Mode Switcher Tabs */}
         <div className="p-1 rounded-2xl bg-[#121826] border border-white/[0.08] flex items-center gap-1 font-mono text-xs">
           <button

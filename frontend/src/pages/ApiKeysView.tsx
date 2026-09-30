@@ -554,7 +554,7 @@ export function ApiKeysView() {
               initial={{ opacity: 0, scale: 0.95, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="w-full max-w-lg bg-[#0E1322] border border-white/[0.12] rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6 relative overflow-hidden"
+              className="w-full max-w-lg bg-[#0E1322] border border-white/[0.12] rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-5 sm:space-y-6 relative max-h-[90vh] overflow-y-auto"
             >
               <div className="flex items-start justify-between">
                 <div>
@@ -731,7 +731,7 @@ export function ApiKeysView() {
               initial={{ opacity: 0, scale: 0.95, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="w-full max-w-lg bg-[#0B0F19] border border-emerald-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6 relative"
+              className="w-full max-w-lg bg-[#0B0F19] border border-emerald-500/40 rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-5 sm:space-y-6 relative max-h-[90vh] overflow-y-auto"
             >
               <div className="flex items-center gap-3">
                 <div className="h-10 w-10 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">

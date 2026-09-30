@@ -324,13 +324,13 @@ export function Layout() {
       {/* Dynamic Environment Ribbon: Stark Contrast between TEST / SANDBOX vs LIVE ENTERPRISE */}
       <div
         className={cn(
-          'w-full border-b px-3 sm:px-6 md:px-12 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs transition-colors',
+          'w-full border-b px-3 sm:px-6 md:px-12 py-2.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs transition-colors',
           isSandboxMode
             ? 'bg-[#18150D] border-amber-500/30 text-amber-200'
             : 'bg-[#070D1A] border-[#1F51FF]/30 text-slate-200'
         )}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
           <span
             className={cn(
               'px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0 shadow-sm',
@@ -345,16 +345,16 @@ export function Layout() {
                 isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'
               )}
             />
-            {isSandboxMode ? '🧪 TEST BENCH / ISOLATED SANDBOX' : '🟢 LIVE PRODUCTION MESH (ap-south-1)'}
+            {isSandboxMode ? '🧪 TEST BENCH / SANDBOX' : '🟢 LIVE PRODUCTION MESH'}
           </span>
 
-          <div className="hidden sm:flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-xs flex-wrap">
             {isSandboxMode ? (
-              <span className="flex items-center gap-2 text-amber-200/90 font-mono text-[11px]">
-                <span>Zero-risk mock routing · Synthetic corridor injection active</span>
+              <span className="flex items-center gap-2 text-amber-200/90 font-mono text-[11px] flex-wrap">
+                <span className="hidden md:inline">Zero-risk mock routing · Synthetic corridor injection active</span>
                 {activeKey && (
-                  <span className="bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px] flex items-center gap-1">
-                    <span>Key: {activeKey.length > 20 ? `${activeKey.substring(0, 16)}...` : activeKey}</span>
+                  <span className="bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px] flex items-center gap-1 max-w-[190px] truncate">
+                    <span>Key: {activeKey.substring(0, 10)}...</span>
                     <button
                       onClick={() => {
                         navigator.clipboard.writeText(activeKey);
@@ -370,24 +370,24 @@ export function Layout() {
                 )}
               </span>
             ) : (
-              <div className="flex items-center gap-2 font-mono text-[11px]">
-                <span className="text-white font-bold">
-                  {session?.user?.organization_name || 'My Enterprise Workspace'}
+              <div className="flex items-center gap-2 font-mono text-[11px] flex-wrap">
+                <span className="text-white font-bold max-w-[150px] truncate">
+                  {session?.user?.organization_name || 'My Enterprise'}
                 </span>
-                <span className="text-white/20">|</span>
-                <span className="text-slate-400">{session?.user?.email}</span>
-                <span className="hidden md:inline-flex items-center gap-1 px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] border border-emerald-500/20">
+                <span className="text-white/20 hidden sm:inline">|</span>
+                <span className="text-slate-400 hidden sm:inline max-w-[140px] truncate">{session?.user?.email}</span>
+                <span className="hidden lg:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] border border-emerald-500/20">
                   <ShieldCheck className="h-3 w-3" />
-                  PCI-DSS 4.0 Level 1
+                  PCI-DSS Level 1
                 </span>
               </div>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end shrink-0">
           {isSandboxMode ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
               <Link
                 to="/signup"
                 className="px-3.5 py-1.5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs font-mono transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
@@ -403,7 +403,7 @@ export function Layout() {
               </Link>
             </div>
           ) : (
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
               <Link
                 to="/keys"
                 className={cn(
@@ -446,7 +446,7 @@ export function Layout() {
       </div>
 
       {/* Mobile navigation bar */}
-      <div className="md:hidden flex items-center gap-1.5 border-b border-white/[0.06] bg-[#222222] px-3 py-2.5 overflow-x-auto no-scrollbar scroll-smooth">
+      <div className="md:hidden flex items-center gap-1.5 border-b border-white/[0.06] bg-[#222222] px-3 py-2.5 overflow-x-auto no-scrollbar scroll-smooth touch-pan-x">
         {visibleNavigation.map((item) => {
           const isActive =
             location.pathname === item.path ||
