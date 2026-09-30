@@ -116,7 +116,11 @@ export function EnterpriseAuthDialog({
         if (!isStandalonePage) {
           onClose();
         }
-        window.location.href = '/dashboard?mode=live';
+        if (mode === 'signup') {
+          window.location.href = '/keys?welcome=1';
+        } else {
+          window.location.href = '/dashboard?mode=live';
+        }
       }, 700);
     } catch (err: any) {
       setErrorMsg(err.message || 'Authentication rejected by security policy.');

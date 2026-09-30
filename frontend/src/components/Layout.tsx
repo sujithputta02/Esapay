@@ -7,6 +7,7 @@ import { queryClient } from '@/lib/queryClient';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient, getApiBaseUrl, setApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth } from '@/lib/supabase';
+import { ShieldCheck, LogOut, Key, Zap, Copy, Check, RefreshCw, ArrowRight } from 'lucide-react';
 import type { TelemetryMessage } from '@/types';
 
 const navigation = [
@@ -14,6 +15,7 @@ const navigation = [
   { name: 'Runtime', path: '/runtime', testAllowed: true },
   { name: 'Effects', path: '/effects', testAllowed: true },
   { name: 'Benchmarks', path: '/benchmarks', testAllowed: true },
+  { name: 'API Keys', path: '/keys', testAllowed: true },
   { name: 'Agents', path: '/agents', testAllowed: false },
   { name: 'Audit', path: '/audit', testAllowed: false },
   { name: 'Costs', path: '/costs', testAllowed: false },
@@ -76,6 +78,8 @@ export function Layout() {
   const [showServerModal, setShowServerModal] = useState(false);
   const [customServerInput, setCustomServerInput] = useState(() => getApiBaseUrl() || 'http://localhost:8080');
   const [session, setSession] = useState(() => supabaseAuth.getSession());
+  const [copiedActiveKey, setCopiedActiveKey] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   const searchParams = new URLSearchParams(location.search);
   const isExplicitSandbox = searchParams.get('mode') === 'sandbox';
@@ -89,6 +93,18 @@ export function Layout() {
     window.addEventListener('esa-auth-changed', handleAuthChange);
     return () => window.removeEventListener('esa-auth-changed', handleAuthChange);
   }, []);
+
+  const handleSafeLogout = async () => {
+    setIsLoggingOut(true);
+    try {
+      await supabaseAuth.safeSignOut();
+      queryClient.clear();
+      setSession(null);
+      window.dispatchEvent(new CustomEvent('esa-auth-changed', { detail: null }));
+    } finally {
+      window.location.href = '/?logged_out=true';
+    }
+  };
 
   // Synchronize API key from URL parameter if present
   useEffect(() => {
@@ -305,76 +321,124 @@ export function Layout() {
         </div>
       </header>
 
-      {/* Dynamic Environment Ribbon: TEST / SANDBOX vs LIVE PRODUCTION */}
+      {/* Dynamic Environment Ribbon: Stark Contrast between TEST / SANDBOX vs LIVE ENTERPRISE */}
       <div
         className={cn(
-          'w-full border-b px-3 sm:px-6 md:px-12 py-2 flex flex-wrap items-center justify-between gap-2.5 text-xs transition-colors',
+          'w-full border-b px-3 sm:px-6 md:px-12 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs transition-colors',
           isSandboxMode
-            ? 'bg-amber-500/10 border-amber-500/25 text-amber-200'
-            : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
+            ? 'bg-[#18150D] border-amber-500/30 text-amber-200'
+            : 'bg-[#070D1A] border-[#1F51FF]/30 text-slate-200'
         )}
       >
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-3">
           <span
             className={cn(
-              'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0',
+              'px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0 shadow-sm',
               isSandboxMode
-                ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
-                : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
+                ? 'bg-amber-400/20 text-amber-300 border border-amber-400/50'
+                : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/50'
             )}
           >
             <span
               className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'
+                'h-2 w-2 rounded-full',
+                isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'
               )}
             />
-            {isSandboxMode ? '🧪 Test Sandbox' : '🟢 Live Merchant'}
+            {isSandboxMode ? '🧪 TEST BENCH / ISOLATED SANDBOX' : '🟢 LIVE PRODUCTION MESH (ap-south-1)'}
           </span>
 
-          <span className="hidden sm:inline text-xs text-text-secondary">
+          <div className="hidden sm:flex items-center gap-2 text-xs">
             {isSandboxMode ? (
-              <span className="flex items-center gap-2">
-                <span>Zero-risk test mode · Failover & latency drills active</span>
+              <span className="flex items-center gap-2 text-amber-200/90 font-mono text-[11px]">
+                <span>Zero-risk mock routing · Synthetic corridor injection active</span>
                 {activeKey && (
-                  <span className="font-mono bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px]">
-                    Key: {activeKey.length > 20 ? `${activeKey.substring(0, 16)}...` : activeKey}
+                  <span className="bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px] flex items-center gap-1">
+                    <span>Key: {activeKey.length > 20 ? `${activeKey.substring(0, 16)}...` : activeKey}</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(activeKey);
+                        setCopiedActiveKey(true);
+                        setTimeout(() => setCopiedActiveKey(false), 2000);
+                      }}
+                      className="hover:text-white transition-colors cursor-pointer"
+                      title="Copy active key"
+                    >
+                      {copiedActiveKey ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                    </button>
                   </span>
                 )}
               </span>
             ) : (
-              `Workspace: ${session?.user?.organization_name || 'My Merchant Workspace'} (${session?.user?.email})`
+              <div className="flex items-center gap-2 font-mono text-[11px]">
+                <span className="text-white font-bold">
+                  {session?.user?.organization_name || 'My Enterprise Workspace'}
+                </span>
+                <span className="text-white/20">|</span>
+                <span className="text-slate-400">{session?.user?.email}</span>
+                <span className="hidden md:inline-flex items-center gap-1 px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] border border-emerald-500/20">
+                  <ShieldCheck className="h-3 w-3" />
+                  PCI-DSS 4.0 Level 1
+                </span>
+              </div>
             )}
-          </span>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2 shrink-0">
           {isSandboxMode ? (
-            <Link
-              to="/?auth=signup"
-              className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-black font-bold text-xs transition-all shadow-sm flex items-center gap-1.5"
-            >
-              <span>Create Live Merchant Account</span>
-              <span>&rarr;</span>
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/signup"
+                className="px-3.5 py-1.5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs font-mono transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+              >
+                <span>Provision Live Account</span>
+                <ArrowRight className="h-3 w-3" />
+              </Link>
+              <Link
+                to="/login"
+                className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white font-mono text-xs transition-colors"
+              >
+                Sign In
+              </Link>
+            </div>
           ) : (
             <div className="flex items-center gap-2.5">
-              <span className="text-text-muted text-xs hidden sm:inline">{session?.user?.email}</span>
+              <Link
+                to="/keys"
+                className={cn(
+                  'px-3 py-1 rounded-full text-xs font-mono transition-all flex items-center gap-1.5',
+                  location.pathname === '/keys'
+                    ? 'bg-[#1F51FF] text-white shadow-md font-bold'
+                    : 'bg-white/10 hover:bg-white/15 text-slate-300 hover:text-white'
+                )}
+                title="Manage Multiple Merchant API Keys & Expiration Schedules"
+              >
+                <Key className="h-3 w-3 text-blue-400" />
+                <span>API Keys</span>
+              </Link>
+
               <Link
                 to={activeKey ? `/dashboard?mode=sandbox&key=${encodeURIComponent(activeKey)}` : '/dashboard?mode=sandbox'}
-                className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-text-secondary hover:text-white text-xs font-mono transition-colors"
-                title="Open Sandbox Mode"
+                className="px-3 py-1 rounded-full bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono transition-colors flex items-center gap-1"
+                title="Switch to Isolated Sandbox"
               >
-                Open Sandbox
+                <Zap className="h-3 w-3 text-amber-400" />
+                <span>Sandbox Mode</span>
               </Link>
+
               <button
-                onClick={() => {
-                  supabaseAuth.signOut();
-                  setSession(null);
-                }}
-                className="px-3 py-1 rounded-full bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-semibold transition-colors"
+                onClick={handleSafeLogout}
+                disabled={isLoggingOut}
+                className="px-3 py-1 rounded-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-rose-200 border border-rose-500/30 text-xs font-mono font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                title="Safely terminate session, purge tokens and clear sensitive keys"
               >
-                Sign Out
+                {isLoggingOut ? (
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                ) : (
+                  <LogOut className="h-3 w-3" />
+                )}
+                <span>Safe Logout</span>
               </button>
             </div>
           )}

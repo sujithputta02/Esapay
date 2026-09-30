@@ -30,10 +30,75 @@ export interface ApiKeyItem {
   id: string;
   name: string;
   key_prefix: string;
+  key_hash?: string;
+  raw_key?: string;
   environment: 'test' | 'live' | 'sandbox';
   created_at: string;
+  expires_at: string | null; // ISO timestamp or null if permanent (Forever)
   last_used_at?: string;
   is_active: boolean;
+}
+
+export function isApiKeyExpired(item: ApiKeyItem): boolean {
+  if (!item.expires_at) return false;
+  return new Date(item.expires_at).getTime() <= Date.now();
+}
+
+export function getApiKeyStatusInfo(item: ApiKeyItem): {
+  status: 'expired' | 'revoked' | 'expiring_soon' | 'active' | 'forever';
+  label: string;
+  badgeClass: string;
+  isUsable: boolean;
+  daysRemaining?: number;
+} {
+  if (!item.is_active) {
+    return {
+      status: 'revoked',
+      label: 'Revoked',
+      badgeClass: 'bg-slate-500/10 text-slate-400 border-slate-500/30',
+      isUsable: false,
+    };
+  }
+
+  if (item.expires_at) {
+    const expiresMs = new Date(item.expires_at).getTime();
+    const nowMs = Date.now();
+    if (nowMs >= expiresMs) {
+      return {
+        status: 'expired',
+        label: 'Expired',
+        badgeClass: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+        isUsable: false,
+        daysRemaining: 0,
+      };
+    }
+
+    const diffDays = Math.ceil((expiresMs - nowMs) / (1000 * 60 * 60 * 24));
+    if (diffDays <= 7) {
+      return {
+        status: 'expiring_soon',
+        label: `Expires in ${diffDays}d`,
+        badgeClass: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+        isUsable: true,
+        daysRemaining: diffDays,
+      };
+    }
+
+    return {
+      status: 'active',
+      label: `Active (${diffDays}d left)`,
+      badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+      isUsable: true,
+      daysRemaining: diffDays,
+    };
+  }
+
+  return {
+    status: 'forever',
+    label: 'Never Expires (Permanent)',
+    badgeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+    isUsable: true,
+  };
 }
 
 export interface PasswordValidationCriteria {
@@ -266,25 +331,117 @@ export const supabaseAuth = {
     this.clearSession();
   },
 
-  async listApiKeys(): Promise<ApiKeyItem[]> {
-    const { data, error } = await supabase
-      .from('api_keys')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.warn('Supabase api_keys query:', error.message);
-      return [];
+  async safeSignOut() {
+    try {
+      await supabase.auth.signOut().catch(() => {});
+    } finally {
+      this.clearSession();
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('esa_api_key');
+        localStorage.removeItem('esa_custom_api_url');
+      }
     }
-    return (data as ApiKeyItem[]) || [];
   },
 
-  async createApiKey(name: string, environment: 'test' | 'live' = 'test'): Promise<{ key: string; item: ApiKeyItem }> {
+  getStorageKey(): string {
+    const session = this.getSession();
+    const userId = session?.user?.id || 'demo_merchant';
+    return `esa_merchant_keys_${userId}`;
+  },
+
+  async listApiKeys(): Promise<ApiKeyItem[]> {
+    const storageKey = this.getStorageKey();
+    let localKeys: ApiKeyItem[] = [];
+
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        try {
+          localKeys = JSON.parse(raw);
+        } catch {
+          localKeys = [];
+        }
+      }
+    }
+
+    // Default seeded keys if user has not yet created keys
+    if (localKeys.length === 0) {
+      const now = Date.now();
+      const in90Days = new Date(now + 90 * 86400 * 1000).toISOString();
+      const expiredPast = new Date(now - 5 * 86400 * 1000).toISOString();
+
+      localKeys = [
+        {
+          id: `key_live_${Math.random().toString(36).substring(2, 9)}`,
+          name: 'Production Core Gateway',
+          key_prefix: 'esa_live_sec_8a4f91b2...',
+          environment: 'live',
+          created_at: new Date(now - 14 * 86400 * 1000).toISOString(),
+          expires_at: in90Days,
+          last_used_at: new Date(now - 120000).toISOString(),
+          is_active: true,
+        },
+        {
+          id: `key_test_${Math.random().toString(36).substring(2, 9)}`,
+          name: 'Developer Sandbox Integration',
+          key_prefix: 'esa_test_sec_4c78d09e...',
+          environment: 'test',
+          created_at: new Date(now - 28 * 86400 * 1000).toISOString(),
+          expires_at: null, // Forever / Permanent
+          last_used_at: new Date(now - 3600000).toISOString(),
+          is_active: true,
+        },
+        {
+          id: `key_exp_${Math.random().toString(36).substring(2, 9)}`,
+          name: 'Legacy Mobile POS (Sample Expired Key)',
+          key_prefix: 'esa_live_sec_1e0892a7...',
+          environment: 'live',
+          created_at: new Date(now - 35 * 86400 * 1000).toISOString(),
+          expires_at: expiredPast, // Expired 5 days ago!
+          last_used_at: new Date(now - 6 * 86400 * 1000).toISOString(),
+          is_active: true,
+        },
+      ];
+
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(storageKey, JSON.stringify(localKeys));
+      }
+    }
+
+    if (this.isConfigured()) {
+      try {
+        const { data, error } = await supabase
+          .from('api_keys')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (!error && data && data.length > 0) {
+          return data as ApiKeyItem[];
+        }
+      } catch (err: any) {
+        console.warn('Supabase api_keys query:', err.message);
+      }
+    }
+
+    return localKeys;
+  },
+
+  async createApiKey(
+    name: string,
+    environment: 'test' | 'live' = 'test',
+    expiryDays: number | null = null
+  ): Promise<{ key: string; item: ApiKeyItem }> {
     const prefix = environment === 'live' ? 'esa_live_sec_' : 'esa_test_sec_';
     const randomHex = Array.from(crypto.getRandomValues(new Uint8Array(24)))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
     const rawKey = `${prefix}${randomHex}`;
+
+    // Compute expiration
+    const expiresAt =
+      expiryDays !== null && expiryDays > 0
+        ? new Date(Date.now() + expiryDays * 86400 * 1000).toISOString()
+        : null;
 
     // SHA-256 hash using Web Crypto API
     const encoder = new TextEncoder();
@@ -293,34 +450,80 @@ export const supabaseAuth = {
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
 
-    const keyItem = {
+    const keyItem: ApiKeyItem = {
+      id: `key_${Math.random().toString(36).substring(2, 10)}`,
       name,
-      key_prefix: `${prefix}${randomHex.substring(0, 8)}...`,
+      key_prefix: `${prefix}${randomHex.substring(0, 8)}...${randomHex.substring(randomHex.length - 4)}`,
       key_hash: keyHash,
+      raw_key: rawKey,
       environment,
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt,
       is_active: true,
     };
 
-    const { data: inserted, error } = await supabase
-      .from('api_keys')
-      .insert(keyItem)
-      .select()
-      .single();
+    // Save in persistent local store
+    if (typeof window !== 'undefined') {
+      const storageKey = this.getStorageKey();
+      const existing = await this.listApiKeys();
+      const updated = [keyItem, ...existing];
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+    }
 
-    if (error) {
-      console.warn('Supabase key insert note:', error.message);
+    if (this.isConfigured()) {
+      try {
+        await supabase
+          .from('api_keys')
+          .insert({
+            name,
+            key_prefix: keyItem.key_prefix,
+            key_hash: keyHash,
+            environment,
+            expires_at: expiresAt,
+            is_active: true,
+          });
+      } catch (err: any) {
+        console.warn('Supabase key insert note:', err.message);
+      }
     }
 
     return {
       key: rawKey,
-      item: (inserted as ApiKeyItem) || {
-        id: `key_${Math.random().toString(36).substring(2, 9)}`,
-        name,
-        key_prefix: `${prefix}${randomHex.substring(0, 8)}...`,
-        environment,
-        created_at: new Date().toISOString(),
-        is_active: true,
-      },
+      item: keyItem,
     };
+  },
+
+  async revokeApiKey(id: string): Promise<void> {
+    const storageKey = this.getStorageKey();
+    if (typeof window !== 'undefined') {
+      const existing = await this.listApiKeys();
+      const updated = existing.map((k) => (k.id === id ? { ...k, is_active: !k.is_active } : k));
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+    }
+
+    if (this.isConfigured()) {
+      try {
+        await supabase.from('api_keys').update({ is_active: false }).eq('id', id);
+      } catch {
+        // Fallback silently if offline or table not migrated
+      }
+    }
+  },
+
+  async deleteApiKey(id: string): Promise<void> {
+    const storageKey = this.getStorageKey();
+    if (typeof window !== 'undefined') {
+      const existing = await this.listApiKeys();
+      const updated = existing.filter((k) => k.id !== id);
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+    }
+
+    if (this.isConfigured()) {
+      try {
+        await supabase.from('api_keys').delete().eq('id', id);
+      } catch {
+        // Fallback silently if offline or table not migrated
+      }
+    }
   },
 };
