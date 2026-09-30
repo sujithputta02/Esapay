@@ -71,7 +71,7 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--help' || arg === '-h') {
     if (!command) command = 'help';
   } else if (arg === '--version' || arg === '-V') {
-    console.log('esapay-cli 1.0.4 (Executable State Architecture)');
+    console.log('esapay-cli 1.0.5 (Executable State Architecture)');
     process.exit(0);
   } else if (!command) {
     command = arg;

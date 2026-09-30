@@ -1,7 +1,7 @@
 # esapay-cli ⚡
 
 [![NPM Version](https://img.shields.io/npm/v/esapay-cli?color=1F51FF&label=npm)](https://www.npmjs.com/package/esapay-cli)
-[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.4)
+[![Version](https://img.shields.io/badge/version-v1.0.5-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.5)
 [![Bun Compatible](https://img.shields.io/badge/bun-compatible-FBF0DF?logo=bun&logoColor=black)](https://bun.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js->=18.0.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -343,7 +343,7 @@ npx esapay-cli gateways --json | jq '.[] | select(.status == "Healthy") | .name'
 | `-u, --url <URL>` | `ESA_API_URL` | `https://esapay-api.onrender.com` | Target ESA cluster control plane URL. |
 | `-k, --key <KEY>` | `ESA_API_KEY` | `~/.esa/credentials.json` | API Key (`esa_live_...` or `esa_test_...`). |
 | `--json` | — | `false` | Return structured JSON output for automation. |
-| `-V, --version` | — | — | Print CLI version (`1.0.4`). |
+| `-V, --version` | — | — | Print CLI version (`1.0.5`). |
 | `-h, --help` | — | — | Display comprehensive help menu. |
 
 ---

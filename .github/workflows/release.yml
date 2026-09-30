@@ -107,7 +107,13 @@ jobs:
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
           npm whoami
-          npm publish --access public
+          CURRENT_VER=$(node -p "require('./package.json').version")
+          REMOTE_VER=$(npm view esapay version 2>/dev/null || echo "")
+          if [ "$CURRENT_VER" = "$REMOTE_VER" ]; then
+            echo "Version $CURRENT_VER of esapay is already published to NPM. Skipping."
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -130,7 +136,13 @@ jobs:
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
           npm whoami
-          npm publish --access public
+          CURRENT_VER=$(node -p "require('./package.json').version")
+          REMOTE_VER=$(npm view esapay-cli version 2>/dev/null || echo "")
+          if [ "$CURRENT_VER" = "$REMOTE_VER" ]; then
+            echo "Version $CURRENT_VER of esapay-cli is already published to NPM. Skipping."
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

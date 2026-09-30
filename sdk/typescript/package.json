@@ -1,6 +1,6 @@
 {
   "name": "esapay",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Official TypeScript & Node.js SDK for ESA (Executable State Architecture) Autonomous Payment Resilience",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
