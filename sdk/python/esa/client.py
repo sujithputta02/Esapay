@@ -87,7 +87,12 @@ class EsaGateway:
         self.api_url = api_url.rstrip("/")
 
         if not api_key:
-            api_key = os.environ.get("ESA_API_KEY") or creds.get("api_key")
+            api_key = (
+                os.environ.get("ESA_API_KEY")
+                or os.environ.get("ESA_LIVE_API_KEY")
+                or os.environ.get("ESA_TEST_API_KEY")
+                or creds.get("api_key")
+            )
         self.api_key = api_key
         self.timeout = timeout
         self.auto_failover = auto_failover

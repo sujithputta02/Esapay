@@ -23,6 +23,20 @@ X-API-Key: esa_live_xxxxxxxxxxxxxxxxxxxxxxxx
 | `esa_live_` | **Live Production** | Routes to active payment corridors with real transactions |
 | `esa_test_` | **Sandbox / Test** | Simulated bank rails & deterministic corridor fault injections |
 
+### Environment Variables Configuration
+
+Both SDKs (Node/TypeScript & Python), the CLI, and the web frontend automatically resolve credentials from standard environment variables:
+
+| Environment Variable | Target / Mode | Sample Value | Description |
+|---|---|---|---|
+| `ESA_LIVE_API_KEY` | **Live Production** | `esa_live_sec_...` | Production secret key for live corridors |
+| `ESA_TEST_API_KEY` | **Sandbox / Test** | `esa_test_demo_...` | Sandbox evaluation key for simulated rails |
+| `ESA_API_KEY` | **Universal** | `esa_live_...` or `esa_test_...` | Standard fallback API key |
+| `ESA_API_URL` | **Control Plane** | `https://esapay-api.onrender.com` | Base URL of the ESA Control Plane |
+| `VITE_ESA_LIVE_API_KEY` | **Frontend (Live)** | `esa_live_sec_...` | Web Command Center Live Mode key |
+| `VITE_ESA_TEST_API_KEY` | **Frontend (Test)** | `esa_test_demo_...` | Web Command Center Sandbox Mode key |
+
+
 ### Key Provisioning & Expiration Schedules
 
 API keys can be generated from the **ESA Command Center** with configurable lifespans:

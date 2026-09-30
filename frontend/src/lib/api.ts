@@ -34,7 +34,22 @@ export function getApiKey(): string {
       localStorage.setItem('esa_api_key', paramKey.trim());
       return paramKey.trim();
     }
-    return localStorage.getItem('esa_api_key') || '';
+    const saved = localStorage.getItem('esa_api_key');
+    if (saved) {
+      return saved;
+    }
+
+    // Check mode query param or default to environment variables
+    const mode = params.get('mode');
+    if (mode === 'sandbox' || mode === 'test') {
+      return (import.meta.env.VITE_ESA_TEST_API_KEY || import.meta.env.VITE_ESA_SANDBOX_API_KEY || '').trim();
+    }
+    return (
+      import.meta.env.VITE_ESA_LIVE_API_KEY ||
+      import.meta.env.VITE_ESA_API_KEY ||
+      import.meta.env.VITE_ESA_TEST_API_KEY ||
+      ''
+    ).trim();
   }
   return '';
 }

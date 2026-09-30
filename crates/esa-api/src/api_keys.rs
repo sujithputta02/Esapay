@@ -127,12 +127,29 @@ pub fn is_key_authorized(key: &str) -> bool {
         return clean.len() >= 24;
     }
 
-    // 3. Local dev keys
+    // 3. Environment-configured API keys (Live & Test)
+    if let Ok(env_live) = std::env::var("ESA_LIVE_API_KEY") {
+        if !env_live.trim().is_empty() && clean == env_live.trim() {
+            return true;
+        }
+    }
+    if let Ok(env_test) = std::env::var("ESA_TEST_API_KEY") {
+        if !env_test.trim().is_empty() && clean == env_test.trim() {
+            return true;
+        }
+    }
+    if let Ok(env_key) = std::env::var("ESA_API_KEY") {
+        if !env_key.trim().is_empty() && clean == env_key.trim() {
+            return true;
+        }
+    }
+
+    // 4. Local dev keys
     if clean == "esa_dev_master_key" || clean.starts_with("esa_dev_") {
         return true;
     }
 
-    // 4. Secret keys with standard formatting
+    // 5. Secret keys with standard formatting
     if clean.starts_with("esa_test_sec_") || clean.starts_with("esa_live_sec_") {
         return clean.len() >= 32;
     }

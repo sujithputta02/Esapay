@@ -55,7 +55,11 @@ const args = process.argv.slice(2);
 
 let storedCreds = loadStoredCredentials();
 let apiUrl = process.env.ESA_API_URL || (storedCreds ? storedCreds.api_url : '') || 'https://esapay-api.onrender.com';
-let apiKey = process.env.ESA_API_KEY || (storedCreds ? storedCreds.api_key : '');
+let apiKey =
+  process.env.ESA_API_KEY ||
+  process.env.ESA_LIVE_API_KEY ||
+  process.env.ESA_TEST_API_KEY ||
+  (storedCreds ? storedCreds.api_key : '');
 let jsonOutput = false;
 let command = '';
 let subargs = [];

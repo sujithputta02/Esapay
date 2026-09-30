@@ -45,6 +45,8 @@ export class ESAClient {
     this.apiKey =
       config.apiKey ||
       ((globalThis as any).process?.env?.ESA_API_KEY as string | undefined) ||
+      ((globalThis as any).process?.env?.ESA_LIVE_API_KEY as string | undefined) ||
+      ((globalThis as any).process?.env?.ESA_TEST_API_KEY as string | undefined) ||
       creds?.api_key;
     this.timeoutMs = config.timeoutMs || 10000;
   }
