@@ -53,8 +53,8 @@ function saveCredentials(data) {
 // Parse arguments
 const args = process.argv.slice(2);
 
-let apiUrl = process.env.ESA_API_URL || 'http://localhost:8080';
 let storedCreds = loadStoredCredentials();
+let apiUrl = process.env.ESA_API_URL || (storedCreds ? storedCreds.api_url : '') || 'http://localhost:8080';
 let apiKey = process.env.ESA_API_KEY || (storedCreds ? storedCreds.api_key : '');
 let jsonOutput = false;
 let command = '';
