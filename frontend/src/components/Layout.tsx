@@ -427,10 +427,10 @@ export function Layout() {
               </div>
               <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
                 <Link
-                  to="/?auth=signup"
-                  className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-accent hover:bg-accent/80 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5"
+                  to="/signup"
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-accent hover:bg-accent/80 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 font-mono"
                 >
-                  <span>Create Free Account</span>
+                  <span>Provision Enterprise Account</span>
                   <span>&rarr;</span>
                 </Link>
                 <Link

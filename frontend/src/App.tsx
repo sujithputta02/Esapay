@@ -10,6 +10,7 @@ import { CostsView } from './pages/CostsView';
 import { PolicyView } from './pages/PolicyView';
 import { BenchmarksView } from './pages/BenchmarksView';
 import { LandingPage } from './pages/LandingPage';
+import { AuthPage } from './pages/AuthPage';
 import { queryClient } from './lib/queryClient';
 
 function App() {
@@ -20,6 +21,12 @@ function App() {
           {/* Public Landing Page at root URL */}
           <Route path="/" element={<LandingPage />} />
           <Route path="/landing" element={<LandingPage />} />
+
+          {/* Dedicated Enterprise Authentication Routes */}
+          <Route path="/login" element={<AuthPage />} />
+          <Route path="/signin" element={<AuthPage />} />
+          <Route path="/signup" element={<AuthPage />} />
+          <Route path="/register" element={<AuthPage />} />
 
           {/* ESA Command Center at /dashboard and /app */}
           <Route path="/dashboard" element={<Layout />}>

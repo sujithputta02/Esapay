@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth, evaluatePasswordStrength } from '@/lib/supabase';
+import { EnterpriseAuthDialog } from '@/components/EnterpriseAuthDialog';
 import { cn } from '@/lib/utils';
 
 interface GatewayItem {
@@ -101,37 +102,69 @@ function PasswordStrengthIndicator({
   if (!password) return null;
 
   const isDark = theme === 'dark';
+  const score = strength.score; // 0 to 5
 
   return (
-    <div className="space-y-1.5 pt-1">
-      <div className="flex items-center justify-between text-[11px] font-mono">
-        <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>Password Strength:</span>
-        <span className="font-bold flex items-center gap-1" style={{ color: strength.color }}>
-          {strength.label} ({strength.percentage}%)
+    <div className="space-y-2 pt-2 font-mono">
+      {/* Segmented Compliance Progress Bar */}
+      <div className="flex items-center justify-between text-[11px]">
+        <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>
+          Enterprise Security Policy:
+        </span>
+        <span
+          className="font-bold flex items-center gap-1.5"
+          style={{ color: strength.color }}
+        >
+          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: strength.color }} />
+          {strength.label} ({strength.percentage}% Compliance)
         </span>
       </div>
-      <div className={cn('h-1.5 w-full rounded-full overflow-hidden', isDark ? 'bg-slate-800' : 'bg-slate-200')}>
-        <div
-          className="h-full transition-all duration-300 rounded-full"
-          style={{ width: `${strength.percentage}%`, backgroundColor: strength.color }}
-        />
+
+      <div className="grid grid-cols-5 gap-1.5">
+        {[1, 2, 3, 4, 5].map((seg) => (
+          <div
+            key={seg}
+            className={cn(
+              'h-1.5 rounded-full transition-all duration-300',
+              score >= seg
+                ? 'opacity-100'
+                : isDark ? 'bg-slate-800 opacity-40' : 'bg-slate-200 opacity-60'
+            )}
+            style={{
+              backgroundColor: score >= seg ? strength.color : undefined,
+            }}
+          />
+        ))}
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 pt-1 text-[10px] font-mono">
-        <span className={cn('flex items-center gap-1', strength.criteria.minLength ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
-          {strength.criteria.minLength ? '✓' : '•'} 8+ Chars
-        </span>
-        <span className={cn('flex items-center gap-1', strength.criteria.hasUppercase ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
-          {strength.criteria.hasUppercase ? '✓' : '•'} Uppercase (A-Z)
-        </span>
-        <span className={cn('flex items-center gap-1', strength.criteria.hasLowercase ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
-          {strength.criteria.hasLowercase ? '✓' : '•'} Lowercase (a-z)
-        </span>
-        <span className={cn('flex items-center gap-1', strength.criteria.hasNumber ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
-          {strength.criteria.hasNumber ? '✓' : '•'} Number (0-9)
-        </span>
-        <span className={cn('flex items-center gap-1', strength.criteria.hasSpecial ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
-          {strength.criteria.hasSpecial ? '✓' : '•'} Symbol (!@#$)
-        </span>
+
+      {/* Criteria Checklist Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1 text-[10px]">
+        {[
+          { label: '8+ Characters', met: strength.criteria.minLength },
+          { label: 'Uppercase (A-Z)', met: strength.criteria.hasUppercase },
+          { label: 'Lowercase (a-z)', met: strength.criteria.hasLowercase },
+          { label: 'Numeric (0-9)', met: strength.criteria.hasNumber },
+          { label: 'Symbol (!@#$)', met: strength.criteria.hasSpecial },
+        ].map((item, idx) => (
+          <div
+            key={idx}
+            className={cn(
+              'flex items-center gap-1.5 px-2 py-1 rounded-md border transition-colors',
+              item.met
+                ? isDark
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 font-semibold'
+                  : 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold'
+                : isDark
+                ? 'bg-slate-900/60 border-slate-800 text-slate-500'
+                : 'bg-slate-50 border-slate-200 text-slate-400'
+            )}
+          >
+            <span className={cn('text-xs', item.met ? (isDark ? 'text-emerald-400' : 'text-emerald-600') : 'text-slate-600')}>
+              {item.met ? '✓' : '•'}
+            </span>
+            <span className="truncate">{item.label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -497,14 +530,6 @@ export function LandingPage() {
   // Dedicated Merchant Auth Modal state
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
-  const [modalEmail, setModalEmail] = useState('');
-  const [modalPassword, setModalPassword] = useState('');
-  const [modalConfirmPassword, setModalConfirmPassword] = useState('');
-  const [showModalPassword, setShowModalPassword] = useState(false);
-  const [showModalConfirmPassword, setShowModalConfirmPassword] = useState(false);
-  const [modalOrg, setModalOrg] = useState('');
-  const [modalError, setModalError] = useState<string | null>(null);
-  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -1035,7 +1060,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     setAuthModalMode('signin');
                     setIsAuthModalOpen(true);
                   }}
-                  className="text-slate-300 hover:text-white px-2 sm:px-3 py-1 sm:py-1.5 transition-colors font-semibold text-[11px] sm:text-xs"
+                  className="text-slate-300 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/10 transition-all font-mono font-medium text-xs"
                 >
                   Sign In
                 </button>
@@ -1044,10 +1069,11 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     setAuthModalMode('signup');
                     setIsAuthModalOpen(true);
                   }}
-                  className="bg-white text-black hover:bg-slate-100 rounded-full px-2.5 sm:px-3.5 py-1 sm:py-1.5 font-bold transition-all shadow-md flex items-center gap-1 text-[11px] sm:text-xs"
+                  className="bg-white hover:bg-slate-100 text-slate-950 rounded-xl px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5 text-xs font-mono"
                 >
-                  <span>Sign Up</span>
-                  <ArrowRight className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                  <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
+                  <span>Register Entity</span>
+                  <ArrowRight className="h-3 w-3" />
                 </button>
               </div>
             )}
@@ -1066,154 +1092,181 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               routedGateway={isOutageSimulated ? 'PhonePe' : 'Razorpay'}
             />
 
-            <div className="relative z-20 w-full flex flex-col md:flex-row items-center justify-between gap-6 px-2 sm:px-6">
-              <motion.div
-                initial={{ opacity: 0, x: -30 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6 }}
-                className="flex items-center gap-3 text-white text-center md:text-left"
-              >
-                <span className="text-2xl sm:text-4xl md:text-5xl font-extrabold tracking-tight">
+            <div className="relative z-20 w-full max-w-6xl mx-auto px-2 sm:px-6">
+              {/* Mobile Corridors Header (Hidden on md+) */}
+              <div className="flex md:hidden items-center justify-between w-full max-w-md mx-auto px-2 mb-4 text-white font-extrabold text-lg">
+                <span className="flex items-center gap-1.5">
                   &rarr; {isOutageSimulated ? 'PhonePe UPI' : 'Razorpay'}
+                  {isOutageSimulated && (
+                    <span className="text-[9px] uppercase font-mono px-1.5 py-0.5 rounded-full bg-amber-400 text-black font-extrabold animate-pulse">
+                      FAILOVER
+                    </span>
+                  )}
                 </span>
-                {isOutageSimulated && (
-                  <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-amber-400 text-black font-extrabold animate-pulse">
-                    AUTONOMOUS FAILOVER
-                  </span>
-                )}
-              </motion.div>
+                <span>PhonePe &larr;</span>
+              </div>
 
-              {/* Signature Due Floating White Pill Input */}
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.6, delay: 0.1 }}
-                className="w-full max-w-md mx-auto"
-              >
-                <div className="bg-white text-black rounded-full px-3.5 sm:px-5 py-2.5 sm:py-3.5 shadow-[0_20px_60px_rgba(0,0,0,0.4)] flex items-center justify-between gap-2 sm:gap-3 transition-transform hover:scale-[1.02]">
-                  <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-                    <div className="h-7 w-7 sm:h-8 sm:w-8 rounded-full bg-slate-100 flex items-center justify-center text-sm sm:text-base shadow-inner flex-shrink-0">
-                      🇮🇳
-                    </div>
-                    <span className="font-mono font-extrabold text-xl sm:text-2xl text-slate-900 flex-shrink-0">₹</span>
-                    <input
-                      type="number"
-                      value={amount}
-                      onChange={(e) => setAmount(Number(e.target.value))}
-                      className="font-mono font-bold text-xl sm:text-2xl text-slate-900 bg-transparent focus:outline-none w-20 sm:w-36 min-w-0"
-                      placeholder="500.00"
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
-                    <span className="bg-slate-100 text-slate-800 text-[11px] sm:text-xs font-mono font-bold px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full">
-                      INR
+              {/* Equator Alignment Assembly: The Pay Thing at TRUE DEAD CENTER */}
+              <div className="flex flex-col items-center justify-center w-full">
+                {/* Symmetrical Equator Midline: Left Corridor - [Pay Pill Center Anchor] - Right Corridor */}
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] items-center gap-4 lg:gap-10 w-full">
+                  {/* Left Corridor: Razorpay */}
+                  <motion.div
+                    initial={{ opacity: 0, x: -30 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.6 }}
+                    className="hidden md:flex items-center justify-start gap-3 text-white"
+                  >
+                    <span className="text-3xl lg:text-5xl font-extrabold tracking-tight">
+                      &rarr; {isOutageSimulated ? 'PhonePe UPI' : 'Razorpay'}
                     </span>
+                    {isOutageSimulated && (
+                      <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-amber-400 text-black font-extrabold animate-pulse">
+                        AUTONOMOUS FAILOVER
+                      </span>
+                    )}
+                  </motion.div>
 
-                    <button
-                      onClick={() => handleExecuteCheckout(true)}
-                      disabled={isProcessingCheckout}
-                      className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2 sm:p-2.5 rounded-full transition-colors flex items-center justify-center shadow-md flex-shrink-0"
-                      title="Pay / Test Corridor"
+                  {/* Center Column: The Signature Pay Thing at TRUE DEAD CENTER */}
+                  <div className="w-full max-w-md mx-auto flex items-center justify-center">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.6, delay: 0.1 }}
+                      className="w-full"
                     >
-                      {isProcessingCheckout ? (
-                        <RefreshCw className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <ArrowRight className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
+                      <div className="bg-white text-slate-900 rounded-full px-4 sm:px-6 py-3.5 sm:py-4 shadow-[0_24px_70px_rgba(0,0,0,0.5)] flex items-center justify-between gap-3 transition-transform hover:scale-[1.02] border border-white/40">
+                        <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+                          <div className="h-8 w-8 sm:h-9 sm:w-9 rounded-full bg-slate-100 flex items-center justify-center text-base sm:text-lg shadow-inner flex-shrink-0">
+                            🇮🇳
+                          </div>
+                          <span className="font-mono font-extrabold text-2xl sm:text-3xl text-slate-900 flex-shrink-0">₹</span>
+                          <input
+                            type="number"
+                            value={amount}
+                            onChange={(e) => setAmount(Number(e.target.value))}
+                            className="font-mono font-bold text-2xl sm:text-3xl text-slate-900 bg-transparent focus:outline-none w-24 sm:w-36 min-w-0"
+                            placeholder="500.00"
+                          />
+                        </div>
 
-                <div className="mt-3 flex items-center justify-center gap-3 text-xs font-mono text-white/95">
-                  <span className="flex items-center gap-1.5">
-                    <span
-                      className={`h-2 w-2 rounded-full ${
-                        isOutageSimulated ? 'bg-amber-300 animate-ping' : 'bg-emerald-300'
-                      }`}
-                    />
-                    <span>
-                      Active Route:{' '}
-                      <strong>{isOutageSimulated ? 'PhonePe Direct UPI Switch' : 'Razorpay Express'}</strong>
-                    </span>
-                  </span>
-                  <span>·</span>
-                  <span>{liveP95}ms P95</span>
-                </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <span className="bg-slate-100 text-slate-800 text-xs font-mono font-bold px-3 py-1.5 rounded-full border border-slate-200/60">
+                            INR
+                          </span>
 
-                {/* Quick Dual Mode Gateway Launchers */}
-                <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-                  {!sandboxApiKey ? (
-                    <button
-                      onClick={handleGenerateSandboxKey}
-                      disabled={isGeneratingKey}
-                      className="px-4 py-2 rounded-full bg-black/70 hover:bg-black/90 border border-amber-400/50 text-amber-300 font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02] cursor-pointer"
-                    >
-                      <Zap className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
-                      <span>{isGeneratingKey ? 'Generating Cryptographic Test Key...' : '⚡ Generate Free Test Key (No Login)'}</span>
-                      <ArrowRight className="h-3 w-3" />
-                    </button>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="px-3 py-1.5 rounded-full bg-black/80 border border-amber-400/40 text-[11px] font-mono text-amber-300 flex items-center gap-1.5 backdrop-blur-md">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                        <span className="max-w-[130px] truncate">{sandboxApiKey}</span>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(sandboxApiKey);
-                            setCopiedKey(true);
-                            setTimeout(() => setCopiedKey(false), 2000);
-                          }}
-                          title="Copy test key"
-                          className="hover:text-white ml-0.5 cursor-pointer"
-                        >
-                          {copiedKey ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                        </button>
+                          <button
+                            onClick={() => handleExecuteCheckout(true)}
+                            disabled={isProcessingCheckout}
+                            className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2.5 sm:p-3 rounded-full transition-all flex items-center justify-center shadow-lg shadow-[#1F51FF]/30 hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer"
+                            title="Execute Autonomous Resilient Payment"
+                          >
+                            {isProcessingCheckout ? (
+                              <RefreshCw className="h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                            ) : (
+                              <ArrowRight className="h-4 w-4 sm:h-5 sm:w-5" />
+                            )}
+                          </button>
+                        </div>
                       </div>
-                      <a
-                        href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
-                        className="px-4 py-2 rounded-full bg-amber-400 hover:bg-amber-300 text-black font-mono font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                    </motion.div>
+                  </div>
+
+                  {/* Right Corridor: PhonePe */}
+                  <motion.div
+                    initial={{ opacity: 0, x: 30 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.6 }}
+                    className="hidden md:flex items-center justify-end gap-3 text-white"
+                  >
+                    <span className="text-3xl lg:text-5xl font-extrabold tracking-tight">
+                      PhonePe &larr;
+                    </span>
+                  </motion.div>
+                </div>
+
+                {/* Sub-Equator Telemetry & Action Launchers (Evenly placed below midline without offsetting the pay pill) */}
+                <div className="mt-4 sm:mt-5 flex flex-col items-center justify-center gap-2.5 w-full max-w-md mx-auto">
+                  {/* Sub-Pill Telemetry & Routing Ribbon */}
+                  <div className="flex items-center justify-center gap-2.5 text-xs font-mono text-white/95 bg-black/40 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/10 shadow-sm">
+                    <span className="flex items-center gap-1.5">
+                      <span
+                        className={`h-2 w-2 rounded-full ${
+                          isOutageSimulated ? 'bg-amber-300 animate-ping' : 'bg-emerald-300'
+                        }`}
+                      />
+                      <span>
+                        Active Route:{' '}
+                        <strong className="text-white">{isOutageSimulated ? 'PhonePe Direct UPI Switch' : 'Razorpay Express'}</strong>
+                      </span>
+                    </span>
+                    <span className="text-white/40">·</span>
+                    <span className="text-white/80">{liveP95}ms P95</span>
+                  </div>
+
+                  {/* Enterprise Dual Action Console Launchers */}
+                  <div className="flex flex-wrap items-center justify-center gap-2.5">
+                    {!sandboxApiKey ? (
+                      <button
+                        onClick={handleGenerateSandboxKey}
+                        disabled={isGeneratingKey}
+                        className="px-3.5 py-1.5 rounded-full bg-slate-900/80 hover:bg-slate-900 border border-slate-700/80 hover:border-amber-400/50 text-slate-300 hover:text-amber-300 font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02] cursor-pointer"
                       >
-                        <span>Launch Test Console</span>
+                        <Zap className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
+                        <span>{isGeneratingKey ? 'Generating Key...' : 'Developer Sandbox (Instant Key)'}</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-700/80 rounded-full p-1 backdrop-blur-md shadow-md">
+                        <div className="px-2.5 py-1 text-[11px] font-mono text-amber-300 flex items-center gap-1.5">
+                          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                          <span className="max-w-[110px] truncate">{sandboxApiKey}</span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(sandboxApiKey);
+                              setCopiedKey(true);
+                              setTimeout(() => setCopiedKey(false), 2000);
+                            }}
+                            title="Copy test key"
+                            className="hover:text-white ml-0.5 cursor-pointer text-slate-400"
+                          >
+                            {copiedKey ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                          </button>
+                        </div>
+                        <a
+                          href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                          className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs flex items-center gap-1 transition-all"
+                        >
+                          <span>Sandbox Console</span>
+                          <ArrowRight className="h-3 w-3" />
+                        </a>
+                      </div>
+                    )}
+
+                    {!authSession ? (
+                      <button
+                        onClick={() => {
+                          setAuthModalMode('signin');
+                          setIsAuthModalOpen(true);
+                        }}
+                        className="px-4 py-1.5 rounded-full bg-white hover:bg-slate-100 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02] cursor-pointer"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
+                        <span>Merchant Portal</span>
+                      </button>
+                    ) : (
+                      <a
+                        href="/dashboard?mode=live"
+                        className="px-4 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                      >
+                        <span className="h-2 w-2 rounded-full bg-emerald-300 animate-ping" />
+                        <span>Live Command Center</span>
                         <ArrowRight className="h-3 w-3" />
                       </a>
-                    </div>
-                  )}
-
-                  {!authSession ? (
-                    <button
-                      onClick={() => {
-                        setAuthModalMode('signup');
-                        setIsAuthModalOpen(true);
-                      }}
-                      className="px-4 py-2 rounded-full bg-white hover:bg-slate-100 text-[#1F51FF] font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
-                    >
-                      <Lock className="h-3.5 w-3.5" />
-                      <span>Merchant Sign Up / Login</span>
-                    </button>
-                  ) : (
-                    <a
-                      href="/dashboard?mode=live"
-                      className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
-                    >
-                      <span className="h-2 w-2 rounded-full bg-emerald-300 animate-ping" />
-                      <span>Open Live Merchant Console</span>
-                      <ArrowRight className="h-3 w-3" />
-                    </a>
-                  )}
+                    )}
+                  </div>
                 </div>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, x: 30 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6 }}
-                className="flex items-center gap-3 text-white"
-              >
-                <span className="text-3xl sm:text-5xl font-extrabold tracking-tight">
-                  PhonePe &larr;
-                </span>
-              </motion.div>
+              </div>
             </div>
           </div>
 
@@ -1810,39 +1863,49 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     </div>
                   </div>
 
-                  {/* CARD 2: Merchant Production Account (Supabase Auth) */}
-                  <div className="p-6 sm:p-8 rounded-3xl bg-slate-50 border border-slate-200 space-y-6 flex flex-col justify-between">
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100">
-                          Enterprise Identity
-                        </span>
-                        <span className="text-xs text-slate-500 font-mono">Supabase Auth & RLS</span>
+                  {/* CARD 2: Merchant Production Account (Enterprise Identity Console) */}
+                  <div className="p-6 sm:p-8 rounded-3xl bg-[#0B0F19] text-white border border-white/[0.12] space-y-6 flex flex-col justify-between shadow-2xl relative overflow-hidden">
+                    {/* Ambient subtle backglow */}
+                    <div className="pointer-events-none absolute -top-16 -right-16 w-48 h-48 bg-[#1F51FF]/20 blur-[60px] rounded-full" />
+
+                    <div className="space-y-3 relative z-10">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            Enterprise Identity
+                          </span>
+                          <span className="text-[11px] text-slate-400 font-mono">PCI-DSS 4.0</span>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-500">ap-south-1</span>
                       </div>
-                      <h3 className="text-xl font-bold text-slate-900">
-                        🔐 Registered Merchant Portal
+                      <h3 className="text-xl font-extrabold tracking-tight text-white flex items-center gap-2">
+                        <ShieldCheck className="h-5 w-5 text-[#1F51FF]" />
+                        <span>Registered Merchant Portal</span>
                       </h3>
-                      <p className="text-xs text-slate-600 leading-relaxed">
-                        Sign in to generate persistent Live & Test API keys, manage payment corridors, configure webhooks, and inspect audit logs.
+                      <p className="text-xs text-slate-400 leading-relaxed font-sans">
+                        Authenticate or provision your merchant entity to generate cryptographic Live keys, orchestrate autonomous multi-corridor failover, and access live audit trails.
                       </p>
                     </div>
 
                     {authSession ? (
-                      <div className="space-y-4">
-                        <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-1">
-                          <span className="text-[10px] font-mono text-slate-400 block uppercase">
-                            Authenticated Merchant
+                      <div className="space-y-4 relative z-10">
+                        <div className="p-4 rounded-2xl bg-[#121826] border border-white/[0.08] shadow-inner space-y-1">
+                          <span className="text-[10px] font-mono text-slate-500 block uppercase tracking-wider">
+                            Authenticated Merchant Entity
                           </span>
-                          <p className="font-bold text-sm text-slate-900">{authSession.user.email}</p>
-                          <p className="text-xs font-mono text-slate-500">{authSession.user.organization_name || 'My Workspace'}</p>
+                          <p className="font-bold text-sm text-white font-mono">{authSession.user.email}</p>
+                          <p className="text-xs font-mono text-emerald-400">
+                            ● {authSession.user.organization_name || 'My Enterprise Workspace'} (Live Mesh Connected)
+                          </p>
                         </div>
 
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
                           <a
                             href="/dashboard?mode=live"
-                            className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition-all"
+                            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer font-mono"
                           >
-                            <span>Open Merchant Dashboard</span>
+                            <span>Open Live Command Center</span>
                             <ArrowRight className="h-3.5 w-3.5" />
                           </a>
                           <button
@@ -1850,120 +1913,164 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                               supabaseAuth.signOut();
                               setAuthSession(null);
                             }}
-                            className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs transition-colors"
+                            className="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white font-semibold text-xs transition-colors cursor-pointer font-mono"
                           >
                             Sign Out
                           </button>
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2 bg-slate-200/60 p-1 rounded-xl font-mono text-xs w-fit">
-                          <button
-                            onClick={() => setAuthMode('signup')}
-                            className={`px-3 py-1 rounded-lg font-semibold transition-all ${
-                              authMode === 'signup' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
-                            }`}
-                          >
-                            Sign Up
-                          </button>
+                      <div className="space-y-3.5 relative z-10 font-mono">
+                        {/* Segmented Mode Selector */}
+                        <div className="flex items-center gap-1 bg-[#121826] p-1 rounded-xl border border-white/[0.08] text-xs">
                           <button
                             onClick={() => {
                               setAuthMode('signin');
                               setAuthStatus(null);
                             }}
-                            className={`px-3 py-1 rounded-lg font-semibold transition-all ${
-                              authMode === 'signin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
-                            }`}
+                            className={cn(
+                              'flex-1 py-1.5 rounded-lg font-bold transition-all text-center cursor-pointer',
+                              authMode === 'signin'
+                                ? 'bg-gradient-to-r from-[#1F51FF] to-[#2563EB] text-white shadow-md'
+                                : 'text-slate-400 hover:text-white'
+                            )}
                           >
                             Sign In
                           </button>
+                          <button
+                            onClick={() => {
+                              setAuthMode('signup');
+                              setAuthStatus(null);
+                            }}
+                            className={cn(
+                              'flex-1 py-1.5 rounded-lg font-bold transition-all text-center cursor-pointer',
+                              authMode === 'signup'
+                                ? 'bg-gradient-to-r from-[#1F51FF] to-[#2563EB] text-white shadow-md'
+                                : 'text-slate-400 hover:text-white'
+                            )}
+                          >
+                            Provision Entity
+                          </button>
                         </div>
 
-                        <div className="space-y-2">
-                          <input
-                            type="email"
-                            placeholder="merchant@example.com"
-                            value={authEmail}
-                            onChange={(e) => setAuthEmail(e.target.value)}
-                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                          />
-
-                          <div className="relative">
+                        <div className="space-y-2.5">
+                          <div>
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">
+                              Corporate Work Email
+                            </label>
                             <input
-                              type={showAuthPassword ? 'text' : 'password'}
-                              placeholder={authMode === 'signup' ? 'Strong Password (8+ chars, upper, lower, num, symbol)' : 'Password'}
-                              value={authPassword}
-                              onChange={(e) => setAuthPassword(e.target.value)}
-                              className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                              type="email"
+                              placeholder="merchant@company.com"
+                              value={authEmail}
+                              onChange={(e) => setAuthEmail(e.target.value)}
+                              className="w-full px-4 py-2.5 rounded-xl border border-white/[0.12] bg-[#121826] text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
                             />
-                            <button
-                              type="button"
-                              onClick={() => setShowAuthPassword(!showAuthPassword)}
-                              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                            >
-                              {showAuthPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                            </button>
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">
+                              {authMode === 'signup' ? 'Root Security Credential (NIST 800-63B)' : 'Password'}
+                            </label>
+                            <div className="relative">
+                              <input
+                                type={showAuthPassword ? 'text' : 'password'}
+                                placeholder={
+                                  authMode === 'signup'
+                                    ? '8+ chars, upper, lower, number, symbol'
+                                    : 'Enter account password'
+                                }
+                                value={authPassword}
+                                onChange={(e) => setAuthPassword(e.target.value)}
+                                className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/[0.12] bg-[#121826] text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowAuthPassword(!showAuthPassword)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                              >
+                                {showAuthPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                              </button>
+                            </div>
                           </div>
 
                           {authMode === 'signup' && (
                             <>
-                              <PasswordStrengthIndicator password={authPassword} theme="light" />
+                              <PasswordStrengthIndicator password={authPassword} theme="dark" />
 
-                              <div className="relative pt-1">
-                                <input
-                                  type={showAuthConfirmPassword ? 'text' : 'password'}
-                                  placeholder="Confirm Password"
-                                  value={authConfirmPassword}
-                                  onChange={(e) => setAuthConfirmPassword(e.target.value)}
-                                  className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => setShowAuthConfirmPassword(!showAuthConfirmPassword)}
-                                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                                >
-                                  {showAuthConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                </button>
+                              <div>
+                                <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">
+                                  Confirm Credential
+                                </label>
+                                <div className="relative">
+                                  <input
+                                    type={showAuthConfirmPassword ? 'text' : 'password'}
+                                    placeholder="Re-enter root credential"
+                                    value={authConfirmPassword}
+                                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                                    className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/[0.12] bg-[#121826] text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowAuthConfirmPassword(!showAuthConfirmPassword)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                                  >
+                                    {showAuthConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                  </button>
+                                </div>
+                                {authConfirmPassword && (
+                                  <p
+                                    className={cn(
+                                      'text-[10px] pl-1 mt-1',
+                                      authPassword === authConfirmPassword ? 'text-emerald-400' : 'text-rose-400'
+                                    )}
+                                  >
+                                    {authPassword === authConfirmPassword
+                                      ? '✓ Passwords cryptographically match'
+                                      : '✕ Passwords do not match'}
+                                  </p>
+                                )}
                               </div>
 
-                              {authConfirmPassword && (
-                                <p className={cn(
-                                  'text-[10px] font-mono pl-1',
-                                  authPassword === authConfirmPassword ? 'text-emerald-600' : 'text-rose-600'
-                                )}>
-                                  {authPassword === authConfirmPassword ? '✓ Passwords match' : '✕ Passwords do not match'}
-                                </p>
-                              )}
-
-                              <input
-                                type="text"
-                                placeholder="Organization Name (e.g. Acme Corp)"
-                                value={authOrg}
-                                onChange={(e) => setAuthOrg(e.target.value)}
-                                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                              />
+                              <div>
+                                <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">
+                                  Legal Entity / Trading Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="e.g. Acme FinTech Technologies Pvt Ltd"
+                                  value={authOrg}
+                                  onChange={(e) => setAuthOrg(e.target.value)}
+                                  className="w-full px-4 py-2.5 rounded-xl border border-white/[0.12] bg-[#121826] text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                                />
+                              </div>
                             </>
                           )}
                         </div>
 
                         {authStatus && (
-                          <p className={cn(
-                            'text-xs font-mono',
-                            authStatus.startsWith('Error') || authStatus.startsWith('Strong password') ? 'text-rose-600' : 'text-emerald-600'
-                          )}>{authStatus}</p>
+                          <div
+                            className={cn(
+                              'p-2.5 rounded-xl border text-[11px] flex items-center gap-2',
+                              authStatus.startsWith('Error') || authStatus.startsWith('Strong password')
+                                ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                            )}
+                          >
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                            <span>{authStatus}</span>
+                          </div>
                         )}
 
                         <button
                           onClick={async () => {
                             if (!authEmail || !authPassword) {
-                              setAuthStatus('Please enter email and password.');
+                              setAuthStatus('Please enter valid work email and credential.');
                               return;
                             }
                             if (authMode === 'signup') {
                               const strength = evaluatePasswordStrength(authPassword);
                               if (!strength.isValid) {
-                                setAuthStatus(`Strong password required: ${strength.errors.join(', ')}.`);
+                                setAuthStatus(`Enterprise Security Policy Unmet: ${strength.errors.join(', ')}.`);
                                 return;
                               }
                               if (authPassword !== authConfirmPassword) {
@@ -1972,24 +2079,39 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                               }
                             }
                             try {
-                              setAuthStatus('Processing...');
+                              setAuthStatus('Verifying credentials with Enterprise HSM...');
                               if (authMode === 'signup') {
-                                const s = await supabaseAuth.signUp(authEmail, authPassword, authOrg || 'My Workspace');
+                                const s = await supabaseAuth.signUp(
+                                  authEmail,
+                                  authPassword,
+                                  authOrg || 'My Enterprise Workspace'
+                                );
                                 setAuthSession(s);
-                                setAuthStatus('Account created & logged in!');
+                                setAuthStatus('Entity provisioned! Initializing Live Command Center...');
+                                setTimeout(() => {
+                                  window.location.href = '/dashboard?mode=live';
+                                }, 600);
                               } else {
                                 const s = await supabaseAuth.signIn(authEmail, authPassword);
                                 setAuthSession(s);
-                                setAuthStatus('Signed in successfully!');
+                                setAuthStatus('Authenticated successfully! Redirecting...');
+                                setTimeout(() => {
+                                  window.location.href = '/dashboard?mode=live';
+                                }, 600);
                               }
                             } catch (err: any) {
                               setAuthStatus(`Error: ${err.message}`);
                             }
                           }}
-                          className="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
+                          className="w-full py-3 rounded-xl bg-gradient-to-r from-[#1F51FF] via-[#2A5CFF] to-[#1644DF] hover:brightness-110 text-white font-bold text-xs shadow-lg shadow-[#1F51FF]/25 transition-all flex items-center justify-center gap-2 cursor-pointer border border-white/20"
                         >
                           <Lock className="h-3.5 w-3.5" />
-                          <span>{authMode === 'signup' ? 'Create Merchant Account' : 'Sign In with Supabase'}</span>
+                          <span>
+                            {authMode === 'signup'
+                              ? 'Provision Entity & Access Console'
+                              : 'Authenticate & Access Live Console'}
+                          </span>
+                          <ArrowRight className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     )}
@@ -2374,253 +2496,16 @@ print(f"Transaction ID: {decision.transaction_id}")`,
       </AnimatePresence>
 
       {/* ==================================================================== */}
-      {/* MERCHANT AUTHENTICATION MODAL (SIGN IN & SIGN UP)                     */}
+      {/* ENTERPRISE MERCHANT AUTHENTICATION DIALOG (SIGN IN & SIGN UP)        */}
       {/* ==================================================================== */}
-      <AnimatePresence>
-        {isAuthModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.94, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.94, y: 15 }}
-              transition={{ duration: 0.2 }}
-              className="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#0E1322] border border-white/10 rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-6"
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-2xl bg-[#1F51FF] flex items-center justify-center text-white font-extrabold text-base shadow-lg shadow-[#1F51FF]/30 lowercase">
-                    esa
-                  </div>
-                  <div>
-                    <h3 className="font-extrabold text-lg text-white">
-                      {authModalMode === 'signup' ? 'Create Merchant Account' : 'Merchant Portal Sign In'}
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      {authModalMode === 'signup' ? 'Register for persistent Live & Test keys' : 'Access your Live Merchant Command Center'}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setIsAuthModalOpen(false);
-                    setModalError(null);
-                  }}
-                  className="h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-
-              {/* Mode Toggle Pills */}
-              <div className="flex items-center gap-1 p-1 bg-slate-900/90 rounded-2xl border border-white/10 font-mono text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthModalMode('signin');
-                    setModalError(null);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 rounded-xl font-bold transition-all text-center',
-                    authModalMode === 'signin' ? 'bg-[#1F51FF] text-white shadow-md' : 'text-slate-400 hover:text-white'
-                  )}
-                >
-                  Sign In
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthModalMode('signup');
-                    setModalError(null);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 rounded-xl font-bold transition-all text-center',
-                    authModalMode === 'signup' ? 'bg-[#1F51FF] text-white shadow-md' : 'text-slate-400 hover:text-white'
-                  )}
-                >
-                  Create Account
-                </button>
-              </div>
-
-              {modalError && (
-                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
-                  <span>{modalError}</span>
-                </div>
-              )}
-
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  setModalError(null);
-                  if (!modalEmail || !modalPassword) {
-                    setModalError('Please enter both email and password.');
-                    return;
-                  }
-                  if (authModalMode === 'signup') {
-                    const strength = evaluatePasswordStrength(modalPassword);
-                    if (!strength.isValid) {
-                      setModalError(`Strong password required: ${strength.errors.join(', ')}.`);
-                      return;
-                    }
-                    if (modalPassword !== modalConfirmPassword) {
-                      setModalError('Passwords do not match. Please verify your password confirmation.');
-                      return;
-                    }
-                  } else if (modalPassword.length < 6) {
-                    setModalError('Password must be at least 6 characters.');
-                    return;
-                  }
-                  setIsSubmittingAuth(true);
-                  try {
-                    let session;
-                    if (authModalMode === 'signup') {
-                      session = await supabaseAuth.signUp(modalEmail, modalPassword, modalOrg || 'Default Workspace');
-                    } else {
-                      session = await supabaseAuth.signIn(modalEmail, modalPassword);
-                    }
-                    setAuthSession(session);
-                    setIsAuthModalOpen(false);
-                    window.location.href = '/dashboard?mode=live';
-                  } catch (err: any) {
-                    setModalError(err.message || 'Authentication failed. Please verify credentials.');
-                  } finally {
-                    setIsSubmittingAuth(false);
-                  }
-                }}
-                className="space-y-4"
-              >
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      placeholder="merchant@example.com"
-                      value={modalEmail}
-                      onChange={(e) => setModalEmail(e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                      {authModalMode === 'signup' ? 'Strong Password' : 'Password'}
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showModalPassword ? 'text' : 'password'}
-                        required
-                        placeholder={authModalMode === 'signup' ? 'Min 8 chars, uppercase, lowercase, number, symbol' : '••••••••••••'}
-                        value={modalPassword}
-                        onChange={(e) => setModalPassword(e.target.value)}
-                        className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowModalPassword(!showModalPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
-                      >
-                        {showModalPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </button>
-                    </div>
-
-                    {authModalMode === 'signup' && (
-                      <PasswordStrengthIndicator password={modalPassword} theme="dark" />
-                    )}
-                  </div>
-
-                  {authModalMode === 'signup' && (
-                    <>
-                      <div>
-                        <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                          Confirm Password
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={showModalConfirmPassword ? 'text' : 'password'}
-                            required
-                            placeholder="Re-enter your password"
-                            value={modalConfirmPassword}
-                            onChange={(e) => setModalConfirmPassword(e.target.value)}
-                            className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowModalConfirmPassword(!showModalConfirmPassword)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
-                          >
-                            {showModalConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                          </button>
-                        </div>
-                        {modalConfirmPassword && (
-                          <p className={cn(
-                            'text-[10px] font-mono mt-1',
-                            modalPassword === modalConfirmPassword ? 'text-emerald-400' : 'text-rose-400'
-                          )}>
-                            {modalPassword === modalConfirmPassword ? '✓ Passwords match' : '✕ Passwords do not match'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                          Organization / Workspace Name
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Acme Payments Inc."
-                          value={modalOrg}
-                          onChange={(e) => setModalOrg(e.target.value)}
-                          className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                        />
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isSubmittingAuth}
-                  className="w-full py-3 rounded-2xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-[#1F51FF]/25 transition-all cursor-pointer"
-                >
-                  {isSubmittingAuth ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <>
-                      <span>{authModalMode === 'signup' ? 'Create Account & Open Console' : 'Sign In to Merchant Console'}</span>
-                      <ArrowRight className="h-3.5 w-3.5" />
-                    </>
-                  )}
-                </button>
-              </form>
-
-              {/* No Login Sandbox Alternative */}
-              <div className="pt-2 border-t border-white/[0.08] text-center space-y-2">
-                <p className="text-[11px] text-slate-400">
-                  Just evaluating or running automated tests?
-                </p>
-                <button
-                  onClick={async () => {
-                    setIsAuthModalOpen(false);
-                    if (!sandboxApiKey) {
-                      const key = await handleGenerateSandboxKey();
-                      window.location.href = `/dashboard?mode=sandbox&key=${encodeURIComponent(key)}`;
-                    } else {
-                      window.location.href = `/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`;
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 text-xs font-mono text-amber-400 hover:text-amber-300 font-semibold transition-colors cursor-pointer"
-                >
-                  <span>Launch Test Command Center (No Login Required)</span>
-                  <span>&rarr;</span>
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <EnterpriseAuthDialog
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        initialMode={authModalMode}
+        onSuccess={(session) => {
+          setAuthSession(session);
+        }}
+      />
 
       {/* ==================================================================== */}
       {/* DOCUMENTATION & OPEN SOURCE HUB MODAL                                */}
