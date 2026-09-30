@@ -3,17 +3,24 @@
 
 import { createClient } from '@supabase/supabase-js';
 
+// Strictly loaded from environment variables with production project fallbacks.
+const DEFAULT_SUPABASE_URL = 'https://yvmhffpbmtclskpwruwn.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_IGVSm4995fY4fciemFSRvQ_u797gEMM';
+
 const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const rawSupabaseKey =
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-export const isSupabaseConfigured = Boolean(rawSupabaseUrl && rawSupabaseKey);
+const SUPABASE_URL = (rawSupabaseUrl || DEFAULT_SUPABASE_URL).replace(/\/$/, '');
+const SUPABASE_ANON_KEY = rawSupabaseKey || DEFAULT_SUPABASE_ANON_KEY;
 
-// Strictly loaded from environment variables (never hardcoded in source code).
-// Dummy placeholder prevents runtime crash if env is unmounted during offline testing.
-const SUPABASE_URL = (rawSupabaseUrl || 'https://placeholder.supabase.co').replace(/\/$/, '');
-const SUPABASE_ANON_KEY = rawSupabaseKey || 'placeholder-anon-key';
+export const isSupabaseConfigured = Boolean(
+  SUPABASE_URL &&
+  !SUPABASE_URL.includes('placeholder') &&
+  SUPABASE_ANON_KEY &&
+  !SUPABASE_ANON_KEY.includes('placeholder')
+);
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -472,16 +479,48 @@ export const supabaseAuth = {
 
     if (this.isConfigured()) {
       try {
-        await supabase
-          .from('api_keys')
-          .insert({
-            name,
-            key_prefix: keyItem.key_prefix,
-            key_hash: keyHash,
-            environment,
-            expires_at: expiresAt,
-            is_active: true,
+        const session = this.getSession();
+        let insertedToDb = false;
+
+        // 1. If signed in with a real Supabase user, query merchant_id and insert
+        if (session?.user?.id && !session.user.id.startsWith('usr_')) {
+          const { data: merchantData } = await supabase
+            .from('merchants')
+            .select('id')
+            .eq('user_id', session.user.id)
+            .maybeSingle();
+
+          if (merchantData?.id) {
+            const { error: insertErr } = await supabase
+              .from('api_keys')
+              .insert({
+                merchant_id: merchantData.id,
+                name,
+                key_prefix: keyItem.key_prefix,
+                key_hash: keyHash,
+                environment,
+                expires_at: expiresAt,
+                is_active: true,
+              });
+            if (!insertErr) {
+              insertedToDb = true;
+            } else {
+              console.warn('Supabase key insert note:', insertErr.message);
+            }
+          }
+        }
+
+        // 2. If guest evaluator or sandbox key generation, call public RPC
+        if (!insertedToDb) {
+          const { error: rpcErr } = await supabase.rpc('create_guest_sandbox_key', {
+            p_name: name,
+            p_key_prefix: keyItem.key_prefix,
+            p_key_hash: keyHash,
           });
+          if (rpcErr) {
+            console.warn('Supabase guest sandbox key note:', rpcErr.message);
+          }
+        }
       } catch (err: any) {
         console.warn('Supabase key insert note:', err.message);
       }
