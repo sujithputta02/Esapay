@@ -5,19 +5,19 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useEsaStore } from '@/lib/store';
 import { queryClient } from '@/lib/queryClient';
 import { useQuery } from '@tanstack/react-query';
-import { apiClient, getApiBaseUrl, setApiBaseUrl } from '@/lib/api';
+import { apiClient, getApiBaseUrl, setApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth } from '@/lib/supabase';
 import type { TelemetryMessage } from '@/types';
 
 const navigation = [
-  { name: 'Dashboard', path: '/dashboard' },
-  { name: 'Runtime', path: '/runtime' },
-  { name: 'Agents', path: '/agents' },
-  { name: 'Audit', path: '/audit' },
-  { name: 'Effects', path: '/effects' },
-  { name: 'Costs', path: '/costs' },
-  { name: 'Policy', path: '/policy' },
-  { name: 'Benchmarks', path: '/benchmarks' },
+  { name: 'Dashboard', path: '/dashboard', testAllowed: true },
+  { name: 'Runtime', path: '/runtime', testAllowed: true },
+  { name: 'Effects', path: '/effects', testAllowed: true },
+  { name: 'Benchmarks', path: '/benchmarks', testAllowed: true },
+  { name: 'Agents', path: '/agents', testAllowed: false },
+  { name: 'Audit', path: '/audit', testAllowed: false },
+  { name: 'Costs', path: '/costs', testAllowed: false },
+  { name: 'Policy', path: '/policy', testAllowed: false },
 ];
 
 function invalidateLiveQueries(type?: string) {
@@ -80,6 +80,7 @@ export function Layout() {
   const searchParams = new URLSearchParams(location.search);
   const isExplicitSandbox = searchParams.get('mode') === 'sandbox';
   const isSandboxMode = isExplicitSandbox || !session;
+  const activeKey = searchParams.get('key') || (typeof window !== 'undefined' ? localStorage.getItem('esa_api_key') : null);
 
   useEffect(() => {
     const handleAuthChange = () => {
@@ -88,6 +89,22 @@ export function Layout() {
     window.addEventListener('esa-auth-changed', handleAuthChange);
     return () => window.removeEventListener('esa-auth-changed', handleAuthChange);
   }, []);
+
+  // Synchronize API key from URL parameter if present
+  useEffect(() => {
+    const keyParam = searchParams.get('key');
+    if (keyParam) {
+      setApiKey(keyParam);
+    }
+  }, [location.search]);
+
+  // Restrict routes in sandbox mode: only test-allowed routes are visible
+  const visibleNavigation = isSandboxMode
+    ? navigation.filter((item) => item.testAllowed)
+    : navigation;
+
+  const restrictedPaths = ['/agents', '/audit', '/costs', '/policy'];
+  const isRestricted = isSandboxMode && restrictedPaths.includes(location.pathname);
 
   const { data: workloads } = useQuery({
     queryKey: ['workloads'],
@@ -214,15 +231,19 @@ export function Layout() {
 
           {/* Zone 2: Navigation (Center) */}
           <nav className="hidden md:flex items-center gap-7 lg:gap-10">
-            {navigation.map((item) => {
+            {visibleNavigation.map((item) => {
               const isActive =
                 location.pathname === item.path ||
                 (item.path === '/dashboard' && location.pathname === '/app');
 
+              const targetUrl = isSandboxMode
+                ? `${item.path}?mode=sandbox${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ''}`
+                : item.path;
+
               return (
                 <Link
                   key={item.path}
-                  to={item.path}
+                  to={targetUrl}
                   className={cn(
                     'text-[15px] font-medium transition-colors duration-150 relative py-1',
                     isActive
@@ -324,9 +345,18 @@ export function Layout() {
           </span>
 
           <span className="hidden md:inline text-xs text-text-secondary">
-            {isSandboxMode
-              ? 'Zero-risk test mode · Simulated multi-gateway failover drills · No real funds moved'
-              : `Workspace: ${session?.user?.organization_name || 'My Merchant Workspace'} (${session?.user?.email})`}
+            {isSandboxMode ? (
+              <span className="flex items-center gap-2">
+                <span>Zero-risk test mode · Failover & latency drills active</span>
+                {activeKey && (
+                  <span className="font-mono bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px]">
+                    Key: {activeKey.length > 20 ? `${activeKey.substring(0, 16)}...` : activeKey}
+                  </span>
+                )}
+              </span>
+            ) : (
+              `Workspace: ${session?.user?.organization_name || 'My Merchant Workspace'} (${session?.user?.email})`
+            )}
           </span>
         </div>
 
@@ -343,7 +373,7 @@ export function Layout() {
             <div className="flex items-center gap-2.5">
               <span className="text-text-muted text-xs hidden sm:inline">{session?.user?.email}</span>
               <Link
-                to="/dashboard?mode=sandbox"
+                to={activeKey ? `/dashboard?mode=sandbox&key=${encodeURIComponent(activeKey)}` : '/dashboard?mode=sandbox'}
                 className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-text-secondary hover:text-white text-xs font-mono transition-colors"
                 title="Open Sandbox Mode"
               >
@@ -365,14 +395,18 @@ export function Layout() {
 
       {/* Mobile navigation bar */}
       <div className="md:hidden flex items-center justify-around border-b border-white/[0.04] bg-[#272727] px-2 py-2 overflow-x-auto">
-        {navigation.map((item) => {
+        {visibleNavigation.map((item) => {
           const isActive =
             location.pathname === item.path ||
             (item.path === '/dashboard' && location.pathname === '/app');
+          const targetUrl = isSandboxMode
+            ? `${item.path}?mode=sandbox${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ''}`
+            : item.path;
+
           return (
             <Link
               key={item.path}
-              to={item.path}
+              to={targetUrl}
               className={cn(
                 'px-3 py-1.5 rounded-full text-xs whitespace-nowrap',
                 isActive
@@ -388,7 +422,41 @@ export function Layout() {
 
       {/* Main Content with generous outer breathing room */}
       <main className="w-[min(100%-48px,1952px)] mx-auto px-2 sm:px-4 md:px-12 py-8 md:py-10">
-        <Outlet />
+        {isRestricted ? (
+          <div className="py-16 px-4 flex flex-col items-center justify-center text-center">
+            <div className="max-w-md w-full bg-[#272727] border border-white/[0.08] rounded-3xl p-8 space-y-6 shadow-2xl">
+              <div className="h-14 w-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto text-2xl font-mono">
+                🔒
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-xl font-bold text-white">Merchant Account Required</h2>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  The <span className="font-mono text-amber-300 font-bold uppercase">{location.pathname.replace('/', '')}</span> subsystem (Production AI Deliberations, SHA-256 Audit Trail & Policy OCC) is restricted to authenticated merchant accounts.
+                </p>
+                <p className="text-[11px] text-text-muted">
+                  Test mode provides full access to Dashboard vitals, Runtime pod scaling, Chaos effects, and Benchmarks.
+                </p>
+              </div>
+              <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <Link
+                  to="/?auth=signup"
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-accent hover:bg-accent/80 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5"
+                >
+                  <span>Create Free Account</span>
+                  <span>&rarr;</span>
+                </Link>
+                <Link
+                  to={activeKey ? `/dashboard?mode=sandbox&key=${encodeURIComponent(activeKey)}` : '/dashboard?mode=sandbox'}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white font-semibold text-xs transition-colors"
+                >
+                  Back to Test Dashboard
+                </Link>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Outlet />
+        )}
       </main>
 
       {/* Server Switcher Modal */}

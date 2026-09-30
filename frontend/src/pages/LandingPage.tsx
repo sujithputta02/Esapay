@@ -492,6 +492,26 @@ export function LandingPage() {
     }
   };
 
+  const handleGenerateSandboxKey = async () => {
+    setIsGeneratingKey(true);
+    let key = '';
+    try {
+      const res = await apiClient.post<{ api_key: string }>('/api/v1/keys/generate-sandbox', {});
+      if (res && res.api_key) {
+        key = res.api_key;
+      }
+    } catch {
+      // Fallback local key generation if backend is cold
+    }
+    if (!key) {
+      key = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+    }
+    setSandboxApiKey(key);
+    setApiKey(key);
+    setIsGeneratingKey(false);
+    return key;
+  };
+
   const serverUrl = getApiBaseUrl() || 'http://localhost:8080';
 
   // Hero depth scroll tracking
@@ -910,15 +930,27 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               BENCHMARKS
             </a>
 
-            {/* Test Command Center (Zero login required) */}
-            <a
-              href="/dashboard?mode=sandbox"
-              className="px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1.5 rounded-full hover:bg-white/5"
-              title="Launch Instant Sandbox / Test Command Center"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span>TEST CONSOLE</span>
-            </a>
+            {/* Test Command Center (Requires generating test key first without login) */}
+            {sandboxApiKey ? (
+              <a
+                href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                className="px-3.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 shadow-sm"
+                title={`Active Test Key: ${sandboxApiKey} — Click to enter Test Console`}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>TEST CONSOLE</span>
+              </a>
+            ) : (
+              <button
+                onClick={handleGenerateSandboxKey}
+                disabled={isGeneratingKey}
+                className="px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1.5 rounded-full hover:bg-white/10 border border-amber-400/30 cursor-pointer"
+                title="Generate instant test API key without login"
+              >
+                <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
+                <span>{isGeneratingKey ? 'GENERATING...' : '⚡ GET TEST KEY'}</span>
+              </button>
+            )}
 
             {/* Merchant Identity / Live Console */}
             {authSession ? (
@@ -1056,14 +1088,42 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
                 {/* Quick Dual Mode Gateway Launchers */}
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-                  <a
-                    href="/dashboard?mode=sandbox"
-                    className="px-4 py-2 rounded-full bg-black/60 hover:bg-black/80 border border-white/20 text-white font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02]"
-                  >
-                    <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-                    <span>Test Command Center (No Login)</span>
-                    <ArrowRight className="h-3 w-3" />
-                  </a>
+                  {!sandboxApiKey ? (
+                    <button
+                      onClick={handleGenerateSandboxKey}
+                      disabled={isGeneratingKey}
+                      className="px-4 py-2 rounded-full bg-black/70 hover:bg-black/90 border border-amber-400/50 text-amber-300 font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02] cursor-pointer"
+                    >
+                      <Zap className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
+                      <span>{isGeneratingKey ? 'Generating Cryptographic Test Key...' : '⚡ Generate Free Test Key (No Login)'}</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </button>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="px-3 py-1.5 rounded-full bg-black/80 border border-amber-400/40 text-[11px] font-mono text-amber-300 flex items-center gap-1.5 backdrop-blur-md">
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                        <span className="max-w-[130px] truncate">{sandboxApiKey}</span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(sandboxApiKey);
+                            setCopiedKey(true);
+                            setTimeout(() => setCopiedKey(false), 2000);
+                          }}
+                          title="Copy test key"
+                          className="hover:text-white ml-0.5 cursor-pointer"
+                        >
+                          {copiedKey ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
+                      <a
+                        href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                        className="px-4 py-2 rounded-full bg-amber-400 hover:bg-amber-300 text-black font-mono font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                      >
+                        <span>Launch Test Console</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </a>
+                    </div>
+                  )}
 
                   {!authSession ? (
                     <button
@@ -1651,46 +1711,28 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
                           <div className="flex flex-wrap items-center gap-3">
                             <a
-                              href={`/dashboard?key=${encodeURIComponent(sandboxApiKey)}`}
+                              href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
                               className="px-5 py-2.5 rounded-xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-xs flex items-center gap-2 shadow-sm transition-all"
                             >
-                              <span>Launch Command Center</span>
+                              <span>Launch Test Command Center</span>
                               <ArrowRight className="h-3.5 w-3.5" />
                             </a>
                             <button
                               onClick={async () => {
-                                setIsGeneratingKey(true);
-                                const randomKey = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
-                                setSandboxApiKey(randomKey);
-                                setApiKey(randomKey);
-                                setIsGeneratingKey(false);
+                                await handleGenerateSandboxKey();
                               }}
-                              className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs transition-colors"
+                              disabled={isGeneratingKey}
+                              className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
                             >
-                              Regenerate
+                              {isGeneratingKey ? 'Regenerating...' : 'Regenerate'}
                             </button>
                           </div>
                         </div>
                       ) : (
                         <button
-                          onClick={async () => {
-                            setIsGeneratingKey(true);
-                            try {
-                              const res = await apiClient.post<{ api_key: string }>('/api/v1/keys/generate-sandbox', {});
-                              if (res && res.api_key) {
-                                setSandboxApiKey(res.api_key);
-                                setApiKey(res.api_key);
-                              }
-                            } catch {
-                              const randomKey = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
-                              setSandboxApiKey(randomKey);
-                              setApiKey(randomKey);
-                            } finally {
-                              setIsGeneratingKey(false);
-                            }
-                          }}
+                          onClick={handleGenerateSandboxKey}
                           disabled={isGeneratingKey}
-                          className="w-full py-3.5 rounded-2xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                          className="w-full py-3.5 rounded-2xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
                         >
                           <Zap className="h-4 w-4" />
                           <span>{isGeneratingKey ? 'Generating Cryptographic Key...' : 'Generate Instant Sandbox Key'}</span>
@@ -1742,7 +1784,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
                         <div className="flex items-center gap-3">
                           <a
-                            href="/dashboard"
+                            href="/dashboard?mode=live"
                             className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition-all"
                           >
                             <span>Open Merchant Dashboard</span>
@@ -2387,13 +2429,21 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 <p className="text-[11px] text-slate-400">
                   Just evaluating or running automated tests?
                 </p>
-                <a
-                  href="/dashboard?mode=sandbox"
-                  className="inline-flex items-center gap-1.5 text-xs font-mono text-amber-400 hover:text-amber-300 font-semibold transition-colors"
+                <button
+                  onClick={async () => {
+                    setIsAuthModalOpen(false);
+                    if (!sandboxApiKey) {
+                      const key = await handleGenerateSandboxKey();
+                      window.location.href = `/dashboard?mode=sandbox&key=${encodeURIComponent(key)}`;
+                    } else {
+                      window.location.href = `/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`;
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-mono text-amber-400 hover:text-amber-300 font-semibold transition-colors cursor-pointer"
                 >
                   <span>Launch Test Command Center (No Login Required)</span>
                   <span>&rarr;</span>
-                </a>
+                </button>
               </div>
             </motion.div>
           </div>
