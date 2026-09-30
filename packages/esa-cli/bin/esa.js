@@ -54,7 +54,7 @@ function saveCredentials(data) {
 const args = process.argv.slice(2);
 
 let storedCreds = loadStoredCredentials();
-let apiUrl = process.env.ESA_API_URL || (storedCreds ? storedCreds.api_url : '') || 'http://localhost:8080';
+let apiUrl = process.env.ESA_API_URL || (storedCreds ? storedCreds.api_url : '') || 'https://esapay-api.onrender.com';
 let apiKey = process.env.ESA_API_KEY || (storedCreds ? storedCreds.api_key : '');
 let jsonOutput = false;
 let command = '';
@@ -71,7 +71,7 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--help' || arg === '-h') {
     if (!command) command = 'help';
   } else if (arg === '--version' || arg === '-V') {
-    console.log('esapay-cli 1.0.2 (Executable State Architecture)');
+    console.log('esapay-cli 1.0.3 (Executable State Architecture)');
     process.exit(0);
   } else if (!command) {
     command = arg;
@@ -111,7 +111,7 @@ ${BOLD}COMMANDS:${RESET}
   ${CYAN}docs${RESET}                       Open documentation and guides
 
 ${BOLD}OPTIONS:${RESET}
-  -u, --url <URL>             ESA API Base URL [default: http://localhost:8080] [env: ESA_API_URL]
+  -u, --url <URL>             ESA API Base URL [default: https://esapay-api.onrender.com] [env: ESA_API_URL]
   -k, --key <KEY>             ESAPay API Key [env: ESA_API_KEY]
       --json                  Output raw JSON instead of formatted text
   -h, --help                  Print this help message

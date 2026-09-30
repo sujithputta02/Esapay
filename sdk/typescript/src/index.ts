@@ -4,5 +4,5 @@
  * @packageDocumentation
  */
 
-export { ESAClient, EsaGateway } from './client.js';
+export { ESAClient, EsaClient, EsaGateway } from './client.js';
 export * from './types.js';

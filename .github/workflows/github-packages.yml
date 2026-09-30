@@ -43,7 +43,7 @@ jobs:
         working-directory: ./sdk/typescript
         run: |
           npm pkg set name="@sujithputta02/esapay"
-          npm pkg set version="1.0.2"
+          npm pkg set version="1.0.3"
           npm publish || echo "Version already published to GitHub Packages, skipping."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

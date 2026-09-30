@@ -83,7 +83,7 @@ class EsaGateway:
                 pass
 
         if not api_url:
-            api_url = os.environ.get("ESA_API_URL") or creds.get("api_url") or "http://localhost:8080"
+            api_url = os.environ.get("ESA_API_URL") or creds.get("api_url") or "https://esapay-api.onrender.com"
         self.api_url = api_url.rstrip("/")
 
         if not api_key:

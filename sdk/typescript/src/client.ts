@@ -39,7 +39,7 @@ export class ESAClient {
       config.apiUrl ||
       ((globalThis as any).process?.env?.ESA_API_URL as string | undefined) ||
       creds?.api_url ||
-      'http://localhost:8080'
+      'https://esapay-api.onrender.com'
     ).replace(/\/$/, '');
     this.wsUrl = (config.wsUrl || this.apiUrl.replace(/^http/, 'ws')).replace(/\/$/, '');
     this.apiKey =
@@ -308,3 +308,5 @@ export class ESAClient {
 
 export const EsaGateway = ESAClient;
 export type EsaGateway = ESAClient;
+export const EsaClient = ESAClient;
+export type EsaClient = ESAClient;
