@@ -6,7 +6,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/sujithputta02/Esapay?color=1F51FF&label=Release)](https://github.com/sujithputta02/Esapay/releases/latest)
 [![npm version](https://img.shields.io/npm/v/esapay?color=1F51FF&label=npm%20esapay)](https://www.npmjs.com/package/esapay)
 [![npm cli](https://img.shields.io/npm/v/esapay-cli?color=1F51FF&label=npm%20esapay-cli)](https://www.npmjs.com/package/esapay-cli)
-[![PyPI version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=PyPI%20esapay)](https://pypi.org/project/esapay/)
+[![PyPI version](https://img.shields.io/badge/PyPI%20esapay-v1.0.5-1F51FF.svg?logo=pypi&logoColor=white)](https://pypi.org/project/esapay/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [5-Min Demo Video](https://youtu.be/77qjP2yK7Og) · [Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Benchmarks](benchmarkreport.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE)
