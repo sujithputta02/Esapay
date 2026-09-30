@@ -1,7 +1,7 @@
 # esapay ⚡
 
-[![PyPI Version](https://img.shields.io/pypi/v/esapay?color=1F51FF&label=pypi)](https://pypi.org/project/esapay/1.0.4/)
-[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.4)
+[![PyPI Version](https://img.shields.io/badge/pypi-v1.0.5-1F51FF.svg?logo=pypi&logoColor=white)](https://pypi.org/project/esapay/)
+[![Version](https://img.shields.io/badge/version-v1.0.5-blue.svg)](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.5)
 [![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero%20(stdlib%20only)-success.svg)](https://docs.python.org/3/library/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -83,7 +83,7 @@ Install `esapay` using pip, uv, or poetry:
 ```bash
 pip install esapay
 # Or install specific version
-pip install esapay==1.0.4
+pip install esapay==1.0.5
 ```
 
 ### Using uv
@@ -160,19 +160,32 @@ if __name__ == "__main__":
 
 ## 🛠️ Complete API Reference
 
-### 1. Initialization
+### 1. Initialization & API Key Management
 
 ```python
 from esapay import EsaGateway
 
+# Authenticate with an API Key generated from the ESA Command Center
 esa = EsaGateway(
     api_url="http://localhost:8080",      # ESA cluster endpoint
-    api_key=None,                          # Optional Bearer token
+    api_key="esa_live_9f86d081884c...",   # Live (esa_live_...) or Sandbox (esa_test_...)
     timeout=10.0,                          # Request timeout in seconds
     auto_failover=True,                    # Enable dynamic routing
     corridors=["phonepe", "razorpay", "paytm", "cashfree"]
 )
 ```
+
+#### API Key Environments & Expiration Lifecycle
+In the ESA Command Center (`/keys`), merchants can provision multiple API keys with configurable lifespans:
+- **Environments**:
+  - `esa_live_...`: Live Production traffic with real bank switches.
+  - `esa_test_...`: Isolated Sandbox with zero-risk synthetic settlement corridors.
+- **Validity & Expiration Schedules**:
+  - `7 Days`, `30 Days`, `90 Days`, `365 Days`, `Custom Days`, or `Forever` (Never Expires / Permanent).
+- **Automated Expiry Enforcement**:
+  - Keys exceeding their expiration date are cryptographically blocked by the gateway, raising `EsaClientError("401 Unauthorized: API Key Expired")`.
+- **Safe Session Invalidation**:
+  - Sessions can be terminated via `Safe Logout`, purging tokens and credentials from local stores immediately.
 
 *(Note: `from esapay import ESAClient` is also provided as an exact alias).*
 

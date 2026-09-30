@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 echo "=================================================="
-echo "🚀 Publishing esapay v1.0.3 to PyPI"
+echo "🚀 Publishing esapay v1.0.5 to PyPI"
 echo "=================================================="
 echo ""
 echo "Enter your PyPI API Token (starts with pypi-...):"
@@ -19,10 +19,10 @@ fi
 export TWINE_USERNAME="__token__"
 export TWINE_PASSWORD="$PYPI_TOKEN"
 
-echo "📦 Uploading esapay v1.0.3 packages to PyPI..."
-./.venv/bin/twine upload --non-interactive sdk/python/dist/esapay-1.0.3*
+echo "📦 Uploading esapay v1.0.5 packages to PyPI..."
+./.venv/bin/twine upload --non-interactive sdk/python/dist/esapay-1.0.5*
 
 echo ""
-echo "✅ SUCCESS! esapay v1.0.3 has been published to PyPI!"
-echo "Verify at: https://pypi.org/project/esapay/1.0.3/"
+echo "✅ SUCCESS! esapay v1.0.5 has been published to PyPI!"
+echo "Verify at: https://pypi.org/project/esapay/1.0.5/"
 read -p "Press Enter to exit..."
