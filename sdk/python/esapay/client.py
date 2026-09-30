@@ -67,24 +67,27 @@ class EsaGateway:
     """
     def __init__(
         self,
-        api_url: str = "http://localhost:8080",
+        api_url: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout: float = 10.0,
         auto_failover: bool = True,
         corridors: Optional[List[str]] = None,
     ):
+        creds = {}
+        cred_path = os.path.expanduser("~/.esa/credentials.json")
+        if os.path.exists(cred_path):
+            try:
+                with open(cred_path, "r", encoding="utf-8") as f:
+                    creds = json.load(f)
+            except Exception:
+                pass
+
+        if not api_url:
+            api_url = os.environ.get("ESA_API_URL") or creds.get("api_url") or "http://localhost:8080"
         self.api_url = api_url.rstrip("/")
+
         if not api_key:
-            api_key = os.environ.get("ESA_API_KEY")
-            if not api_key:
-                cred_path = os.path.expanduser("~/.esa/credentials.json")
-                if os.path.exists(cred_path):
-                    try:
-                        with open(cred_path, "r", encoding="utf-8") as f:
-                            creds = json.load(f)
-                            api_key = creds.get("api_key")
-                    except Exception:
-                        pass
+            api_key = os.environ.get("ESA_API_KEY") or creds.get("api_key")
         self.api_key = api_key
         self.timeout = timeout
         self.auto_failover = auto_failover

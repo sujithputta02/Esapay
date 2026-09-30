@@ -691,19 +691,30 @@ async function handleDoctor() {
 async function handleConfig() {
   const key = subargs[0];
   const val = subargs[1];
+  let currentCreds = loadStoredCredentials() || {};
+
+  if (key && val) {
+    if (key === 'url' || key === 'api_url') {
+      currentCreds.api_url = val;
+    } else {
+      currentCreds[key] = val;
+    }
+    saveCredentials(currentCreds);
+    console.log(`\n${GREEN}✅ Successfully saved setting to credentials:${RESET} ${key} = ${val}`);
+    console.log(`  • Config Path: ${DIM}~/.esa/credentials.json${RESET}\n`);
+    return;
+  }
 
   console.log(`\n${CYAN}================================================================================${RESET}`);
   console.log(`${BOLD}  ⚙️  ESA CLI Configuration (Environment & Local Storage)${RESET}`);
   console.log(`${CYAN}================================================================================${RESET}`);
-  console.log(`  API URL:           ${CYAN}${apiUrl}${RESET}`);
+  console.log(`  Effective API URL: ${CYAN}${apiUrl}${RESET}`);
+  console.log(`  Stored API URL:    ${CYAN}${currentCreds.api_url || '(none - using fallback)'}${RESET}`);
   console.log(`  Default Gateway:   ${CYAN}auto${RESET}`);
   console.log(`  Request Timeout:   ${CYAN}10000ms${RESET}`);
+  console.log(`  Config Path:       ${DIM}~/.esa/credentials.json${RESET}`);
   console.log(`  ${'─'.repeat(76)}`);
-  if (key && val) {
-    console.log(`  ${GREEN}✅ Updated setting: ${key} = ${val}${RESET}`);
-  } else {
-    console.log(`  ${CYAN}💡 Override dynamically with:${RESET} export ESA_API_URL="http://your-server:8080"\n`);
-  }
+  console.log(`  ${CYAN}💡 Set persistent URL:${RESET} esa config api_url "https://esapay-api.onrender.com"\n`);
 }
 
 async function handleBenchmark() {
@@ -823,25 +834,48 @@ async function handleLogin() {
   console.log(`  Starting local callback listener on http://localhost:8765 ...`);
 
   const server = http.createServer((req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+      });
+      res.end();
+      return;
+    }
+
     const reqUrl = new URL(req.url, 'http://localhost:8765');
     if (reqUrl.pathname === '/callback') {
       const key = reqUrl.searchParams.get('key') || reqUrl.searchParams.get('api_key') || 'esa_test_demo_web_auth';
       const user = reqUrl.searchParams.get('email') || reqUrl.searchParams.get('user') || 'merchant@esapay.io';
+      const remoteApiUrl = reqUrl.searchParams.get('api_url') || reqUrl.searchParams.get('url');
       const env = key.startsWith('esa_live_') ? 'live' : 'test';
 
-      saveCredentials({
+      const creds = {
         api_key: key,
         user,
         environment: env,
         logged_in_at: new Date().toISOString(),
-      });
+      };
+      if (remoteApiUrl) {
+        creds.api_url = remoteApiUrl;
+      }
 
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      saveCredentials(creds);
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Access-Control-Allow-Origin': '*',
+      });
       res.end(`<!DOCTYPE html><html><body style="background:#0a0d14;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h1 style="color:#00f2fe;">&#10004; Authenticated Successfully!</h1><p>You can close this tab and return to your terminal.</p></div></body></html>`);
 
       console.log(`\n${GREEN}✅ Successfully authenticated via browser!${RESET}`);
       console.log(`  • User:         ${BOLD}${user}${RESET}`);
       console.log(`  • Active Key:   ${BOLD}${key.substring(0, 16)}...${RESET}`);
+      if (remoteApiUrl) {
+        console.log(`  • API Endpoint: ${CYAN}${remoteApiUrl}${RESET}`);
+      }
       console.log(`  • Saved to:     ${DIM}~/.esa/credentials.json${RESET}\n`);
 
       server.close();
@@ -850,7 +884,7 @@ async function handleLogin() {
   });
 
   server.listen(8765, () => {
-    const authUrl = `https://esapay.vercel.app/landing?cli=8765`;
+    const authUrl = `https://esapay.vercel.app/?cli=8765`;
     console.log(`  Opening browser to: ${UNDERLINE}${authUrl}${RESET}`);
     console.log(`  ${DIM}(Waiting for authorization... Press Ctrl+C to cancel)${RESET}`);
     console.log(`  ${DIM}(Tip: For instant offline demo, run: esa login --guest)${RESET}\n`);

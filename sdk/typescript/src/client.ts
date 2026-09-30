@@ -13,6 +13,20 @@ import type {
   CheckoutDecision,
 } from './types.js';
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+function getStoredCredentials(): { api_key?: string; api_url?: string } | null {
+  try {
+    const credPath = path.join(os.homedir(), '.esa', 'credentials.json');
+    if (fs.existsSync(credPath)) {
+      return JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    }
+  } catch {}
+  return null;
+}
+
 export class ESAClient {
   private readonly apiUrl: string;
   private readonly wsUrl: string;
@@ -20,9 +34,18 @@ export class ESAClient {
   private readonly timeoutMs: number;
 
   constructor(config: ESAClientConfig = {}) {
-    this.apiUrl = (config.apiUrl || ((globalThis as any).process?.env?.ESA_API_URL as string | undefined) || 'http://localhost:8080').replace(/\/$/, '');
+    const creds = getStoredCredentials();
+    this.apiUrl = (
+      config.apiUrl ||
+      ((globalThis as any).process?.env?.ESA_API_URL as string | undefined) ||
+      creds?.api_url ||
+      'http://localhost:8080'
+    ).replace(/\/$/, '');
     this.wsUrl = (config.wsUrl || this.apiUrl.replace(/^http/, 'ws')).replace(/\/$/, '');
-    this.apiKey = config.apiKey || ((globalThis as any).process?.env?.ESA_API_KEY as string | undefined);
+    this.apiKey =
+      config.apiKey ||
+      ((globalThis as any).process?.env?.ESA_API_KEY as string | undefined) ||
+      creds?.api_key;
     this.timeoutMs = config.timeoutMs || 10000;
   }
 

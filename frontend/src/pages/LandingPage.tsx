@@ -436,6 +436,38 @@ export function LandingPage() {
   const [isDocsOpen, setIsDocsOpen] = useState(false);
   const [docsTab, setDocsTab] = useState<'cli' | 'typescript' | 'python' | 'registries'>('cli');
 
+  // CLI Browser OAuth state (?cli=PORT from `esa login`)
+  const [cliPort, setCliPort] = useState<string | null>(null);
+  const [isAuthorizingCli, setIsAuthorizingCli] = useState(false);
+  const [cliAuthSuccess, setCliAuthSuccess] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const port = params.get('cli');
+      if (port) {
+        setCliPort(port);
+      }
+    }
+  }, []);
+
+  const handleAuthorizeCli = async (targetKey?: string) => {
+    if (!cliPort) return;
+    setIsAuthorizingCli(true);
+    const keyToUse = targetKey || sandboxApiKey || localStorage.getItem('esa_api_key') || 'esa_test_demo_auth';
+    const emailToUse = authSession?.user?.email || 'developer@esapay.io';
+    const callbackUrl = `http://localhost:${cliPort}/callback?key=${encodeURIComponent(keyToUse)}&email=${encodeURIComponent(emailToUse)}&api_url=${encodeURIComponent(getApiBaseUrl())}`;
+
+    try {
+      await fetch(callbackUrl, { mode: 'no-cors' });
+      setCliAuthSuccess(true);
+    } catch {
+      window.location.href = callbackUrl;
+    } finally {
+      setIsAuthorizingCli(false);
+    }
+  };
+
   const serverUrl = getApiBaseUrl() || 'http://localhost:8080';
 
   // Hero depth scroll tracking
@@ -1988,6 +2020,97 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   </>
                 )}
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ==================================================================== */}
+      {/* CLI BROWSER OAUTH AUTHORIZATION MODAL                                */}
+      {/* ==================================================================== */}
+      <AnimatePresence>
+        {cliPort && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.92, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.92, y: 20 }}
+              className="relative w-full max-w-lg bg-[#0E1322] border border-emerald-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6"
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                    <Terminal className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-lg text-white">CLI Login Authorization</h3>
+                    <p className="text-xs text-slate-400 font-mono">Terminal callback on port :{cliPort}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setCliPort(null)}
+                  className="h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {cliAuthSuccess ? (
+                <div className="p-5 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 space-y-2 text-center">
+                  <CheckCircle2 className="h-8 w-8 text-emerald-400 mx-auto" />
+                  <p className="font-bold text-sm">CLI Successfully Authenticated!</p>
+                  <p className="text-xs text-slate-300">You can close this tab and return to your terminal.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    A terminal session running <code className="text-emerald-400 font-mono bg-emerald-950/60 px-1.5 py-0.5 rounded">esa login</code> is requesting access to your ESAPay environment.
+                  </p>
+
+                  <div className="p-4 rounded-2xl bg-slate-900/80 border border-white/10 space-y-2">
+                    <span className="text-[10px] font-mono text-slate-400 block uppercase">Session Credentials</span>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400">Account:</span>
+                      <span className="font-mono font-bold text-white">{authSession?.user?.email || 'Guest Evaluator'}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400">Control Plane URL:</span>
+                      <span className="font-mono text-cyan-400 truncate max-w-[200px]">{getApiBaseUrl() || 'https://esapay-api.onrender.com'}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400">API Key:</span>
+                      <span className="font-mono text-emerald-400">
+                        {sandboxApiKey ? `${sandboxApiKey.substring(0, 16)}...` : 'Will generate instant key'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-2">
+                    <button
+                      onClick={async () => {
+                        let key = sandboxApiKey;
+                        if (!key) {
+                          key = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+                          setSandboxApiKey(key);
+                          setApiKey(key);
+                        }
+                        await handleAuthorizeCli(key);
+                      }}
+                      disabled={isAuthorizingCli}
+                      className="flex-1 py-3 rounded-2xl bg-emerald-500 hover:bg-emerald-600 text-black font-bold text-xs flex items-center justify-center gap-2 shadow-lg transition-all"
+                    >
+                      <Check className="h-4 w-4" />
+                      <span>{isAuthorizingCli ? 'Authorizing Terminal...' : 'Authorize Terminal CLI'}</span>
+                    </button>
+                    <button
+                      onClick={() => setCliPort(null)}
+                      className="px-4 py-3 rounded-2xl bg-white/10 hover:bg-white/15 text-slate-300 font-semibold text-xs transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           </div>
         )}
