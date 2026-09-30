@@ -1,6 +1,6 @@
 # Multi-stage Rust build for ESA API
 
-FROM rust:1-slim as builder
+FROM rust:1-slim-bookworm as builder
 
 WORKDIR /app
 
