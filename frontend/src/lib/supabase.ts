@@ -36,6 +36,91 @@ export interface ApiKeyItem {
   is_active: boolean;
 }
 
+export interface PasswordValidationCriteria {
+  minLength: boolean;
+  hasUppercase: boolean;
+  hasLowercase: boolean;
+  hasNumber: boolean;
+  hasSpecial: boolean;
+}
+
+export interface PasswordStrength {
+  isValid: boolean;
+  score: number; // 0 to 5
+  percentage: number; // 0 to 100
+  label: 'Too Weak' | 'Weak' | 'Fair' | 'Good' | 'Strong';
+  color: string;
+  badgeBg: string;
+  criteria: PasswordValidationCriteria;
+  errors: string[];
+}
+
+export function evaluatePasswordStrength(password: string): PasswordStrength {
+  const criteria: PasswordValidationCriteria = {
+    minLength: password.length >= 8,
+    hasUppercase: /[A-Z]/.test(password),
+    hasLowercase: /[a-z]/.test(password),
+    hasNumber: /[0-9]/.test(password),
+    hasSpecial: /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(password),
+  };
+
+  const errors: string[] = [];
+  if (!criteria.minLength) errors.push('At least 8 characters');
+  if (!criteria.hasUppercase) errors.push('At least one uppercase letter (A-Z)');
+  if (!criteria.hasLowercase) errors.push('At least one lowercase letter (a-z)');
+  if (!criteria.hasNumber) errors.push('At least one number (0-9)');
+  if (!criteria.hasSpecial) errors.push('At least one special symbol (!@#$%^&*)');
+
+  if (!password) {
+    return {
+      isValid: false,
+      score: 0,
+      percentage: 0,
+      label: 'Too Weak',
+      color: '#64748B',
+      badgeBg: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
+      criteria,
+      errors: ['Password cannot be empty.'],
+    };
+  }
+
+  const passedCount = Object.values(criteria).filter(Boolean).length;
+  const percentage = Math.round((passedCount / 5) * 100);
+
+  let label: 'Too Weak' | 'Weak' | 'Fair' | 'Good' | 'Strong' = 'Weak';
+  let color = '#EF4444';
+  let badgeBg = 'bg-rose-500/15 text-rose-400 border-rose-500/30';
+
+  if (passedCount <= 2) {
+    label = 'Weak';
+    color = '#EF4444';
+    badgeBg = 'bg-rose-500/15 text-rose-400 border-rose-500/30';
+  } else if (passedCount === 3) {
+    label = 'Fair';
+    color = '#F59E0B';
+    badgeBg = 'bg-amber-500/15 text-amber-400 border-amber-500/30';
+  } else if (passedCount === 4) {
+    label = 'Good';
+    color = '#3B82F6';
+    badgeBg = 'bg-blue-500/15 text-blue-400 border-blue-500/30';
+  } else if (passedCount === 5) {
+    label = 'Strong';
+    color = '#10B981';
+    badgeBg = 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30';
+  }
+
+  return {
+    isValid: passedCount === 5,
+    score: passedCount,
+    percentage,
+    label,
+    color,
+    badgeBg,
+    criteria,
+    errors,
+  };
+}
+
 export const supabaseAuth = {
   isConfigured(): boolean {
     return isSupabaseConfigured;
@@ -67,6 +152,11 @@ export const supabaseAuth = {
   },
 
   async signUp(email: string, password: string, organizationName = 'Default Workspace'): Promise<UserSession> {
+    const strength = evaluatePasswordStrength(password);
+    if (!strength.isValid) {
+      throw new Error(`Strong password required: ${strength.errors.join(', ')}.`);
+    }
+
     if (!this.isConfigured()) {
       const session: UserSession = {
         user: {

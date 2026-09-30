@@ -25,9 +25,11 @@ import {
   Activity,
   Zap,
   BookOpen,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
-import { supabaseAuth } from '@/lib/supabase';
+import { supabaseAuth, evaluatePasswordStrength } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 
 interface GatewayItem {
@@ -85,6 +87,53 @@ function ScrollSection({
     >
       {children}
     </motion.div>
+  );
+}
+
+function PasswordStrengthIndicator({
+  password,
+  theme = 'dark',
+}: {
+  password: string;
+  theme?: 'dark' | 'light';
+}) {
+  const strength = evaluatePasswordStrength(password);
+  if (!password) return null;
+
+  const isDark = theme === 'dark';
+
+  return (
+    <div className="space-y-1.5 pt-1">
+      <div className="flex items-center justify-between text-[11px] font-mono">
+        <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>Password Strength:</span>
+        <span className="font-bold flex items-center gap-1" style={{ color: strength.color }}>
+          {strength.label} ({strength.percentage}%)
+        </span>
+      </div>
+      <div className={cn('h-1.5 w-full rounded-full overflow-hidden', isDark ? 'bg-slate-800' : 'bg-slate-200')}>
+        <div
+          className="h-full transition-all duration-300 rounded-full"
+          style={{ width: `${strength.percentage}%`, backgroundColor: strength.color }}
+        />
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 pt-1 text-[10px] font-mono">
+        <span className={cn('flex items-center gap-1', strength.criteria.minLength ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
+          {strength.criteria.minLength ? '✓' : '•'} 8+ Chars
+        </span>
+        <span className={cn('flex items-center gap-1', strength.criteria.hasUppercase ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
+          {strength.criteria.hasUppercase ? '✓' : '•'} Uppercase (A-Z)
+        </span>
+        <span className={cn('flex items-center gap-1', strength.criteria.hasLowercase ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
+          {strength.criteria.hasLowercase ? '✓' : '•'} Lowercase (a-z)
+        </span>
+        <span className={cn('flex items-center gap-1', strength.criteria.hasNumber ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
+          {strength.criteria.hasNumber ? '✓' : '•'} Number (0-9)
+        </span>
+        <span className={cn('flex items-center gap-1', strength.criteria.hasSpecial ? (isDark ? 'text-emerald-400 font-semibold' : 'text-emerald-600 font-semibold') : (isDark ? 'text-slate-500' : 'text-slate-400'))}>
+          {strength.criteria.hasSpecial ? '✓' : '•'} Symbol (!@#$)
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -375,6 +424,9 @@ export function LandingPage() {
   const [authSession, setAuthSession] = useState(() => supabaseAuth.getSession());
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [showAuthConfirmPassword, setShowAuthConfirmPassword] = useState(false);
   const [authOrg, setAuthOrg] = useState('');
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signup');
   const [authStatus, setAuthStatus] = useState<string | null>(null);
@@ -447,6 +499,9 @@ export function LandingPage() {
   const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
   const [modalEmail, setModalEmail] = useState('');
   const [modalPassword, setModalPassword] = useState('');
+  const [modalConfirmPassword, setModalConfirmPassword] = useState('');
+  const [showModalPassword, setShowModalPassword] = useState(false);
+  const [showModalConfirmPassword, setShowModalConfirmPassword] = useState(false);
   const [modalOrg, setModalOrg] = useState('');
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
@@ -1813,7 +1868,10 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             Sign Up
                           </button>
                           <button
-                            onClick={() => setAuthMode('signin')}
+                            onClick={() => {
+                              setAuthMode('signin');
+                              setAuthStatus(null);
+                            }}
                             className={`px-3 py-1 rounded-lg font-semibold transition-all ${
                               authMode === 'signin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
                             }`}
@@ -1830,31 +1888,89 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             onChange={(e) => setAuthEmail(e.target.value)}
                             className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
                           />
-                          <input
-                            type="password"
-                            placeholder="Password (min 6 characters)"
-                            value={authPassword}
-                            onChange={(e) => setAuthPassword(e.target.value)}
-                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                          />
-                          {authMode === 'signup' && (
+
+                          <div className="relative">
                             <input
-                              type="text"
-                              placeholder="Organization Name (e.g. Acme Corp)"
-                              value={authOrg}
-                              onChange={(e) => setAuthOrg(e.target.value)}
-                              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                              type={showAuthPassword ? 'text' : 'password'}
+                              placeholder={authMode === 'signup' ? 'Strong Password (8+ chars, upper, lower, num, symbol)' : 'Password'}
+                              value={authPassword}
+                              onChange={(e) => setAuthPassword(e.target.value)}
+                              className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
                             />
+                            <button
+                              type="button"
+                              onClick={() => setShowAuthPassword(!showAuthPassword)}
+                              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                            >
+                              {showAuthPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+
+                          {authMode === 'signup' && (
+                            <>
+                              <PasswordStrengthIndicator password={authPassword} theme="light" />
+
+                              <div className="relative pt-1">
+                                <input
+                                  type={showAuthConfirmPassword ? 'text' : 'password'}
+                                  placeholder="Confirm Password"
+                                  value={authConfirmPassword}
+                                  onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                                  className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setShowAuthConfirmPassword(!showAuthConfirmPassword)}
+                                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                >
+                                  {showAuthConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </button>
+                              </div>
+
+                              {authConfirmPassword && (
+                                <p className={cn(
+                                  'text-[10px] font-mono pl-1',
+                                  authPassword === authConfirmPassword ? 'text-emerald-600' : 'text-rose-600'
+                                )}>
+                                  {authPassword === authConfirmPassword ? '✓ Passwords match' : '✕ Passwords do not match'}
+                                </p>
+                              )}
+
+                              <input
+                                type="text"
+                                placeholder="Organization Name (e.g. Acme Corp)"
+                                value={authOrg}
+                                onChange={(e) => setAuthOrg(e.target.value)}
+                                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                              />
+                            </>
                           )}
                         </div>
 
                         {authStatus && (
-                          <p className="text-xs font-mono text-emerald-600">{authStatus}</p>
+                          <p className={cn(
+                            'text-xs font-mono',
+                            authStatus.startsWith('Error') || authStatus.startsWith('Strong password') ? 'text-rose-600' : 'text-emerald-600'
+                          )}>{authStatus}</p>
                         )}
 
                         <button
                           onClick={async () => {
-                            if (!authEmail || !authPassword) return;
+                            if (!authEmail || !authPassword) {
+                              setAuthStatus('Please enter email and password.');
+                              return;
+                            }
+                            if (authMode === 'signup') {
+                              const strength = evaluatePasswordStrength(authPassword);
+                              if (!strength.isValid) {
+                                setAuthStatus(`Strong password required: ${strength.errors.join(', ')}.`);
+                                return;
+                              }
+                              if (authPassword !== authConfirmPassword) {
+                                setAuthStatus('Passwords do not match. Please re-enter.');
+                                return;
+                              }
+                            }
                             try {
                               setAuthStatus('Processing...');
                               if (authMode === 'signup') {
@@ -1870,7 +1986,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                               setAuthStatus(`Error: ${err.message}`);
                             }
                           }}
-                          className="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2"
+                          className="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
                         >
                           <Lock className="h-3.5 w-3.5" />
                           <span>{authMode === 'signup' ? 'Create Merchant Account' : 'Sign In with Supabase'}</span>
@@ -2340,7 +2456,17 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     setModalError('Please enter both email and password.');
                     return;
                   }
-                  if (modalPassword.length < 6) {
+                  if (authModalMode === 'signup') {
+                    const strength = evaluatePasswordStrength(modalPassword);
+                    if (!strength.isValid) {
+                      setModalError(`Strong password required: ${strength.errors.join(', ')}.`);
+                      return;
+                    }
+                    if (modalPassword !== modalConfirmPassword) {
+                      setModalError('Passwords do not match. Please verify your password confirmation.');
+                      return;
+                    }
+                  } else if (modalPassword.length < 6) {
                     setModalError('Password must be at least 6 characters.');
                     return;
                   }
@@ -2380,31 +2506,77 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
                   <div>
                     <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                      Password
+                      {authModalMode === 'signup' ? 'Strong Password' : 'Password'}
                     </label>
-                    <input
-                      type="password"
-                      required
-                      placeholder="••••••••••••"
-                      value={modalPassword}
-                      onChange={(e) => setModalPassword(e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                    />
+                    <div className="relative">
+                      <input
+                        type={showModalPassword ? 'text' : 'password'}
+                        required
+                        placeholder={authModalMode === 'signup' ? 'Min 8 chars, uppercase, lowercase, number, symbol' : '••••••••••••'}
+                        value={modalPassword}
+                        onChange={(e) => setModalPassword(e.target.value)}
+                        className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowModalPassword(!showModalPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+                      >
+                        {showModalPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+
+                    {authModalMode === 'signup' && (
+                      <PasswordStrengthIndicator password={modalPassword} theme="dark" />
+                    )}
                   </div>
 
                   {authModalMode === 'signup' && (
-                    <div>
-                      <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                        Organization / Workspace Name
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. Acme Payments Inc."
-                        value={modalOrg}
-                        onChange={(e) => setModalOrg(e.target.value)}
-                        className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                      />
-                    </div>
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                          Confirm Password
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showModalConfirmPassword ? 'text' : 'password'}
+                            required
+                            placeholder="Re-enter your password"
+                            value={modalConfirmPassword}
+                            onChange={(e) => setModalConfirmPassword(e.target.value)}
+                            className="w-full pl-4 pr-10 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowModalConfirmPassword(!showModalConfirmPassword)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+                          >
+                            {showModalConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
+                        {modalConfirmPassword && (
+                          <p className={cn(
+                            'text-[10px] font-mono mt-1',
+                            modalPassword === modalConfirmPassword ? 'text-emerald-400' : 'text-rose-400'
+                          )}>
+                            {modalPassword === modalConfirmPassword ? '✓ Passwords match' : '✕ Passwords do not match'}
+                          </p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                          Organization / Workspace Name
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Acme Payments Inc."
+                          value={modalOrg}
+                          onChange={(e) => setModalOrg(e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                        />
+                      </div>
+                    </>
                   )}
                 </div>
 
