@@ -361,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
     // Build router with full /api/v1/ versioning and backwards-compatible /api/ aliases
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/healthz", get(health_handler))
         // Multi-Gateway Universal Routing endpoints
         .route("/api/gateways", get(list_gateways))
         .route("/api/v1/gateways", get(list_gateways))
