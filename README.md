@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/esapay-logo-landscape.svg">
+    <img alt="esapay — Autonomous Payment Infrastructure Resilience" src="assets/esapay-logo-landscape.svg" width="100%" style="max-width: 880px;">
+  </picture>
+</p>
+
 # ESA — Autonomous Payment Infrastructure Resilience
 
 > **An autonomous incident remediation engine for payment gateways: neuro-symbolic and LLM agents diagnose multi-signal failures and propose joint recovery actions, while a deterministic Rust safety gate ensures zero unverified mutations.**
