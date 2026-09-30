@@ -208,14 +208,14 @@ export function Layout() {
     <div className="min-h-screen bg-[#1D1E1C] text-text-primary selection:bg-accent/30 selection:text-white">
       {/* Top Header - Explicit 3-Zone Architecture */}
       <header className="w-full border-b border-white/[0.04]">
-        <div className="w-[min(100%-48px,1952px)] mx-auto h-24 px-4 sm:px-6 md:px-12 flex items-center justify-between">
+        <div className="w-full max-w-[1952px] mx-auto min-h-[4.25rem] md:h-24 px-3 sm:px-6 md:px-12 flex items-center justify-between gap-3">
           {/* Zone 1: Logo (Left) */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 sm:gap-4 shrink-0">
             <Link
               to="/dashboard"
-              className="flex items-center justify-center border-2 border-white/90 rounded-[14px] px-3.5 py-1.5 hover:border-accent transition-colors"
+              className="flex items-center justify-center border-2 border-white/90 rounded-[14px] px-3 py-1 sm:px-3.5 sm:py-1.5 hover:border-accent transition-colors"
             >
-              <span className="font-extrabold tracking-wider text-lg text-white">
+              <span className="font-extrabold tracking-wider text-base sm:text-lg text-white">
                 ESA.
               </span>
             </Link>
@@ -257,28 +257,28 @@ export function Layout() {
             })}
           </nav>
 
-          {/* Zone 3: Actions & Kubernetes Pods Badge (Right) */}
-          <div className="flex items-center gap-3 sm:gap-4">
+          {/* Zone 3: Actions & Status (Right) */}
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             {/* Landing Page Link */}
             <Link
               to="/"
-              className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] hover:bg-[#333333] border border-white/[0.06] text-xs transition-colors text-text-secondary hover:text-white"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] hover:bg-[#333333] border border-white/[0.06] text-xs transition-colors text-text-secondary hover:text-white"
               title="Return to Public Landing Page"
             >
-              <span>← Landing Page</span>
+              <span>← Landing</span>
             </Link>
 
             {/* Kubernetes Pods Counter Badge */}
-            <div className="hidden sm:flex items-center gap-2 px-3.5 py-2 rounded-full bg-[#272727] border border-white/[0.06] text-xs">
+            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#272727] border border-white/[0.06] text-xs">
               <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-              <span className="text-text-secondary">K8s Pods:</span>
-              <span className="font-bold text-white font-mono">
-                {totalPods} Running
+              <span className="text-text-secondary hidden md:inline">K8s Pods:</span>
+              <span className="font-bold text-white font-mono text-[11px]">
+                {totalPods}p
               </span>
             </div>
 
             {/* Connection Status */}
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] border border-white/[0.06] text-xs">
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[#272727] border border-white/[0.06] text-xs">
               <div
                 className={cn(
                   'w-2 h-2 rounded-full',
@@ -297,21 +297,9 @@ export function Layout() {
               title="Click to point dashboard to your own ESA server"
             >
               <span className="text-text-muted text-[11px]">Server:</span>
-              <span className="text-accent font-mono text-[11px] max-w-[140px] truncate">
+              <span className="text-accent font-mono text-[11px] max-w-[120px] truncate">
                 {getApiBaseUrl() ? getApiBaseUrl().replace(/^https?:\/\//, '') : 'local:8080'}
               </span>
-            </button>
-
-            {/* Quick Action Pill Button (JOIN NOW / TRIGGER SPIKE style) */}
-            <button
-              onClick={async () => {
-                if (workloads && workloads.length > 0) {
-                  await apiClient.triggerSpike(workloads[0].workload_id, 3.0);
-                }
-              }}
-              className="h-11 px-5 rounded-full bg-[#474745] hover:bg-[#5A5A58] text-white text-xs font-bold transition-all active:translate-y-[1px]"
-            >
-              TRIGGER SPIKE
             </button>
           </div>
         </div>
@@ -320,7 +308,7 @@ export function Layout() {
       {/* Dynamic Environment Ribbon: TEST / SANDBOX vs LIVE PRODUCTION */}
       <div
         className={cn(
-          'w-full border-b px-4 sm:px-6 md:px-12 py-2 flex flex-wrap items-center justify-between gap-3 text-xs transition-colors',
+          'w-full border-b px-3 sm:px-6 md:px-12 py-2 flex flex-wrap items-center justify-between gap-2.5 text-xs transition-colors',
           isSandboxMode
             ? 'bg-amber-500/10 border-amber-500/25 text-amber-200'
             : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
@@ -329,7 +317,7 @@ export function Layout() {
         <div className="flex items-center gap-2.5">
           <span
             className={cn(
-              'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5',
+              'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0',
               isSandboxMode
                 ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
                 : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
@@ -341,10 +329,10 @@ export function Layout() {
                 isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'
               )}
             />
-            {isSandboxMode ? '🧪 Test Command Center (Sandbox)' : '🟢 Live Merchant Portal'}
+            {isSandboxMode ? '🧪 Test Sandbox' : '🟢 Live Merchant'}
           </span>
 
-          <span className="hidden md:inline text-xs text-text-secondary">
+          <span className="hidden sm:inline text-xs text-text-secondary">
             {isSandboxMode ? (
               <span className="flex items-center gap-2">
                 <span>Zero-risk test mode · Failover & latency drills active</span>
@@ -394,7 +382,7 @@ export function Layout() {
       </div>
 
       {/* Mobile navigation bar */}
-      <div className="md:hidden flex items-center justify-around border-b border-white/[0.04] bg-[#272727] px-2 py-2 overflow-x-auto">
+      <div className="md:hidden flex items-center gap-1.5 border-b border-white/[0.06] bg-[#222222] px-3 py-2.5 overflow-x-auto no-scrollbar scroll-smooth">
         {visibleNavigation.map((item) => {
           const isActive =
             location.pathname === item.path ||
@@ -408,10 +396,10 @@ export function Layout() {
               key={item.path}
               to={targetUrl}
               className={cn(
-                'px-3 py-1.5 rounded-full text-xs whitespace-nowrap',
+                'px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all flex-shrink-0',
                 isActive
-                  ? 'bg-[#4B4B4B] text-white font-semibold'
-                  : 'text-text-secondary hover:text-white'
+                  ? 'bg-accent text-[#1D1E1C] font-bold shadow-sm'
+                  : 'text-text-secondary hover:text-white bg-[#2e2e2e]'
               )}
             >
               {item.name}
@@ -420,8 +408,8 @@ export function Layout() {
         })}
       </div>
 
-      {/* Main Content with generous outer breathing room */}
-      <main className="w-[min(100%-48px,1952px)] mx-auto px-2 sm:px-4 md:px-12 py-8 md:py-10">
+      {/* Main Content with responsive breathing room */}
+      <main className="w-full max-w-[1952px] mx-auto px-3 sm:px-6 md:px-12 py-5 sm:py-8 md:py-10">
         {isRestricted ? (
           <div className="py-16 px-4 flex flex-col items-center justify-center text-center">
             <div className="max-w-md w-full bg-[#272727] border border-white/[0.08] rounded-3xl p-8 space-y-6 shadow-2xl">

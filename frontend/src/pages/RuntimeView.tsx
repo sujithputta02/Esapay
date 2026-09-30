@@ -162,15 +162,15 @@ export function RuntimeView() {
       </div>
 
       {/* Animated Topology Graph Card */}
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04]">
+      <div className="bg-[#272727] rounded-[24px] sm:rounded-[32px] p-5 sm:p-7 md:p-9 border border-white/[0.04]">
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-[20px] font-bold text-white">Live Cluster Topology Graph</h3>
+          <h3 className="text-lg sm:text-[20px] font-bold text-white">Live Cluster Topology Graph</h3>
           <span className="text-xs text-[#777777] font-mono">Drag nodes to explore</span>
         </div>
 
         <div
           ref={containerRef}
-          className="relative h-96 bg-[#1D1E1C] rounded-[22px] p-8 overflow-hidden border border-white/[0.04]"
+          className="relative h-80 sm:h-96 bg-[#1D1E1C] rounded-[18px] sm:rounded-[22px] p-4 sm:p-8 overflow-hidden border border-white/[0.04]"
         >
           {workloads && workloads.length > 0 ? (
             <motion.div
@@ -309,8 +309,8 @@ export function RuntimeView() {
           )}
         </div>
 
-        <div className="mt-5 flex items-center justify-between text-xs text-[#B8B8B8]">
-          <div className="flex items-center gap-4">
+        <div className="mt-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-[#B8B8B8]">
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4">
             <div className="flex items-center gap-1.5">
               <div className="w-2.5 h-2.5 bg-accent rounded-full"></div>
               <span>Healthy Cluster</span>
@@ -331,11 +331,11 @@ export function RuntimeView() {
       {/* Regional Pod Distribution & Workload Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Regional Distribution */}
-        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04]">
-          <h3 className="text-[20px] font-bold text-white mb-6">Regional Pod Distribution</h3>
+        <div className="bg-[#272727] rounded-[24px] sm:rounded-[32px] p-5 sm:p-7 md:p-8 border border-white/[0.04]">
+          <h3 className="text-lg sm:text-[20px] font-bold text-white mb-6">Regional Pod Distribution</h3>
           <div className="space-y-4">
             {Object.entries(regionCounts).map(([region, count]) => (
-              <div key={region} className="flex items-center justify-between p-4 bg-[#333333] rounded-[18px]">
+              <div key={region} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-4 bg-[#333333] rounded-[18px]">
                 <div className="flex items-center gap-3">
                   <Network className="w-5 h-5 text-accent" />
                   <span className="font-semibold text-white">{region}</span>
@@ -349,8 +349,8 @@ export function RuntimeView() {
         </div>
 
         {/* Workload Specifications */}
-        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04]">
-          <h3 className="text-[20px] font-bold text-white mb-6">Workload Details & Scaling</h3>
+        <div className="bg-[#272727] rounded-[24px] sm:rounded-[32px] p-5 sm:p-7 md:p-8 border border-white/[0.04]">
+          <h3 className="text-lg sm:text-[20px] font-bold text-white mb-6">Workload Details & Scaling</h3>
           <div className="space-y-4">
             {workloads?.map((workload: any) => (
               <div key={workload.workload_id} className="p-4 bg-[#333333] rounded-[18px] space-y-3">
@@ -360,7 +360,7 @@ export function RuntimeView() {
                     {workload.state}
                   </Badge>
                 </div>
-                <div className="grid grid-cols-3 gap-2 text-xs text-[#B8B8B8]">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-[#B8B8B8]">
                   <div>Region: <span className="text-white">{workload.region}</span></div>
                   <div>K8s Pods: <span className="text-accent font-bold">{workload.replication.current_replicas} / {workload.replication.max_replicas}</span></div>
                   <div>Mode: <span className="text-white">{workload.replication.consistency_mode}</span></div>

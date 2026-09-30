@@ -101,7 +101,7 @@ function ThinkingCard({ think }: { think: AIThinking }) {
   };
 
   return (
-    <div className="p-7 rounded-[26px] bg-[#333333] border border-white/[0.04] space-y-6">
+    <div className="p-4 sm:p-7 rounded-[20px] sm:rounded-[26px] bg-[#333333] border border-white/[0.04] space-y-6">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.06] pb-4">
         <div className="flex items-center gap-3">
@@ -335,11 +335,11 @@ export function AgentsView() {
   return (
     <div className="space-y-8">
       <div>
-        <div className="flex items-center gap-3 mb-2">
-          <h1 className="text-[28px] font-bold text-white tracking-tight">Agent Command Center</h1>
+        <div className="flex flex-wrap items-center gap-3 mb-2">
+          <h1 className="text-xl sm:text-[28px] font-bold text-white tracking-tight">Agent Command Center</h1>
           <Badge variant="accent">AUTONOMOUS 5S LOOP</Badge>
         </div>
-        <p className="text-[15px] text-[#B8B8B8] mt-1">
+        <p className="text-xs sm:text-[15px] text-[#B8B8B8] mt-1">
           AI agents monitor vitals, diagnose anomalies, plan Kubernetes pod scaling, and execute recovery actions with local Ollama LLM reasoning.
         </p>
       </div>
@@ -352,7 +352,7 @@ export function AgentsView() {
           return (
             <div
               key={agent.agent_id}
-              className="p-7 rounded-[32px] bg-[#272727] border border-white/[0.04] relative space-y-5"
+              className="p-5 sm:p-7 rounded-[22px] sm:rounded-[32px] bg-[#272727] border border-white/[0.04] relative space-y-5"
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -371,7 +371,7 @@ export function AgentsView() {
                 </Badge>
               </div>
 
-              <div className="space-y-3 text-[14px] bg-[#333333] p-5 rounded-[20px]">
+              <div className="space-y-3 text-[14px] bg-[#333333] p-4 sm:p-5 rounded-[20px]">
                 <div>
                   <span className="text-[#B8B8B8] text-xs uppercase tracking-wider font-semibold">Current Task:</span>
                   <p className="text-white mt-1 font-medium text-sm">
@@ -382,13 +382,13 @@ export function AgentsView() {
                 {agent.transcript && (
                   <div className="pt-3 border-t border-white/[0.06]">
                     <span className="text-[#777777] text-xs font-semibold uppercase">Real-time Transcript:</span>
-                    <p className="text-white mt-1.5 text-xs leading-relaxed bg-[#1D1E1C] rounded-[12px] p-3 border border-white/[0.04] font-mono">
+                    <p className="text-white mt-1.5 text-xs leading-relaxed bg-[#1D1E1C] rounded-[12px] p-3 border border-white/[0.04] font-mono break-words">
                       {agent.transcript}
                     </p>
                   </div>
                 )}
 
-                <div className="flex items-center justify-between pt-2 border-t border-white/[0.06] text-xs text-[#777777]">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/[0.06] text-xs text-[#777777]">
                   <span>Last Active: {new Date(agent.last_active).toLocaleTimeString()}</span>
                   <span className="text-accent">Autonomous Policy Bound</span>
                 </div>
@@ -399,15 +399,15 @@ export function AgentsView() {
       </div>
 
       {/* Ollama AI Thinking - Real LLM Reasoning */}
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
+      <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-9 border border-white/[0.04] space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <Sparkles className="w-6 h-6 text-accent" />
+            <Sparkles className="w-6 h-6 text-accent flex-shrink-0" />
             <div>
-              <h3 className="text-[20px] font-bold text-white">
+              <h3 className="text-base sm:text-[20px] font-bold text-white">
                 Live Ollama AI Reasoning & Kubernetes Scaling Decisions
               </h3>
-              <p className="text-[13px] text-[#B8B8B8] mt-0.5">
+              <p className="text-xs sm:text-[13px] text-[#B8B8B8] mt-0.5">
                 Real-time LLM inference stream computing root cause analysis and proposing typed infrastructure actions
               </p>
             </div>

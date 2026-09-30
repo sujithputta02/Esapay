@@ -364,8 +364,8 @@ export function Dashboard() {
       </div>
 
       {/* Business & Revenue Impact Ribbon (Razorpay Enterprise Value) */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-        <div className="bg-[#272727] rounded-[24px] p-5 border border-white/[0.04] flex items-center justify-between">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
+        <div className="bg-[#272727] rounded-[20px] sm:rounded-[24px] p-4 sm:p-5 border border-white/[0.04] flex items-center justify-between">
           <div className="space-y-1">
             <span className="text-[13px] font-medium text-[#B8B8B8] flex items-center gap-1.5">
               <TrendingUp className="w-3.5 h-3.5 text-accent" />
@@ -427,13 +427,13 @@ export function Dashboard() {
       </div>
 
       {/* 2-Column Main Content Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-[410px_minmax(0,1fr)] gap-8 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[340px_minmax(0,1fr)] xl:grid-cols-[400px_minmax(0,1fr)] gap-6 lg:gap-8 items-start">
         {/* LEFT COLUMN: Reactive Workload / Cluster Selector & Live Capabilities */}
         <div className="space-y-6">
           {/* Card 1: Workload / Cluster Selector */}
-          <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04] space-y-6">
+          <div className="bg-[#272727] rounded-[24px] sm:rounded-[32px] p-5 sm:p-8 border border-white/[0.04] space-y-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-[22px] font-bold text-white">
+              <h2 className="text-[20px] sm:text-[22px] font-bold text-white">
                 Cluster Regions
               </h2>
               <span className="text-xs font-mono text-accent bg-[#333333] px-2.5 py-1 rounded-full">
@@ -442,14 +442,14 @@ export function Dashboard() {
             </div>
 
             {/* Segmented Control */}
-            <div className="bg-[#303030] rounded-[20px] p-1.5 grid grid-cols-4 gap-1 min-h-[58px] items-center">
+            <div className="bg-[#303030] rounded-[20px] p-1 sm:p-1.5 grid grid-cols-4 gap-1 min-h-[52px] sm:min-h-[58px] items-center">
               {clusterOptions.map((opt, idx) => {
                 const isSelected = selectedClusterIndex === idx;
                 return (
                   <button
                     key={opt.id}
                     onClick={() => setSelectedClusterIndex(idx)}
-                    className={`h-[48px] rounded-[15px] text-[12px] font-semibold transition-all flex flex-col items-center justify-center gap-0.5 ${isSelected
+                    className={`h-[44px] sm:h-[48px] rounded-[15px] text-[11px] sm:text-[12px] font-semibold transition-all flex flex-col items-center justify-center gap-0.5 ${isSelected
                         ? 'bg-[#4B4B4B] text-white font-bold shadow-sm'
                         : 'text-[#AFAFAF] hover:text-white bg-transparent'
                       }`}
@@ -616,18 +616,18 @@ export function Dashboard() {
                 <h3 className="text-[17px] font-bold text-white">
                   Payment Telemetry & Latency Curves
                 </h3>
-                <p className="text-xs text-[#777777] mt-0.5 font-mono">
+                <p className="text-xs text-[#777777] mt-0.5 font-mono truncate max-w-[280px] sm:max-w-none">
                   {currentCluster.name} • {selectedMetric.toUpperCase()} Series • {hasTraffic ? 'Streaming Live (2s)' : 'Standby Mode'}
                 </p>
               </div>
 
               {/* Metric Switcher Tabs */}
-              <div className="bg-[#303030] rounded-full p-1 flex items-center gap-1 text-xs">
+              <div className="bg-[#303030] rounded-full p-1 flex items-center gap-1 text-xs overflow-x-auto no-scrollbar max-w-full">
                 {(['tps', 'latency', 'queue', 'errors'] as const).map((metric) => (
                   <button
                     key={metric}
                     onClick={() => setSelectedMetric(metric)}
-                    className={`px-3.5 py-1.5 rounded-full font-medium transition-all ${selectedMetric === metric
+                    className={`px-3 sm:px-3.5 py-1.5 rounded-full font-medium transition-all whitespace-nowrap flex-shrink-0 ${selectedMetric === metric
                         ? 'bg-[#4B4B4B] text-accent font-bold'
                         : 'text-[#AFAFAF] hover:text-white'
                       }`}
@@ -769,8 +769,8 @@ export function Dashboard() {
           </div>
 
           {/* Bottom Action / Quick Recovery Bar */}
-          <div className="bg-[#272727] rounded-[40px] px-8 py-5 min-h-[96px] flex flex-col sm:flex-row items-center justify-between gap-4 border border-white/[0.04]">
-            <div className="flex flex-wrap items-center gap-2 text-[15px]">
+          <div className="bg-[#272727] rounded-[24px] sm:rounded-[40px] p-5 sm:px-8 sm:py-5 min-h-[80px] sm:min-h-[96px] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border border-white/[0.04]">
+            <div className="flex flex-wrap items-center gap-2 text-sm sm:text-[15px]">
               <span className="text-[#777777]">Cluster State:</span>
               <span className="text-white font-semibold">
                 {currentCluster.name} ({currentCluster.pods} Kubernetes Pods) -
@@ -778,7 +778,7 @@ export function Dashboard() {
               <span className="line-through text-[#777777] text-sm">
                 350ms P95
               </span>
-              <span className="text-accent font-extrabold text-[18px]">
+              <span className="text-accent font-extrabold text-[16px] sm:text-[18px]">
                 {hasTraffic ? `${selectedClusterP95}ms SLA Active` : 'SLA Target < 100ms'}
               </span>
             </div>
@@ -786,7 +786,7 @@ export function Dashboard() {
             <button
               onClick={() => handleTriggerSpike()}
               disabled={isSpiking !== null}
-              className="min-w-[190px] min-h-[56px] px-8 rounded-full bg-accent hover:bg-accent-hover text-[#1D1E1C] font-extrabold text-[15px] tracking-wide transition-all active:translate-y-[1px] shadow-sm disabled:opacity-50"
+              className="w-full sm:w-auto min-w-[170px] min-h-[48px] sm:min-h-[56px] px-6 sm:px-8 rounded-full bg-accent hover:bg-accent-hover text-[#1D1E1C] font-extrabold text-sm sm:text-[15px] tracking-wide transition-all active:translate-y-[1px] shadow-sm disabled:opacity-50 shrink-0"
             >
               {isSpiking ? 'SPIKING (3X)...' : 'TRIGGER SPIKE'}
             </button>
@@ -795,17 +795,17 @@ export function Dashboard() {
       </div>
 
       {/* Active Workloads Table Integrated Directly into Dashboard */}
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
-        <div className="flex items-center justify-between">
+      <div className="bg-[#272727] rounded-[24px] sm:rounded-[32px] p-5 sm:p-9 border border-white/[0.04] space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
-            <h3 className="text-[20px] font-bold text-white">
+            <h3 className="text-[18px] sm:text-[20px] font-bold text-white">
               Active Workload Instances & Pod Distribution
             </h3>
-            <p className="text-[13px] text-[#B8B8B8] mt-0.5">
+            <p className="text-[12px] sm:text-[13px] text-[#B8B8B8] mt-0.5">
               Live per-workload throughput, P95 latency, queue depth, and Kubernetes pod replicas
             </p>
           </div>
-          <Badge variant="accent">{workloads?.length || 0} WORKLOADS</Badge>
+          <Badge variant="accent" className="self-start sm:self-auto">{workloads?.length || 0} WORKLOADS</Badge>
         </div>
 
         <div className="space-y-4">
@@ -813,11 +813,11 @@ export function Dashboard() {
             workloads.map((workload) => (
               <div
                 key={workload.workload_id}
-                className="p-6 rounded-[22px] bg-[#333333] border border-white/[0.03] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+                className="p-4 sm:p-6 rounded-[18px] sm:rounded-[22px] bg-[#333333] border border-white/[0.03] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4"
               >
                 <div className="space-y-2">
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-sm font-bold text-white">
+                    <span className="font-mono text-sm font-bold text-white truncate max-w-[200px] sm:max-w-none">
                       {workload.workload_id}
                     </span>
                     <Badge variant={workload.state === 'HEALTHY' ? 'success' : 'warning'}>
@@ -827,7 +827,7 @@ export function Dashboard() {
                       {workload.region}
                     </span>
                   </div>
-                  <div className="flex flex-wrap items-center gap-4 text-xs font-mono text-[#B8B8B8]">
+                  <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs font-mono text-[#B8B8B8]">
                     <span>Rate: {formatThroughput(workload.metrics.rate_per_min)}</span>
                     <span>P95: {formatLatency(workload.metrics.p95_latency_ms)}</span>
                     <span>Queue: {workload.metrics.queue_depth}</span>
@@ -840,7 +840,7 @@ export function Dashboard() {
                 <button
                   onClick={() => handleTriggerSpike(workload.workload_id)}
                   disabled={isSpiking === workload.workload_id}
-                  className="px-5 py-2.5 rounded-full bg-[#474745] hover:bg-[#5A5A58] text-white text-xs font-bold transition-all disabled:opacity-50 shrink-0"
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-[#474745] hover:bg-[#5A5A58] text-white text-xs font-bold transition-all disabled:opacity-50 shrink-0 text-center"
                 >
                   {isSpiking === workload.workload_id ? 'Spiking (3x)...' : 'Trigger Spike (3x)'}
                 </button>
@@ -943,8 +943,8 @@ export function Dashboard() {
 
       {/* Interactive AI Incident Post-Mortem & RCA Modal */}
       {showRcaModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-[#1D1E1C] border border-white/10 rounded-[32px] max-w-3xl w-full p-7 sm:p-9 max-h-[90vh] overflow-y-auto space-y-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#1D1E1C] border border-white/10 rounded-[24px] sm:rounded-[32px] max-w-3xl w-full p-5 sm:p-9 max-h-[90vh] overflow-y-auto space-y-6 shadow-2xl">
             {/* Modal Header */}
             <div className="flex items-start justify-between border-b border-white/[0.06] pb-5">
               <div className="space-y-1">
@@ -956,7 +956,7 @@ export function Dashboard() {
                     RESOLVED (3.4s)
                   </span>
                 </div>
-                <h3 className="text-[22px] font-bold text-white tracking-tight pt-1">
+                <h3 className="text-[19px] sm:text-[22px] font-bold text-white tracking-tight pt-1">
                   Autonomous SRE Incident Post-Mortem & RCA
                 </h3>
                 <p className="text-xs text-[#B8B8B8]">
@@ -965,14 +965,14 @@ export function Dashboard() {
               </div>
               <button
                 onClick={() => setShowRcaModal(false)}
-                className="w-8 h-8 rounded-full bg-[#333333] hover:bg-[#444444] text-[#B8B8B8] hover:text-white flex items-center justify-center transition-all"
+                className="w-8 h-8 rounded-full bg-[#333333] hover:bg-[#444444] text-[#B8B8B8] hover:text-white flex items-center justify-center transition-all shrink-0 ml-2"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Impact Metric Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
               <div className="bg-[#272727] p-4 rounded-[18px] border border-white/[0.04]">
                 <span className="text-[11px] text-[#777777] uppercase font-semibold">Peak Burst</span>
                 <p className="text-lg font-bold text-white font-mono mt-0.5">3.2x Surge</p>

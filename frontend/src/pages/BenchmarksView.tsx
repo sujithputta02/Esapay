@@ -155,10 +155,10 @@ export function BenchmarksView() {
       </div>
 
       {/* Navigation Sub-Tabs */}
-      <div className="flex items-center gap-2 border-b border-border/40 pb-2">
+      <div className="flex items-center gap-2 border-b border-border/40 pb-2 overflow-x-auto no-scrollbar scroll-smooth">
         <button
           onClick={() => setActiveTab('matrix')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+          className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
             activeTab === 'matrix' ? 'bg-card border border-accent/40 text-accent shadow-sm' : 'text-muted-foreground hover:text-foreground'
           }`}
         >
@@ -168,7 +168,7 @@ export function BenchmarksView() {
 
         <button
           onClick={() => setActiveTab('safety')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+          className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
             activeTab === 'safety' ? 'bg-card border border-accent/40 text-accent shadow-sm' : 'text-muted-foreground hover:text-foreground'
           }`}
         >
@@ -178,7 +178,7 @@ export function BenchmarksView() {
 
         <button
           onClick={() => setActiveTab('ablations')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+          className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
             activeTab === 'ablations' ? 'bg-card border border-accent/40 text-accent shadow-sm' : 'text-muted-foreground hover:text-foreground'
           }`}
         >
@@ -188,7 +188,7 @@ export function BenchmarksView() {
 
         <button
           onClick={() => setActiveTab('rbench')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+          className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
             activeTab === 'rbench' ? 'bg-card border border-accent/40 text-accent shadow-sm' : 'text-muted-foreground hover:text-foreground'
           }`}
         >

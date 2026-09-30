@@ -48,15 +48,15 @@ export function AuditView() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-[28px] font-bold text-white tracking-tight">Audit Trail & Lineage</h1>
-        <p className="text-[15px] text-[#B8B8B8] mt-1">
+        <h1 className="text-xl sm:text-[28px] font-bold text-white tracking-tight">Audit Trail & Lineage</h1>
+        <p className="text-xs sm:text-[15px] text-[#B8B8B8] mt-1">
           Complete decision lineage, policy verification proofs, and Kubernetes runtime mutations.
         </p>
       </div>
 
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
+      <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-9 border border-white/[0.04] space-y-6">
         <div className="flex items-center justify-between">
-          <h3 className="text-[20px] font-bold text-white">Action Execution Timeline</h3>
+          <h3 className="text-lg sm:text-[20px] font-bold text-white">Action Execution Timeline</h3>
           <span className="text-xs font-mono text-[#777777]">{uniqueActions.length} Recorded Events</span>
         </div>
 
@@ -65,13 +65,13 @@ export function AuditView() {
             {uniqueActions.map((action, index) => (
               <div
                 key={`${action.action_id}-${index}`}
-                className="p-6 rounded-[22px] bg-[#333333] border border-white/[0.03] space-y-3"
+                className="p-4 sm:p-6 rounded-[18px] sm:rounded-[22px] bg-[#333333] border border-white/[0.03] space-y-3"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
                     {getStatusIcon(action.status)}
-                    <div>
-                      <h4 className="font-mono text-sm font-bold text-white">
+                    <div className="min-w-0">
+                      <h4 className="font-mono text-xs sm:text-sm font-bold text-white truncate max-w-[200px] sm:max-w-none">
                         {action.action_id}
                       </h4>
                       <p className="text-xs text-[#777777] mt-0.5">
@@ -79,7 +79,7 @@ export function AuditView() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Badge variant={action.status === 'completed' ? 'success' : 'default'}>
                       {action.status.toUpperCase()}
                     </Badge>

@@ -308,7 +308,7 @@ function AnimatingInfrastructure({ isOutage }: { isOutage: boolean }) {
 
   return (
     <div className="w-full py-8">
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 relative">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 relative">
         {steps.map((s, idx) => {
           const isActive = pulseIndex === idx;
           return (
@@ -342,7 +342,7 @@ function AnimatingInfrastructure({ isOutage }: { isOutage: boolean }) {
               </div>
 
               {idx < steps.length - 1 && (
-                <div className="hidden md:block absolute -right-2.5 top-1/2 -translate-y-1/2 z-10">
+                <div className="hidden lg:block absolute -right-2.5 top-1/2 -translate-y-1/2 z-10">
                   <div
                     className={`h-5 w-5 rounded-full bg-white border flex items-center justify-center shadow-sm ${
                       isActive ? 'border-[#1F51FF] text-[#1F51FF]' : 'border-slate-200 text-slate-400'
@@ -890,39 +890,39 @@ print(f"Transaction ID: {decision.transaction_id}")`,
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_40%,#295BFF_0%,#1F51FF_55%,#1644DF_100%)]" />
 
         {/* FLOATING TOP NAVBAR */}
-        <header className="relative z-30 pt-6 px-4 sm:px-8 max-w-7xl mx-auto w-full flex items-center justify-between">
-          <div className="bg-black/90 backdrop-blur-md rounded-full p-1 flex items-center shadow-xl border border-white/[0.08]">
-            <span className="bg-black text-white px-4 py-1.5 rounded-full text-xs font-semibold tracking-wider">
+        <header className="relative z-30 pt-4 sm:pt-6 px-3 sm:px-8 max-w-7xl mx-auto w-full flex items-center justify-between gap-2">
+          <div className="bg-black/90 backdrop-blur-md rounded-full p-1 flex items-center shadow-xl border border-white/[0.08] flex-shrink-0">
+            <span className="hidden md:inline-block bg-black text-white px-3 sm:px-4 py-1.5 rounded-full text-xs font-semibold tracking-wider">
               PRODUCT
             </span>
             <a
               href="#corridors"
-              className="px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              className="hidden sm:inline px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
             >
               CORRIDORS
             </a>
             <a
               href="#sdk-cli"
-              className="hidden sm:inline px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              className="hidden lg:inline px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
             >
               SDK & CLI
             </a>
             <button
               onClick={() => setIsDocsOpen(true)}
-              className="px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors flex items-center gap-1.5"
+              className="px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors flex items-center gap-1.5"
             >
               <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
               <span>DOCS</span>
             </button>
           </div>
 
-          <a href="#" className="flex items-center gap-1 group select-none">
-            <span className="text-3xl sm:text-4xl font-extrabold tracking-tighter text-white lowercase">
+          <a href="#" className="flex items-center gap-1 group select-none flex-shrink-0">
+            <span className="text-2xl sm:text-4xl font-extrabold tracking-tighter text-white lowercase">
               esa
             </span>
           </a>
 
-          <div className="bg-black/90 backdrop-blur-md rounded-full p-1.5 flex items-center gap-2 text-xs font-semibold shadow-xl border border-white/[0.08]">
+          <div className="bg-black/90 backdrop-blur-md rounded-full p-1 sm:p-1.5 flex items-center gap-1 sm:gap-2 text-xs font-semibold shadow-xl border border-white/[0.08] flex-shrink-0">
             <a
               href="#benchmarks"
               className="hidden lg:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
@@ -934,7 +934,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
             {sandboxApiKey ? (
               <a
                 href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
-                className="px-3.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 shadow-sm"
+                className="px-2.5 sm:px-3.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1 sm:gap-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 shadow-sm text-[11px] sm:text-xs"
                 title={`Active Test Key: ${sandboxApiKey} — Click to enter Test Console`}
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -944,20 +944,20 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               <button
                 onClick={handleGenerateSandboxKey}
                 disabled={isGeneratingKey}
-                className="px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1.5 rounded-full hover:bg-white/10 border border-amber-400/30 cursor-pointer"
+                className="px-2.5 sm:px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1 sm:gap-1.5 rounded-full hover:bg-white/10 border border-amber-400/30 cursor-pointer text-[11px] sm:text-xs"
                 title="Generate instant test API key without login"
               >
                 <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
-                <span>{isGeneratingKey ? 'GENERATING...' : '⚡ GET TEST KEY'}</span>
+                <span>{isGeneratingKey ? 'GENERATING...' : '⚡ TEST KEY'}</span>
               </button>
             )}
 
             {/* Merchant Identity / Live Console */}
             {authSession ? (
-              <div className="flex items-center gap-2 pl-1">
+              <div className="flex items-center gap-1 sm:gap-2 pl-0.5 sm:pl-1">
                 <a
                   href="/dashboard?mode=live"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-2.5 sm:px-3.5 py-1 sm:py-1.5 font-bold transition-all shadow-md flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs"
                   title="Open Live Merchant Portal"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 animate-pulse" />
@@ -968,19 +968,19 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     supabaseAuth.signOut();
                     setAuthSession(null);
                   }}
-                  className="text-slate-400 hover:text-white px-2 py-1 transition-colors text-[11px]"
+                  className="text-slate-400 hover:text-white px-1.5 sm:px-2 py-1 transition-colors text-[10px] sm:text-[11px]"
                 >
                   Sign Out
                 </button>
               </div>
             ) : (
-              <div className="flex items-center gap-1.5 pl-1">
+              <div className="flex items-center gap-1 pl-0.5 sm:pl-1">
                 <button
                   onClick={() => {
                     setAuthModalMode('signin');
                     setIsAuthModalOpen(true);
                   }}
-                  className="text-slate-300 hover:text-white px-3 py-1.5 transition-colors font-semibold"
+                  className="text-slate-300 hover:text-white px-2 sm:px-3 py-1 sm:py-1.5 transition-colors font-semibold text-[11px] sm:text-xs"
                 >
                   Sign In
                 </button>
@@ -989,10 +989,10 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     setAuthModalMode('signup');
                     setIsAuthModalOpen(true);
                   }}
-                  className="bg-white text-black hover:bg-slate-100 rounded-full px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"
+                  className="bg-white text-black hover:bg-slate-100 rounded-full px-2.5 sm:px-3.5 py-1 sm:py-1.5 font-bold transition-all shadow-md flex items-center gap-1 text-[11px] sm:text-xs"
                 >
                   <span>Sign Up</span>
-                  <ArrowRight className="h-3 w-3" />
+                  <ArrowRight className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
                 </button>
               </div>
             )}
@@ -1016,9 +1016,9 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 initial={{ opacity: 0, x: -30 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: 0.6 }}
-                className="flex items-center gap-3 text-white"
+                className="flex items-center gap-3 text-white text-center md:text-left"
               >
-                <span className="text-3xl sm:text-5xl font-extrabold tracking-tight">
+                <span className="text-2xl sm:text-4xl md:text-5xl font-extrabold tracking-tight">
                   &rarr; {isOutageSimulated ? 'PhonePe UPI' : 'Razorpay'}
                 </span>
                 {isOutageSimulated && (
@@ -1035,36 +1035,36 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 transition={{ duration: 0.6, delay: 0.1 }}
                 className="w-full max-w-md mx-auto"
               >
-                <div className="bg-white text-black rounded-full px-5 py-3.5 shadow-[0_20px_60px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3 transition-transform hover:scale-[1.02]">
-                  <div className="flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-full bg-slate-100 flex items-center justify-center text-base shadow-inner">
+                <div className="bg-white text-black rounded-full px-3.5 sm:px-5 py-2.5 sm:py-3.5 shadow-[0_20px_60px_rgba(0,0,0,0.4)] flex items-center justify-between gap-2 sm:gap-3 transition-transform hover:scale-[1.02]">
+                  <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                    <div className="h-7 w-7 sm:h-8 sm:w-8 rounded-full bg-slate-100 flex items-center justify-center text-sm sm:text-base shadow-inner flex-shrink-0">
                       🇮🇳
                     </div>
-                    <span className="font-mono font-extrabold text-2xl text-slate-900">₹</span>
+                    <span className="font-mono font-extrabold text-xl sm:text-2xl text-slate-900 flex-shrink-0">₹</span>
                     <input
                       type="number"
                       value={amount}
                       onChange={(e) => setAmount(Number(e.target.value))}
-                      className="font-mono font-bold text-2xl text-slate-900 bg-transparent focus:outline-none w-28 sm:w-36"
+                      className="font-mono font-bold text-xl sm:text-2xl text-slate-900 bg-transparent focus:outline-none w-20 sm:w-36 min-w-0"
                       placeholder="500.00"
                     />
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="bg-slate-100 text-slate-800 text-xs font-mono font-bold px-3 py-1.5 rounded-full">
+                  <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+                    <span className="bg-slate-100 text-slate-800 text-[11px] sm:text-xs font-mono font-bold px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full">
                       INR
                     </span>
 
                     <button
                       onClick={() => handleExecuteCheckout(true)}
                       disabled={isProcessingCheckout}
-                      className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2.5 rounded-full transition-colors flex items-center justify-center shadow-md"
+                      className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2 sm:p-2.5 rounded-full transition-colors flex items-center justify-center shadow-md flex-shrink-0"
                       title="Pay / Test Corridor"
                     >
                       {isProcessingCheckout ? (
                         <RefreshCw className="h-4 w-4 animate-spin" />
                       ) : (
-                        <ArrowRight className="h-4 w-4" />
+                        <ArrowRight className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                       )}
                     </button>
                   </div>
@@ -1413,10 +1413,10 @@ print(f"Transaction ID: {decision.transaction_id}")`,
           <div className="rounded-[2.5rem] border border-slate-200 bg-white p-6 sm:p-10 shadow-sm">
             {/* Tab Selector */}
             <div className="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-slate-200">
-              <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-200 font-mono text-xs">
+              <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-200 font-mono text-xs overflow-x-auto no-scrollbar scroll-smooth max-w-full">
                 <button
                   onClick={() => setActiveDevTab('cli')}
-                  className={`px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold ${
+                  className={`px-3.5 sm:px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold whitespace-nowrap flex-shrink-0 ${
                     activeDevTab === 'cli'
                       ? 'bg-[#1F51FF] text-white shadow-sm'
                       : 'text-slate-600 hover:text-slate-900'
@@ -1427,7 +1427,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setActiveDevTab('typescript')}
-                  className={`px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold ${
+                  className={`px-3.5 sm:px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold whitespace-nowrap flex-shrink-0 ${
                     activeDevTab === 'typescript'
                       ? 'bg-[#1F51FF] text-white shadow-sm'
                       : 'text-slate-600 hover:text-slate-900'
@@ -1438,7 +1438,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setActiveDevTab('python')}
-                  className={`px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold ${
+                  className={`px-3.5 sm:px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold whitespace-nowrap flex-shrink-0 ${
                     activeDevTab === 'python'
                       ? 'bg-[#1F51FF] text-white shadow-sm'
                       : 'text-slate-600 hover:text-slate-900'
@@ -1449,7 +1449,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setActiveDevTab('keys')}
-                  className={`px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold ${
+                  className={`px-3.5 sm:px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold whitespace-nowrap flex-shrink-0 ${
                     activeDevTab === 'keys'
                       ? 'bg-[#1F51FF] text-white shadow-sm'
                       : 'text-slate-600 hover:text-slate-900'
@@ -1524,20 +1524,20 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </div>
 
                 <div className="rounded-3xl border border-slate-900/10 bg-[#0E1322] text-white overflow-hidden shadow-xl">
-                  <div className="px-5 py-3 border-b border-white/[0.08] bg-[#080B14] flex items-center justify-between">
+                  <div className="px-4 sm:px-5 py-3 border-b border-white/[0.08] bg-[#080B14] flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5">
                     <div className="flex items-center gap-2">
                       <span className="h-3 w-3 rounded-full bg-rose-500/80 inline-block" />
                       <span className="h-3 w-3 rounded-full bg-amber-500/80 inline-block" />
                       <span className="h-3 w-3 rounded-full bg-emerald-500/80 inline-block" />
-                      <span className="ml-2 text-xs font-mono text-slate-400">bash — npx esapay-cli</span>
+                      <span className="ml-1 sm:ml-2 text-xs font-mono text-slate-400">bash — npx esapay-cli</span>
                     </div>
 
-                    <div className="flex items-center gap-1 font-mono text-xs">
+                    <div className="flex items-center gap-1 font-mono text-xs overflow-x-auto no-scrollbar scroll-smooth max-w-full">
                       {(['gateways', 'checkout', 'doctor', 'health'] as const).map((tab) => (
                         <button
                           key={tab}
                           onClick={() => setActiveTab(tab)}
-                          className={`px-3 py-1 rounded-lg transition-all ${
+                          className={`px-2.5 sm:px-3 py-1 rounded-lg transition-all whitespace-nowrap flex-shrink-0 ${
                             activeTab === tab ? 'bg-[#1F51FF] text-white font-bold' : 'text-slate-400 hover:text-white'
                           }`}
                         >
@@ -1978,12 +1978,12 @@ print(f"Transaction ID: {decision.transaction_id}")`,
       {/* ==================================================================== */}
       <AnimatePresence>
         {isModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="relative w-full max-w-md rounded-[2rem] border border-white/[0.15] bg-[#0E1324] shadow-2xl overflow-hidden text-white"
+              className="relative w-full max-w-md max-h-[90vh] overflow-y-auto rounded-[2rem] border border-white/[0.15] bg-[#0E1324] shadow-2xl text-white"
             >
               <div className="px-6 py-4 border-b border-white/[0.08] bg-[#090D18] flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -2171,12 +2171,12 @@ print(f"Transaction ID: {decision.transaction_id}")`,
       {/* ==================================================================== */}
       <AnimatePresence>
         {cliPort && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
             <motion.div
               initial={{ opacity: 0, scale: 0.92, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.92, y: 20 }}
-              className="relative w-full max-w-lg bg-[#0E1322] border border-emerald-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6"
+              className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[#0E1322] border border-emerald-500/40 rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-6"
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
@@ -2262,13 +2262,13 @@ print(f"Transaction ID: {decision.transaction_id}")`,
       {/* ==================================================================== */}
       <AnimatePresence>
         {isAuthModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
             <motion.div
               initial={{ opacity: 0, scale: 0.94, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.94, y: 15 }}
               transition={{ duration: 0.2 }}
-              className="relative w-full max-w-md bg-[#0E1322] border border-white/10 rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6"
+              className="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#0E1322] border border-white/10 rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-6"
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
@@ -2492,10 +2492,10 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               </div>
 
               {/* Sub-nav Tabs */}
-              <div className="flex items-center gap-1.5 px-6 py-2.5 border-b border-white/[0.06] bg-[#05070D] font-mono text-xs overflow-x-auto">
+              <div className="flex items-center gap-1.5 px-4 sm:px-6 py-2.5 border-b border-white/[0.06] bg-[#05070D] font-mono text-xs overflow-x-auto no-scrollbar scroll-smooth">
                 <button
                   onClick={() => setDocsTab('cli')}
-                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap flex-shrink-0 ${
                     docsTab === 'cli'
                       ? 'bg-[#1F51FF] text-white font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -2506,7 +2506,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setDocsTab('typescript')}
-                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap flex-shrink-0 ${
                     docsTab === 'typescript'
                       ? 'bg-[#1F51FF] text-white font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -2517,7 +2517,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setDocsTab('python')}
-                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap flex-shrink-0 ${
                     docsTab === 'python'
                       ? 'bg-[#1F51FF] text-white font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -2528,7 +2528,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 </button>
                 <button
                   onClick={() => setDocsTab('registries')}
-                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap flex-shrink-0 ${
                     docsTab === 'registries'
                       ? 'bg-[#1F51FF] text-white font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -2540,7 +2540,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               </div>
 
               {/* Tab Content Body */}
-              <div className="flex-1 p-6 overflow-y-auto space-y-6 text-xs sm:text-sm font-sans">
+              <div className="flex-1 p-4 sm:p-6 overflow-y-auto space-y-6 text-xs sm:text-sm font-sans">
                 {/* TAB 1: CLI */}
                 {docsTab === 'cli' && (
                   <div className="space-y-6">

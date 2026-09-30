@@ -57,8 +57,8 @@ export function CostsView() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-[28px] font-bold text-white tracking-tight">AI & Inference Costs</h1>
-        <p className="text-[15px] text-[#B8B8B8] mt-1">
+        <h1 className="text-xl sm:text-[28px] font-bold text-white tracking-tight">AI & Inference Costs</h1>
+        <p className="text-xs sm:text-[15px] text-[#B8B8B8] mt-1">
           Real-time tracking of Ollama LLM inference costs, token throughput, and Kubernetes agent overhead.
         </p>
       </div>
@@ -95,23 +95,23 @@ export function CostsView() {
       </div>
 
       {/* Total Cost Card */}
-      <div className="bg-[#272727] rounded-[32px] p-8 border border-white/[0.04] flex flex-col sm:flex-row items-center justify-between gap-6">
+      <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-8 border border-white/[0.04] flex flex-col sm:flex-row sm:items-center justify-between gap-4 sm:gap-6">
         <div>
-          <p className="text-[15px] text-[#B8B8B8] font-medium">Total Inference Cost (Local Ollama Mistral)</p>
-          <p className="text-[36px] font-extrabold text-accent mt-1 tracking-tight">
+          <p className="text-xs sm:text-[15px] text-[#B8B8B8] font-medium">Total Inference Cost (Local Ollama Mistral)</p>
+          <p className="text-2xl sm:text-[36px] font-extrabold text-accent mt-1 tracking-tight">
             ${costs.total_cost_usd.toFixed(4)} USD
           </p>
           <p className="text-xs text-[#777777] mt-1">
             Time window: {costs.time_window_start ? new Date(costs.time_window_start).toLocaleString() : 'Active session'}
           </p>
         </div>
-        <div className="px-6 py-3 rounded-full bg-[#333333] border border-white/[0.06] text-xs text-white font-mono">
+        <div className="px-4 sm:px-6 py-2 sm:py-3 rounded-full bg-[#333333] border border-white/[0.06] text-xs text-white font-mono text-center sm:text-left self-start sm:self-auto">
           Near-Zero Marginal Cost • Local GPU
         </div>
       </div>
 
       {/* Per-Agent Breakdown */}
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
+      <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-9 border border-white/[0.04] space-y-6">
         <h3 className="text-[20px] font-bold text-white">Per-Agent Cost Breakdown</h3>
 
         {perAgent.length > 0 ? (

@@ -77,48 +77,48 @@ export function PolicyView() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-[28px] font-bold text-white tracking-tight">Policy Engine & Verifier Verdicts</h1>
-        <p className="text-[15px] text-[#B8B8B8] mt-1">
+        <h1 className="text-xl sm:text-[28px] font-bold text-white tracking-tight">Policy Engine & Verifier Verdicts</h1>
+        <p className="text-xs sm:text-[15px] text-[#B8B8B8] mt-1">
           Deterministic safety bounds, state-version invariant checks, and Kubernetes replica constraint verifications.
         </p>
       </div>
 
       {/* Verdict Statistics (rounded-[22px] bg-[#333333]) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
-          <span className="text-[14px] font-medium text-[#B8B8B8]">Total Decisions</span>
-          <span className="text-[26px] font-extrabold text-white tracking-tight">{stats.total_decisions}</span>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+        <div className="bg-[#333333] rounded-[20px] sm:rounded-[22px] p-4 sm:p-5 min-h-[100px] sm:min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-xs sm:text-[14px] font-medium text-[#B8B8B8]">Total Decisions</span>
+          <span className="text-xl sm:text-[26px] font-extrabold text-white tracking-tight">{stats.total_decisions}</span>
         </div>
 
-        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
-          <span className="text-[14px] font-medium text-accent">ALLOW Rate</span>
+        <div className="bg-[#333333] rounded-[20px] sm:rounded-[22px] p-4 sm:p-5 min-h-[100px] sm:min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-xs sm:text-[14px] font-medium text-accent">ALLOW Rate</span>
           <div>
-            <span className="text-[26px] font-extrabold text-accent tracking-tight">{stats.allow_count}</span>
-            <span className="text-xs text-[#777777] ml-1.5">({(stats.allow_rate * 100).toFixed(0)}%)</span>
+            <span className="text-xl sm:text-[26px] font-extrabold text-accent tracking-tight">{stats.allow_count}</span>
+            <span className="text-[11px] sm:text-xs text-[#777777] ml-1.5">({(stats.allow_rate * 100).toFixed(0)}%)</span>
           </div>
         </div>
 
-        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
-          <span className="text-[14px] font-medium text-error">DENY</span>
+        <div className="bg-[#333333] rounded-[20px] sm:rounded-[22px] p-4 sm:p-5 min-h-[100px] sm:min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-xs sm:text-[14px] font-medium text-error">DENY</span>
           <div>
-            <span className="text-[26px] font-extrabold text-error tracking-tight">{stats.deny_count}</span>
-            <span className="text-xs text-[#777777] ml-1.5">({(stats.deny_rate * 100).toFixed(0)}%)</span>
+            <span className="text-xl sm:text-[26px] font-extrabold text-error tracking-tight">{stats.deny_count}</span>
+            <span className="text-[11px] sm:text-xs text-[#777777] ml-1.5">({(stats.deny_rate * 100).toFixed(0)}%)</span>
           </div>
         </div>
 
-        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
-          <span className="text-[14px] font-medium text-warning">STALE STATE</span>
+        <div className="bg-[#333333] rounded-[20px] sm:rounded-[22px] p-4 sm:p-5 min-h-[100px] sm:min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
+          <span className="text-xs sm:text-[14px] font-medium text-warning">STALE STATE</span>
           <div>
-            <span className="text-[26px] font-extrabold text-warning tracking-tight">{stats.stale_state_count}</span>
-            <span className="text-xs text-[#777777] ml-1.5">({(stats.stale_rate * 100).toFixed(0)}%)</span>
+            <span className="text-xl sm:text-[26px] font-extrabold text-warning tracking-tight">{stats.stale_state_count}</span>
+            <span className="text-[11px] sm:text-xs text-[#777777] ml-1.5">({(stats.stale_rate * 100).toFixed(0)}%)</span>
           </div>
         </div>
 
-        <div className="bg-[#333333] rounded-[22px] p-5 min-h-[110px] flex flex-col justify-between border border-white/[0.03]">
-          <span className="text-[14px] font-medium text-[#B8B8B8]">APPROVAL</span>
+        <div className="bg-[#333333] rounded-[20px] sm:rounded-[22px] p-4 sm:p-5 min-h-[100px] sm:min-h-[110px] flex flex-col justify-between border border-white/[0.03] col-span-2 sm:col-span-1">
+          <span className="text-xs sm:text-[14px] font-medium text-[#B8B8B8]">APPROVAL</span>
           <div>
-            <span className="text-[26px] font-extrabold text-white tracking-tight">{stats.requires_approval_count}</span>
-            <span className="text-xs text-[#777777] ml-1.5">({(stats.approval_required_rate * 100).toFixed(0)}%)</span>
+            <span className="text-xl sm:text-[26px] font-extrabold text-white tracking-tight">{stats.requires_approval_count}</span>
+            <span className="text-[11px] sm:text-xs text-[#777777] ml-1.5">({(stats.approval_required_rate * 100).toFixed(0)}%)</span>
           </div>
         </div>
       </div>
@@ -126,8 +126,8 @@ export function PolicyView() {
       {/* Verdict Breakdown Progress & Rules */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Distribution Progress */}
-        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04] space-y-5">
-          <h3 className="text-[20px] font-bold text-white">Verdict Distribution</h3>
+        <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-8 border border-white/[0.04] space-y-5">
+          <h3 className="text-lg sm:text-[20px] font-bold text-white">Verdict Distribution</h3>
           <div className="space-y-4">
             {[
               { label: 'ALLOW (Passed Safety)', count: stats.allow_count, rate: stats.allow_rate, color: 'bg-accent' },
@@ -151,8 +151,8 @@ export function PolicyView() {
         </div>
 
         {/* Policy Rules Reference */}
-        <div className="bg-[#272727] rounded-[32px] p-7 sm:p-8 border border-white/[0.04] space-y-4">
-          <h3 className="text-[20px] font-bold text-white">Deterministic Invariants</h3>
+        <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-8 border border-white/[0.04] space-y-4">
+          <h3 className="text-lg sm:text-[20px] font-bold text-white">Deterministic Invariants</h3>
           <div className="space-y-3">
             <div className="p-3.5 bg-[#333333] rounded-[16px] border border-white/[0.03]">
               <p className="font-bold text-accent text-xs uppercase tracking-wide">RULE_001_REPLICA_BOUNDS</p>
@@ -171,9 +171,9 @@ export function PolicyView() {
       </div>
 
       {/* Recent Verdicts */}
-      <div className="bg-[#272727] rounded-[32px] p-7 sm:p-9 border border-white/[0.04] space-y-6">
+      <div className="bg-[#272727] rounded-[22px] sm:rounded-[32px] p-5 sm:p-7 md:p-9 border border-white/[0.04] space-y-6">
         <div className="flex items-center justify-between">
-          <h3 className="text-[20px] font-bold text-white">Recent Policy Verdicts</h3>
+          <h3 className="text-lg sm:text-[20px] font-bold text-white">Recent Policy Verdicts</h3>
           <span className="text-xs font-mono text-[#777777]">{verdicts.length} Evaluated</span>
         </div>
 
@@ -182,7 +182,7 @@ export function PolicyView() {
             {verdicts.map((verdict) => (
               <div
                 key={verdict.verdict_id}
-                className="p-6 rounded-[22px] bg-[#333333] border border-white/[0.03] space-y-3"
+                className="p-4 sm:p-6 rounded-[18px] sm:rounded-[22px] bg-[#333333] border border-white/[0.03] space-y-3"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="flex items-center gap-3">
