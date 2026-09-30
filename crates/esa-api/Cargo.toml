@@ -37,3 +37,6 @@ chrono.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
+sha2.workspace = true
+governor.workspace = true
+base64 = "0.21"

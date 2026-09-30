@@ -26,7 +26,8 @@ import {
   Zap,
   BookOpen,
 } from 'lucide-react';
-import { apiClient, getApiBaseUrl } from '@/lib/api';
+import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
+import { supabaseAuth } from '@/lib/supabase';
 
 interface GatewayItem {
   gateway: string;
@@ -364,7 +365,18 @@ function AnimatingInfrastructure({ isOutage }: { isOutage: boolean }) {
 export function LandingPage() {
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'gateways' | 'checkout' | 'doctor' | 'health'>('gateways');
-  const [activeDevTab, setActiveDevTab] = useState<'cli' | 'typescript' | 'python'>('cli');
+  const [activeDevTab, setActiveDevTab] = useState<'cli' | 'typescript' | 'python' | 'keys'>('cli');
+  const [sandboxApiKey, setSandboxApiKey] = useState<string>(() => {
+    return (typeof window !== 'undefined' ? localStorage.getItem('esa_api_key') : '') || '';
+  });
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [isGeneratingKey, setIsGeneratingKey] = useState(false);
+  const [authSession, setAuthSession] = useState(() => supabaseAuth.getSession());
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authOrg, setAuthOrg] = useState('');
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signup');
+  const [authStatus, setAuthStatus] = useState<string | null>(null);
   const [gateways, setGateways] = useState<GatewayItem[]>([]);
   const [loadingGateways, setLoadingGateways] = useState(false);
   const [togglingGateway, setTogglingGateway] = useState<string | null>(null);
@@ -1237,6 +1249,17 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   <Code2 className="h-4 w-4" />
                   <span>Python SDK</span>
                 </button>
+                <button
+                  onClick={() => setActiveDevTab('keys')}
+                  className={`px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-semibold ${
+                    activeDevTab === 'keys'
+                      ? 'bg-[#1F51FF] text-white shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Lock className="h-4 w-4" />
+                  <span>API Keys & Auth</span>
+                </button>
               </div>
 
               <div className="flex items-center gap-2 text-xs font-mono text-slate-500">
@@ -1438,6 +1461,243 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     <span>{copiedCmd === 'py-code' ? 'Copied' : 'Copy Code'}</span>
                   </button>
                   <pre className="whitespace-pre text-slate-200">{sdkCodeSnippets.python}</pre>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: API KEYS & AUTH (0-Login Sandbox vs Supabase Merchant Auth) */}
+            {activeDevTab === 'keys' && (
+              <div className="pt-6 space-y-8">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* CARD 1: Instant 0-Login Guest Sandbox Key */}
+                  <div className="p-6 sm:p-8 rounded-3xl bg-slate-50 border border-slate-200 space-y-6 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-blue-700 bg-blue-100">
+                          Zero Login Required
+                        </span>
+                        <span className="text-xs text-slate-500 font-mono">100% Free Sandbox</span>
+                      </div>
+                      <h3 className="text-xl font-bold text-slate-900">
+                        ⚡ Instant Evaluator Sandbox Key
+                      </h3>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Test the Command Center, CLI failover drills, and Python/TypeScript SDKs in 10 seconds. No signup or credit card required.
+                      </p>
+                    </div>
+
+                    <div className="space-y-4">
+                      {sandboxApiKey ? (
+                        <div className="space-y-3">
+                          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-2">
+                            <span className="text-[10px] font-mono text-slate-400 block uppercase">
+                              Active Sandbox Secret Key
+                            </span>
+                            <div className="flex items-center justify-between gap-2">
+                              <code className="font-mono text-xs sm:text-sm font-bold text-slate-900 truncate">
+                                {sandboxApiKey}
+                              </code>
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(sandboxApiKey);
+                                  setCopiedKey(true);
+                                  setTimeout(() => setCopiedKey(false), 2000);
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-mono flex items-center gap-1.5 transition-colors flex-shrink-0"
+                              >
+                                {copiedKey ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                                <span>{copiedKey ? 'Copied' : 'Copy'}</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-3">
+                            <a
+                              href={`/dashboard?key=${encodeURIComponent(sandboxApiKey)}`}
+                              className="px-5 py-2.5 rounded-xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-xs flex items-center gap-2 shadow-sm transition-all"
+                            >
+                              <span>Launch Command Center</span>
+                              <ArrowRight className="h-3.5 w-3.5" />
+                            </a>
+                            <button
+                              onClick={async () => {
+                                setIsGeneratingKey(true);
+                                const randomKey = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+                                setSandboxApiKey(randomKey);
+                                setApiKey(randomKey);
+                                setIsGeneratingKey(false);
+                              }}
+                              className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs transition-colors"
+                            >
+                              Regenerate
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={async () => {
+                            setIsGeneratingKey(true);
+                            try {
+                              const res = await apiClient.post<{ api_key: string }>('/api/v1/keys/generate-sandbox', {});
+                              if (res && res.api_key) {
+                                setSandboxApiKey(res.api_key);
+                                setApiKey(res.api_key);
+                              }
+                            } catch {
+                              const randomKey = `esa_test_demo_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+                              setSandboxApiKey(randomKey);
+                              setApiKey(randomKey);
+                            } finally {
+                              setIsGeneratingKey(false);
+                            }
+                          }}
+                          disabled={isGeneratingKey}
+                          className="w-full py-3.5 rounded-2xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                        >
+                          <Zap className="h-4 w-4" />
+                          <span>{isGeneratingKey ? 'Generating Cryptographic Key...' : 'Generate Instant Sandbox Key'}</span>
+                        </button>
+                      )}
+
+                      <div className="p-3.5 rounded-xl bg-slate-900 text-slate-300 font-mono text-xs flex items-center justify-between">
+                        <span className="truncate">npx esapay-cli --key {sandboxApiKey ? sandboxApiKey.substring(0, 16) + '...' : 'YOUR_KEY'} status</span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`npx esapay-cli --key ${sandboxApiKey || 'esa_test_demo_123'} status`);
+                            setCopiedCmd('cli-key');
+                            setTimeout(() => setCopiedCmd(null), 2000);
+                          }}
+                          className="text-slate-400 hover:text-white pl-2"
+                        >
+                          {copiedCmd === 'cli-key' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CARD 2: Merchant Production Account (Supabase Auth) */}
+                  <div className="p-6 sm:p-8 rounded-3xl bg-slate-50 border border-slate-200 space-y-6 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100">
+                          Enterprise Identity
+                        </span>
+                        <span className="text-xs text-slate-500 font-mono">Supabase Auth & RLS</span>
+                      </div>
+                      <h3 className="text-xl font-bold text-slate-900">
+                        🔐 Registered Merchant Portal
+                      </h3>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Sign in to generate persistent Live & Test API keys, manage payment corridors, configure webhooks, and inspect audit logs.
+                      </p>
+                    </div>
+
+                    {authSession ? (
+                      <div className="space-y-4">
+                        <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-1">
+                          <span className="text-[10px] font-mono text-slate-400 block uppercase">
+                            Authenticated Merchant
+                          </span>
+                          <p className="font-bold text-sm text-slate-900">{authSession.user.email}</p>
+                          <p className="text-xs font-mono text-slate-500">{authSession.user.organization_name || 'My Workspace'}</p>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <a
+                            href="/dashboard"
+                            className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition-all"
+                          >
+                            <span>Open Merchant Dashboard</span>
+                            <ArrowRight className="h-3.5 w-3.5" />
+                          </a>
+                          <button
+                            onClick={() => {
+                              supabaseAuth.signOut();
+                              setAuthSession(null);
+                            }}
+                            className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs transition-colors"
+                          >
+                            Sign Out
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2 bg-slate-200/60 p-1 rounded-xl font-mono text-xs w-fit">
+                          <button
+                            onClick={() => setAuthMode('signup')}
+                            className={`px-3 py-1 rounded-lg font-semibold transition-all ${
+                              authMode === 'signup' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                            }`}
+                          >
+                            Sign Up
+                          </button>
+                          <button
+                            onClick={() => setAuthMode('signin')}
+                            className={`px-3 py-1 rounded-lg font-semibold transition-all ${
+                              authMode === 'signin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                            }`}
+                          >
+                            Sign In
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          <input
+                            type="email"
+                            placeholder="merchant@example.com"
+                            value={authEmail}
+                            onChange={(e) => setAuthEmail(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                          />
+                          <input
+                            type="password"
+                            placeholder="Password (min 6 characters)"
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                          />
+                          {authMode === 'signup' && (
+                            <input
+                              type="text"
+                              placeholder="Organization Name (e.g. Acme Corp)"
+                              value={authOrg}
+                              onChange={(e) => setAuthOrg(e.target.value)}
+                              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                            />
+                          )}
+                        </div>
+
+                        {authStatus && (
+                          <p className="text-xs font-mono text-emerald-600">{authStatus}</p>
+                        )}
+
+                        <button
+                          onClick={async () => {
+                            if (!authEmail || !authPassword) return;
+                            try {
+                              setAuthStatus('Processing...');
+                              if (authMode === 'signup') {
+                                const s = await supabaseAuth.signUp(authEmail, authPassword, authOrg || 'My Workspace');
+                                setAuthSession(s);
+                                setAuthStatus('Account created & logged in!');
+                              } else {
+                                const s = await supabaseAuth.signIn(authEmail, authPassword);
+                                setAuthSession(s);
+                                setAuthStatus('Signed in successfully!');
+                              }
+                            } catch (err: any) {
+                              setAuthStatus(`Error: ${err.message}`);
+                            }
+                          }}
+                          className="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2"
+                        >
+                          <Lock className="h-3.5 w-3.5" />
+                          <span>{authMode === 'signup' ? 'Create Merchant Account' : 'Sign In with Supabase'}</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
