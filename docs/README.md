@@ -6,6 +6,17 @@ Engineering, research, specifications, and demo assets for the ESA (Executable S
 
 ---
 
+## 📦 Client SDKs, CLI & API Packages (v1.0.5)
+
+| Package | Ecosystem | Version / Badges | Installation | Quick Links |
+|---|---|---|---|---|
+| [**`esapay` (TypeScript & Bun)**](../sdk/typescript/README.md) | Node.js, Bun, Next.js | [![npm](https://img.shields.io/npm/v/esapay?color=1F51FF)](https://www.npmjs.com/package/esapay) | `npm i esapay`<br>`bun add esapay` | [NPM Package](https://www.npmjs.com/package/esapay) · [TS SDK Docs](../sdk/typescript/README.md) |
+| [**`esapay` (Python SDK)**](../sdk/python/README.md) | Python 3.8+ (Zero Deps) | [![PyPI](https://img.shields.io/badge/pypi-v1.0.5-1F51FF.svg?logo=pypi&logoColor=white)](https://pypi.org/project/esapay/) | `pip install esapay`<br>`uv add esapay` | [PyPI Package](https://pypi.org/project/esapay/) · [Python Docs](../sdk/python/README.md) |
+| [**`esapay-cli` (Terminal CLI)**](../packages/esa-cli/README.md) | Global CLI / Rust Binaries | [![npm](https://img.shields.io/npm/v/esapay-cli?color=1F51FF)](https://www.npmjs.com/package/esapay-cli) | `npm i -g esapay-cli`<br>`npx esapay-cli` | [NPM CLI](https://www.npmjs.com/package/esapay-cli) · [CLI Docs](../packages/esa-cli/README.md) · [Releases](https://github.com/sujithputta02/Esapay/releases/tag/v1.0.5) |
+| [**ESA Control Plane API**](api.md) | HTTP REST & WebSockets | `v1.0.5` | `https://esapay-api.onrender.com` | [API Reference](api.md) · [Architecture](architecture.md) |
+
+---
+
 ## Demos, Walkthroughs & Scripts
 
 | Document | Description |

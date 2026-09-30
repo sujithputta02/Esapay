@@ -25,6 +25,7 @@ import {
   Activity,
   Zap,
   BookOpen,
+  Server,
   Eye,
   EyeOff,
 } from 'lucide-react';
@@ -520,7 +521,7 @@ export function LandingPage() {
 
   // Interactive Documentation Modal
   const [isDocsOpen, setIsDocsOpen] = useState(false);
-  const [docsTab, setDocsTab] = useState<'cli' | 'typescript' | 'python' | 'registries'>('cli');
+  const [docsTab, setDocsTab] = useState<'cli' | 'typescript' | 'python' | 'api' | 'registries'>('cli');
 
   // CLI Browser OAuth state (?cli=PORT from `esa login`)
   const [cliPort, setCliPort] = useState<string | null>(null);
@@ -2532,11 +2533,11 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                         Developer Documentation & Package Registries
                       </h3>
                       <span className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[9px] px-2 py-0.5 rounded-full font-mono font-bold">
-                        v1.0.0
+                        v1.0.5 Live
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Sovereign Indian payment rails (UPI, RuPay, NetBanking) across CLI, TypeScript, and Python.
+                      Sovereign Indian payment rails (UPI, RuPay, NetBanking) across CLI, TypeScript, Python, and REST API.
                     </p>
                   </div>
                 </div>
@@ -2582,6 +2583,17 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                 >
                   <Code2 className="h-3.5 w-3.5" />
                   <span>esapay (Python SDK)</span>
+                </button>
+                <button
+                  onClick={() => setDocsTab('api')}
+                  className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-2 whitespace-nowrap flex-shrink-0 ${
+                    docsTab === 'api'
+                      ? 'bg-[#1F51FF] text-white font-bold shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Server className="h-3.5 w-3.5" />
+                  <span>REST API & WebSockets</span>
                 </button>
                 <button
                   onClick={() => setDocsTab('registries')}
@@ -2830,70 +2842,197 @@ print(f"Settled via: {decision.routed_gateway} (Failover: {decision.failover_tri
                   </div>
                 )}
 
-                {/* TAB 4: REGISTRIES */}
+                {/* TAB 4: API & WEBSOCKETS */}
+                {docsTab === 'api' && (
+                  <div className="space-y-6">
+                    <div className="space-y-2">
+                      <h4 className="text-base font-extrabold text-white flex items-center gap-2">
+                        <Server className="h-4 w-4 text-[#1F51FF]" />
+                        <span>ESA Control Plane — REST & WebSockets API (v1.0.5)</span>
+                      </h4>
+                      <p className="text-slate-400 text-xs">
+                        High-throughput JSON and WebSocket control plane serving live telemetry, corridor health, optimistic concurrency state updates, and autonomous checkout failover.
+                      </p>
+                    </div>
+
+                    {/* Endpoints & Base URLs */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono text-xs">
+                      <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1">
+                        <span className="text-[10px] text-slate-400 uppercase font-bold block">Production Cloud Cluster</span>
+                        <div className="flex items-center justify-between text-[#1F51FF] font-bold">
+                          <span>https://esapay-api.onrender.com</span>
+                          <button onClick={() => copyToClipboard('https://esapay-api.onrender.com', 'api-cloud')} className="text-slate-400 hover:text-white">
+                            {copiedCmd === 'api-cloud' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1">
+                        <span className="text-[10px] text-slate-400 uppercase font-bold block">Local Cluster (Docker / Cargo)</span>
+                        <div className="flex items-center justify-between text-emerald-400 font-bold">
+                          <span>http://localhost:8080</span>
+                          <button onClick={() => copyToClipboard('http://localhost:8080', 'api-local')} className="text-slate-400 hover:text-white">
+                            {copiedCmd === 'api-local' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Auth & Key Management */}
+                    <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-blue-200 flex items-center gap-1.5">
+                          <Lock className="h-3.5 w-3.5 text-blue-400" />
+                          <span>Authentication & Multi-Key Provisioning</span>
+                        </span>
+                        <span className="text-[10px] font-mono text-blue-300 bg-blue-500/20 px-2 py-0.5 rounded-full border border-blue-500/30">
+                          Bearer & X-API-Key
+                        </span>
+                      </div>
+                      <p className="text-slate-300 text-[11px] leading-relaxed">
+                        Pass your API key in either <code className="text-white font-mono bg-black/40 px-1 py-0.5 rounded">Authorization: Bearer esa_live_...</code> or <code className="text-white font-mono bg-black/40 px-1 py-0.5 rounded">X-API-Key: esa_test_...</code>. 
+                        Keys support configurable lifetimes: <strong className="text-white">7d</strong>, <strong className="text-white">30d</strong>, <strong className="text-white">90d</strong>, <strong className="text-white">365d</strong>, <strong className="text-white">custom</strong>, or <strong className="text-white">forever</strong>. Expired keys receive automatic HTTP <code className="text-rose-400 font-mono">401 Unauthorized</code> responses.
+                      </p>
+                    </div>
+
+                    {/* Endpoints Table */}
+                    <div className="space-y-2">
+                      <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider font-bold">Core Endpoints</span>
+                      <div className="rounded-2xl border border-white/[0.08] overflow-hidden bg-black/40">
+                        <table className="w-full text-left font-mono text-xs">
+                          <thead className="bg-white/[0.04] text-slate-400 border-b border-white/[0.08] text-[10px] uppercase">
+                            <tr>
+                              <th className="py-2.5 px-4">Method & Path</th>
+                              <th className="py-2.5 px-4">Description</th>
+                              <th className="py-2.5 px-4">Auth</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/[0.05] text-slate-300">
+                            <tr>
+                              <td className="py-2.5 px-4 text-emerald-400 font-bold">GET /health</td>
+                              <td className="py-2.5 px-4">Liveness & cluster diagnostic check</td>
+                              <td className="py-2.5 px-4 text-slate-400">Public</td>
+                            </tr>
+                            <tr>
+                              <td className="py-2.5 px-4 text-emerald-400 font-bold">GET /api/workloads</td>
+                              <td className="py-2.5 px-4">List StateFabric workloads & corridor statuses</td>
+                              <td className="py-2.5 px-4 text-blue-400">API Key</td>
+                            </tr>
+                            <tr>
+                              <td className="py-2.5 px-4 text-emerald-400 font-bold">POST /api/events/payment</td>
+                              <td className="py-2.5 px-4">Ingest transaction telemetry & trigger failover</td>
+                              <td className="py-2.5 px-4 text-blue-400">API Key</td>
+                            </tr>
+                            <tr>
+                              <td className="py-2.5 px-4 text-emerald-400 font-bold">GET /api/vitals/history</td>
+                              <td className="py-2.5 px-4">P95 latency percentiles & corridor error rates</td>
+                              <td className="py-2.5 px-4 text-blue-400">API Key</td>
+                            </tr>
+                            <tr>
+                              <td className="py-2.5 px-4 text-purple-400 font-bold">GET /ws/telemetry</td>
+                              <td className="py-2.5 px-4">Real-time WebSocket streaming telemetry event bus</td>
+                              <td className="py-2.5 px-4 text-slate-400">Optional</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Quick curl snippet */}
+                    <div className="space-y-2">
+                      <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider font-bold">cURL Quickstart</span>
+                      <div className="p-3.5 rounded-xl bg-black/60 border border-white/[0.08] font-mono text-xs text-slate-300 flex items-center justify-between overflow-x-auto">
+                        <code className="text-emerald-400 whitespace-nowrap">curl -s https://esapay-api.onrender.com/health | jq .</code>
+                        <button onClick={() => copyToClipboard('curl -s https://esapay-api.onrender.com/health | jq .', 'curl-health')} className="text-slate-400 hover:text-white flex-shrink-0 ml-2">
+                          {copiedCmd === 'curl-health' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* TAB 5: REGISTRIES */}
                 {docsTab === 'registries' && (
                   <div className="space-y-6">
                     <div className="space-y-2">
                       <h4 className="text-base font-extrabold text-white flex items-center gap-2">
                         <Download className="h-4 w-4 text-[#1F51FF]" />
-                        <span>Open Source Package Mirrors & CI/CD Hub</span>
+                        <span>Official Package Registries & Pre-Compiled Releases (v1.0.5)</span>
                       </h4>
                       <p className="text-slate-400 text-xs">
-                        ESA artifacts are continuously verified and packaged for standard package ecosystems.
+                        ESA artifacts are continuously verified, built, and synchronized across standard package ecosystems.
                       </p>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* NPM TypeScript SDK */}
                       <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-2">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-white text-xs">NPM Registry (TypeScript SDK)</span>
-                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.1 Live</span>
+                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.5 Live</span>
                         </div>
-                        <p className="text-[11px] text-slate-400 font-mono">
+                        <p className="text-[11px] text-slate-400 font-mono space-y-1">
                           <a href="https://www.npmjs.com/package/esapay" target="_blank" rel="noreferrer" className="text-[#1F51FF] hover:underline flex items-center gap-1 font-bold">
                             <span>npmjs.com/package/esapay</span>
                             <ExternalLink className="h-3 w-3" />
                           </a>
-                          <span className="text-slate-400 text-[10px] block mt-1">npm install esapay</span>
+                          <span className="text-slate-400 text-[10px] block">npm install esapay</span>
+                          <a href="https://github.com/sujithputta02/Esapay/tree/main/sdk/typescript#readme" target="_blank" rel="noreferrer" className="text-slate-400 hover:text-white text-[10px] flex items-center gap-1">
+                            <span>Read TS SDK Docs on GitHub</span>
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
                         </p>
                       </div>
 
+                      {/* PyPI Python SDK */}
                       <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-2">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-white text-xs">PyPI (Python Package Index)</span>
-                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.1 Live</span>
+                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.5 Live</span>
                         </div>
-                        <p className="text-[11px] text-slate-400 font-mono">
+                        <p className="text-[11px] text-slate-400 font-mono space-y-1">
                           <a href="https://pypi.org/project/esapay/" target="_blank" rel="noreferrer" className="text-[#1F51FF] hover:underline flex items-center gap-1 font-bold">
                             <span>pypi.org/project/esapay/</span>
                             <ExternalLink className="h-3 w-3" />
                           </a>
-                          <span className="text-slate-400 text-[10px] block mt-1">pip install esapay</span>
+                          <span className="text-slate-400 text-[10px] block">pip install esapay</span>
+                          <a href="https://github.com/sujithputta02/Esapay/tree/main/sdk/python#readme" target="_blank" rel="noreferrer" className="text-slate-400 hover:text-white text-[10px] flex items-center gap-1">
+                            <span>Read Python SDK Docs on GitHub</span>
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
                         </p>
                       </div>
 
+                      {/* NPM CLI */}
                       <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-2">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-white text-xs">NPM CLI (Global Terminal Tool)</span>
-                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.1 Live</span>
+                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.5 Live</span>
                         </div>
-                        <p className="text-[11px] text-slate-400 font-mono">
+                        <p className="text-[11px] text-slate-400 font-mono space-y-1">
                           <a href="https://www.npmjs.com/package/esapay-cli" target="_blank" rel="noreferrer" className="text-[#1F51FF] hover:underline flex items-center gap-1 font-bold">
                             <span>npmjs.com/package/esapay-cli</span>
                             <ExternalLink className="h-3 w-3" />
                           </a>
-                          <span className="text-slate-400 text-[10px] block mt-1">npm i -g esapay-cli</span>
+                          <span className="text-slate-400 text-[10px] block">npm i -g esapay-cli</span>
+                          <a href="https://github.com/sujithputta02/Esapay/tree/main/packages/esa-cli#readme" target="_blank" rel="noreferrer" className="text-slate-400 hover:text-white text-[10px] flex items-center gap-1">
+                            <span>Read CLI Tool Docs on GitHub</span>
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
                         </p>
                       </div>
 
+                      {/* GitHub Releases */}
                       <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-2">
                         <div className="flex items-center justify-between">
-                          <span className="font-bold text-white text-xs">Bun Native Registry</span>
-                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">Instant</span>
+                          <span className="font-bold text-white text-xs">GitHub Releases (Compiled Binaries)</span>
+                          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">v1.0.5 Live</span>
                         </div>
-                        <p className="text-[11px] text-slate-400 font-mono">
-                          <span className="text-slate-200">bunx esapay-cli</span><br />
-                          <span className="text-slate-400 text-[10px] block mt-1">bun add esapay</span>
+                        <p className="text-[11px] text-slate-400 font-mono space-y-1">
+                          <a href="https://github.com/sujithputta02/Esapay/releases/tag/v1.0.5" target="_blank" rel="noreferrer" className="text-[#1F51FF] hover:underline flex items-center gap-1 font-bold">
+                            <span>github.com/.../releases/tag/v1.0.5</span>
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                          <span className="text-slate-300 text-[10px] block">Linux x86_64 · macOS ARM/Intel · Windows</span>
                         </p>
                       </div>
                     </div>
@@ -2915,17 +3054,29 @@ print(f"Settled via: {decision.routed_gateway} (Failover: {decision.failover_tri
               </div>
 
               {/* Modal Footer */}
-              <div className="px-6 py-3.5 border-t border-white/[0.08] bg-[#070A12] flex items-center justify-between text-xs text-slate-400">
-                <span className="font-mono text-[11px]">Sovereign Financial Mesh Architecture</span>
-                <a
-                  href="https://github.com/sujithputta02/Esapay"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-white hover:underline flex items-center gap-1.5 font-semibold"
-                >
-                  <span>View GitHub Repository</span>
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
+              <div className="px-6 py-3.5 border-t border-white/[0.08] bg-[#070A12] flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+                <span className="font-mono text-[11px]">ESA v1.0.5 · Sovereign Financial Mesh Architecture</span>
+                <div className="flex items-center gap-4">
+                  <a
+                    href="https://github.com/sujithputta02/Esapay/tree/main/docs#readme"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-emerald-400 hover:underline flex items-center gap-1.5 font-semibold"
+                  >
+                    <BookOpen className="h-3.5 w-3.5" />
+                    <span>Browse All Docs (docs/)</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                  <a
+                    href="https://github.com/sujithputta02/Esapay"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-white hover:underline flex items-center gap-1.5 font-semibold"
+                  >
+                    <span>View GitHub Repo</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
               </div>
             </motion.div>
           </div>

@@ -1,8 +1,48 @@
 # ESA API
 
-HTTP API served by `esa-api` (default `http://localhost:8080`). WebSocket telemetry: `GET /ws/telemetry`.
+HTTP API served by `esa-api` (Cloud: `https://esapay-api.onrender.com`, Local: `http://localhost:8080`). WebSocket telemetry: `GET /ws/telemetry`.
 
-## Health
+---
+
+## 🔐 Authentication & API Keys
+
+All programmatic requests to protected endpoints require an ESA API key passed via standard headers:
+
+```http
+Authorization: Bearer esa_live_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+*or*
+```http
+X-API-Key: esa_live_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### Key Environments
+
+| Key Prefix | Environment | Purpose |
+|---|---|---|
+| `esa_live_` | **Live Production** | Routes to active payment corridors with real transactions |
+| `esa_test_` | **Sandbox / Test** | Simulated bank rails & deterministic corridor fault injections |
+
+### Key Provisioning & Expiration Schedules
+
+API keys can be generated from the **ESA Command Center** with configurable lifespans:
+- **`7d`** — 7-Day Temporary Integration Key
+- **`30d`** — 30-Day Monthly Development Key
+- **`90d`** — 90-Day Quarterly Staging Key
+- **`365d`** — 1-Year Production Key
+- **`custom`** — Arbitrary duration (1 to 730 days)
+- **`forever`** — Never-expiring Enterprise Key
+
+If an expired or revoked key is provided, the API returns:
+```json
+{
+  "error": "Unauthorized",
+  "message": "API key has expired or is invalid",
+  "code": 401
+}
+```
+
+---
 
 ### `GET /health`
 
