@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth } from '@/lib/supabase';
+import { cn } from '@/lib/utils';
 
 interface GatewayItem {
   gateway: string;
@@ -441,6 +442,15 @@ export function LandingPage() {
   const [isAuthorizingCli, setIsAuthorizingCli] = useState(false);
   const [cliAuthSuccess, setCliAuthSuccess] = useState(false);
 
+  // Dedicated Merchant Auth Modal state
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
+  const [modalEmail, setModalEmail] = useState('');
+  const [modalPassword, setModalPassword] = useState('');
+  const [modalOrg, setModalOrg] = useState('');
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -448,7 +458,21 @@ export function LandingPage() {
       if (port) {
         setCliPort(port);
       }
+      const auth = params.get('auth');
+      if (auth === 'signin' || auth === 'login') {
+        setAuthModalMode('signin');
+        setIsAuthModalOpen(true);
+      } else if (auth === 'signup' || auth === 'register') {
+        setAuthModalMode('signup');
+        setIsAuthModalOpen(true);
+      }
     }
+
+    const handleAuthChange = (e: any) => {
+      setAuthSession(e.detail || supabaseAuth.getSession());
+    };
+    window.addEventListener('esa-auth-changed', handleAuthChange);
+    return () => window.removeEventListener('esa-auth-changed', handleAuthChange);
   }, []);
 
   const handleAuthorizeCli = async (targetKey?: string) => {
@@ -878,27 +902,68 @@ print(f"Transaction ID: {decision.transaction_id}")`,
             </span>
           </a>
 
-          <div className="bg-black/90 backdrop-blur-md rounded-full p-1.5 flex items-center gap-3 text-xs font-semibold shadow-xl border border-white/[0.08]">
+          <div className="bg-black/90 backdrop-blur-md rounded-full p-1.5 flex items-center gap-2 text-xs font-semibold shadow-xl border border-white/[0.08]">
             <a
               href="#benchmarks"
-              className="px-3 text-slate-300 hover:text-white transition-colors font-mono"
+              className="hidden lg:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
             >
               BENCHMARKS
             </a>
+
+            {/* Test Command Center (Zero login required) */}
             <a
-              href="/dashboard"
-              className="hidden sm:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
-              title="Open ESA Command Center Console"
+              href="/dashboard?mode=sandbox"
+              className="px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1.5 rounded-full hover:bg-white/5"
+              title="Launch Instant Sandbox / Test Command Center"
             >
-              CONSOLE
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              <span>TEST CONSOLE</span>
             </a>
-            <button
-              onClick={() => handleExecuteCheckout(true)}
-              className="bg-white text-black hover:bg-slate-100 rounded-full px-4 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"
-            >
-              <span>TEST UPI</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </button>
+
+            {/* Merchant Identity / Live Console */}
+            {authSession ? (
+              <div className="flex items-center gap-2 pl-1">
+                <a
+                  href="/dashboard?mode=live"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"
+                  title="Open Live Merchant Portal"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 animate-pulse" />
+                  <span>LIVE CONSOLE</span>
+                </a>
+                <button
+                  onClick={() => {
+                    supabaseAuth.signOut();
+                    setAuthSession(null);
+                  }}
+                  className="text-slate-400 hover:text-white px-2 py-1 transition-colors text-[11px]"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 pl-1">
+                <button
+                  onClick={() => {
+                    setAuthModalMode('signin');
+                    setIsAuthModalOpen(true);
+                  }}
+                  className="text-slate-300 hover:text-white px-3 py-1.5 transition-colors font-semibold"
+                >
+                  Sign In
+                </button>
+                <button
+                  onClick={() => {
+                    setAuthModalMode('signup');
+                    setIsAuthModalOpen(true);
+                  }}
+                  className="bg-white text-black hover:bg-slate-100 rounded-full px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5"
+                >
+                  <span>Sign Up</span>
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </div>
+            )}
           </div>
         </header>
 
@@ -987,6 +1052,40 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   </span>
                   <span>·</span>
                   <span>{liveP95}ms P95</span>
+                </div>
+
+                {/* Quick Dual Mode Gateway Launchers */}
+                <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                  <a
+                    href="/dashboard?mode=sandbox"
+                    className="px-4 py-2 rounded-full bg-black/60 hover:bg-black/80 border border-white/20 text-white font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02]"
+                  >
+                    <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+                    <span>Test Command Center (No Login)</span>
+                    <ArrowRight className="h-3 w-3" />
+                  </a>
+
+                  {!authSession ? (
+                    <button
+                      onClick={() => {
+                        setAuthModalMode('signup');
+                        setIsAuthModalOpen(true);
+                      }}
+                      className="px-4 py-2 rounded-full bg-white hover:bg-slate-100 text-[#1F51FF] font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      <span>Merchant Sign Up / Login</span>
+                    </button>
+                  ) : (
+                    <a
+                      href="/dashboard?mode=live"
+                      className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                    >
+                      <span className="h-2 w-2 rounded-full bg-emerald-300 animate-ping" />
+                      <span>Open Live Merchant Console</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </a>
+                  )}
                 </div>
               </motion.div>
 
@@ -2111,6 +2210,191 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   </div>
                 </div>
               )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ==================================================================== */}
+      {/* MERCHANT AUTHENTICATION MODAL (SIGN IN & SIGN UP)                     */}
+      {/* ==================================================================== */}
+      <AnimatePresence>
+        {isAuthModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 15 }}
+              transition={{ duration: 0.2 }}
+              className="relative w-full max-w-md bg-[#0E1322] border border-white/10 rounded-3xl p-6 sm:p-8 shadow-2xl text-white space-y-6"
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-2xl bg-[#1F51FF] flex items-center justify-center text-white font-extrabold text-base shadow-lg shadow-[#1F51FF]/30 lowercase">
+                    esa
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-lg text-white">
+                      {authModalMode === 'signup' ? 'Create Merchant Account' : 'Merchant Portal Sign In'}
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      {authModalMode === 'signup' ? 'Register for persistent Live & Test keys' : 'Access your Live Merchant Command Center'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsAuthModalOpen(false);
+                    setModalError(null);
+                  }}
+                  className="h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Mode Toggle Pills */}
+              <div className="flex items-center gap-1 p-1 bg-slate-900/90 rounded-2xl border border-white/10 font-mono text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthModalMode('signin');
+                    setModalError(null);
+                  }}
+                  className={cn(
+                    'flex-1 py-2 rounded-xl font-bold transition-all text-center',
+                    authModalMode === 'signin' ? 'bg-[#1F51FF] text-white shadow-md' : 'text-slate-400 hover:text-white'
+                  )}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthModalMode('signup');
+                    setModalError(null);
+                  }}
+                  className={cn(
+                    'flex-1 py-2 rounded-xl font-bold transition-all text-center',
+                    authModalMode === 'signup' ? 'bg-[#1F51FF] text-white shadow-md' : 'text-slate-400 hover:text-white'
+                  )}
+                >
+                  Create Account
+                </button>
+              </div>
+
+              {modalError && (
+                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
+                  <span>{modalError}</span>
+                </div>
+              )}
+
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  setModalError(null);
+                  if (!modalEmail || !modalPassword) {
+                    setModalError('Please enter both email and password.');
+                    return;
+                  }
+                  if (modalPassword.length < 6) {
+                    setModalError('Password must be at least 6 characters.');
+                    return;
+                  }
+                  setIsSubmittingAuth(true);
+                  try {
+                    let session;
+                    if (authModalMode === 'signup') {
+                      session = await supabaseAuth.signUp(modalEmail, modalPassword, modalOrg || 'Default Workspace');
+                    } else {
+                      session = await supabaseAuth.signIn(modalEmail, modalPassword);
+                    }
+                    setAuthSession(session);
+                    setIsAuthModalOpen(false);
+                    window.location.href = '/dashboard?mode=live';
+                  } catch (err: any) {
+                    setModalError(err.message || 'Authentication failed. Please verify credentials.');
+                  } finally {
+                    setIsSubmittingAuth(false);
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="merchant@example.com"
+                      value={modalEmail}
+                      onChange={(e) => setModalEmail(e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                      Password
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="••••••••••••"
+                      value={modalPassword}
+                      onChange={(e) => setModalPassword(e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                    />
+                  </div>
+
+                  {authModalMode === 'signup' && (
+                    <div>
+                      <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                        Organization / Workspace Name
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Acme Payments Inc."
+                        value={modalOrg}
+                        onChange={(e) => setModalOrg(e.target.value)}
+                        className="w-full px-4 py-2.5 rounded-xl border border-white/10 bg-slate-900/80 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmittingAuth}
+                  className="w-full py-3 rounded-2xl bg-[#1F51FF] hover:bg-[#1644DF] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-[#1F51FF]/25 transition-all cursor-pointer"
+                >
+                  {isSubmittingAuth ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <>
+                      <span>{authModalMode === 'signup' ? 'Create Account & Open Console' : 'Sign In to Merchant Console'}</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* No Login Sandbox Alternative */}
+              <div className="pt-2 border-t border-white/[0.08] text-center space-y-2">
+                <p className="text-[11px] text-slate-400">
+                  Just evaluating or running automated tests?
+                </p>
+                <a
+                  href="/dashboard?mode=sandbox"
+                  className="inline-flex items-center gap-1.5 text-xs font-mono text-amber-400 hover:text-amber-300 font-semibold transition-colors"
+                >
+                  <span>Launch Test Command Center (No Login Required)</span>
+                  <span>&rarr;</span>
+                </a>
+              </div>
             </motion.div>
           </div>
         )}

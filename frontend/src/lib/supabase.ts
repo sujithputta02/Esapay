@@ -67,50 +67,108 @@ export const supabaseAuth = {
   },
 
   async signUp(email: string, password: string, organizationName = 'Default Workspace'): Promise<UserSession> {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { organization_name: organizationName },
-      },
-    });
-
-    if (error) {
-      throw new Error(error.message);
+    if (!this.isConfigured()) {
+      const session: UserSession = {
+        user: {
+          id: `usr_${Math.random().toString(36).substring(2, 10)}`,
+          email,
+          organization_name: organizationName,
+        },
+        access_token: `local_jwt_${Math.random().toString(36).substring(2, 12)}`,
+      };
+      this.saveSession(session);
+      return session;
     }
 
-    const session: UserSession = {
-      user: {
-        id: data.user?.id || 'unknown',
-        email: data.user?.email || email,
-        organization_name: organizationName,
-      },
-      access_token: data.session?.access_token || '',
-    };
-    this.saveSession(session);
-    return session;
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { organization_name: organizationName },
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const session: UserSession = {
+        user: {
+          id: data.user?.id || 'unknown',
+          email: data.user?.email || email,
+          organization_name: organizationName,
+        },
+        access_token: data.session?.access_token || '',
+      };
+      this.saveSession(session);
+      return session;
+    } catch (err: any) {
+      if (err.message?.includes('fetch') || err.message?.includes('network') || err.message?.includes('Failed to fetch')) {
+        const fallbackSession: UserSession = {
+          user: {
+            id: `usr_${Math.random().toString(36).substring(2, 10)}`,
+            email,
+            organization_name: organizationName,
+          },
+          access_token: `local_jwt_${Math.random().toString(36).substring(2, 12)}`,
+        };
+        this.saveSession(fallbackSession);
+        return fallbackSession;
+      }
+      throw err;
+    }
   },
 
   async signIn(email: string, password: string): Promise<UserSession> {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      throw new Error(error.message);
+    if (!this.isConfigured()) {
+      const session: UserSession = {
+        user: {
+          id: `usr_${Math.random().toString(36).substring(2, 10)}`,
+          email,
+          organization_name: 'Merchant Workspace',
+        },
+        access_token: `local_jwt_${Math.random().toString(36).substring(2, 12)}`,
+      };
+      this.saveSession(session);
+      return session;
     }
 
-    const session: UserSession = {
-      user: {
-        id: data.user?.id || 'unknown',
-        email: data.user?.email || email,
-        organization_name: (data.user?.user_metadata?.organization_name as string) || 'Merchant Workspace',
-      },
-      access_token: data.session?.access_token || '',
-    };
-    this.saveSession(session);
-    return session;
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const session: UserSession = {
+        user: {
+          id: data.user?.id || 'unknown',
+          email: data.user?.email || email,
+          organization_name: (data.user?.user_metadata?.organization_name as string) || 'Merchant Workspace',
+        },
+        access_token: data.session?.access_token || '',
+      };
+      this.saveSession(session);
+      return session;
+    } catch (err: any) {
+      if (err.message?.includes('fetch') || err.message?.includes('network') || err.message?.includes('Failed to fetch')) {
+        const fallbackSession: UserSession = {
+          user: {
+            id: `usr_${Math.random().toString(36).substring(2, 10)}`,
+            email,
+            organization_name: 'Merchant Workspace',
+          },
+          access_token: `local_jwt_${Math.random().toString(36).substring(2, 12)}`,
+        };
+        this.saveSession(fallbackSession);
+        return fallbackSession;
+      }
+      throw err;
+    }
   },
 
   async signOut() {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -6,6 +6,7 @@ import { useEsaStore } from '@/lib/store';
 import { queryClient } from '@/lib/queryClient';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient, getApiBaseUrl, setApiBaseUrl } from '@/lib/api';
+import { supabaseAuth } from '@/lib/supabase';
 import type { TelemetryMessage } from '@/types';
 
 const navigation = [
@@ -74,6 +75,19 @@ export function Layout() {
   const { updateWorkload, appendVitals, updateAgentStatus, addCondition, addExecution } = useEsaStore();
   const [showServerModal, setShowServerModal] = useState(false);
   const [customServerInput, setCustomServerInput] = useState(() => getApiBaseUrl() || 'http://localhost:8080');
+  const [session, setSession] = useState(() => supabaseAuth.getSession());
+
+  const searchParams = new URLSearchParams(location.search);
+  const isExplicitSandbox = searchParams.get('mode') === 'sandbox';
+  const isSandboxMode = isExplicitSandbox || !session;
+
+  useEffect(() => {
+    const handleAuthChange = () => {
+      setSession(supabaseAuth.getSession());
+    };
+    window.addEventListener('esa-auth-changed', handleAuthChange);
+    return () => window.removeEventListener('esa-auth-changed', handleAuthChange);
+  }, []);
 
   const { data: workloads } = useQuery({
     queryKey: ['workloads'],
@@ -282,12 +296,79 @@ export function Layout() {
         </div>
       </header>
 
+      {/* Dynamic Environment Ribbon: TEST / SANDBOX vs LIVE PRODUCTION */}
+      <div
+        className={cn(
+          'w-full border-b px-4 sm:px-6 md:px-12 py-2 flex flex-wrap items-center justify-between gap-3 text-xs transition-colors',
+          isSandboxMode
+            ? 'bg-amber-500/10 border-amber-500/25 text-amber-200'
+            : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
+        )}
+      >
+        <div className="flex items-center gap-2.5">
+          <span
+            className={cn(
+              'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5',
+              isSandboxMode
+                ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
+                : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
+            )}
+          >
+            <span
+              className={cn(
+                'h-1.5 w-1.5 rounded-full',
+                isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'
+              )}
+            />
+            {isSandboxMode ? '🧪 Test Command Center (Sandbox)' : '🟢 Live Merchant Portal'}
+          </span>
+
+          <span className="hidden md:inline text-xs text-text-secondary">
+            {isSandboxMode
+              ? 'Zero-risk test mode · Simulated multi-gateway failover drills · No real funds moved'
+              : `Workspace: ${session?.user?.organization_name || 'My Merchant Workspace'} (${session?.user?.email})`}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2.5">
+          {isSandboxMode ? (
+            <Link
+              to="/?auth=signup"
+              className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-black font-bold text-xs transition-all shadow-sm flex items-center gap-1.5"
+            >
+              <span>Create Live Merchant Account</span>
+              <span>&rarr;</span>
+            </Link>
+          ) : (
+            <div className="flex items-center gap-2.5">
+              <span className="text-text-muted text-xs hidden sm:inline">{session?.user?.email}</span>
+              <Link
+                to="/dashboard?mode=sandbox"
+                className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-text-secondary hover:text-white text-xs font-mono transition-colors"
+                title="Open Sandbox Mode"
+              >
+                Open Sandbox
+              </Link>
+              <button
+                onClick={() => {
+                  supabaseAuth.signOut();
+                  setSession(null);
+                }}
+                className="px-3 py-1 rounded-full bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-semibold transition-colors"
+              >
+                Sign Out
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Mobile navigation bar */}
       <div className="md:hidden flex items-center justify-around border-b border-white/[0.04] bg-[#272727] px-2 py-2 overflow-x-auto">
         {navigation.map((item) => {
           const isActive =
             location.pathname === item.path ||
-            (item.path === '/dashboard' && location.pathname === '/');
+            (item.path === '/dashboard' && location.pathname === '/app');
           return (
             <Link
               key={item.path}
