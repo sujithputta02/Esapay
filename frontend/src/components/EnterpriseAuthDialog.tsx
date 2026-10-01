@@ -15,7 +15,6 @@ import {
   Server,
   KeyRound,
   ShieldAlert,
-  ChevronRight,
 } from 'lucide-react';
 import { supabaseAuth, evaluatePasswordStrength, UserSession } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
@@ -45,12 +44,13 @@ export function EnterpriseAuthDialog({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [ssoPending, setSsoPending] = useState(false);
+  const [ssoInfoOpen, setSsoInfoOpen] = useState(false);
 
   useEffect(() => {
     setMode(initialMode);
     setErrorMsg(null);
     setSuccessMsg(null);
+    setSsoInfoOpen(false);
   }, [initialMode, isOpen]);
 
   const strength = evaluatePasswordStrength(password);
@@ -130,14 +130,8 @@ export function EnterpriseAuthDialog({
   };
 
   const handleSsoClick = () => {
-    setSsoPending(true);
+    setSsoInfoOpen((prev) => !prev);
     setErrorMsg(null);
-    setTimeout(() => {
-      setSsoPending(false);
-      setErrorMsg(
-        'Enterprise SAML / Okta SSO domain mapping requires verified company domain DNS records. Please authenticate using your Root Credentials below.'
-      );
-    }, 900);
   };
 
   const content = (
@@ -236,33 +230,6 @@ export function EnterpriseAuthDialog({
             <Building2 className="h-3.5 w-3.5" />
             <span>Provision Entity</span>
           </button>
-        </div>
-
-        {/* Enterprise SSO Button */}
-        <div className="space-y-2.5">
-          <button
-            type="button"
-            onClick={handleSsoClick}
-            disabled={ssoPending}
-            className="w-full py-2.5 px-4 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-white/[0.1] hover:border-white/[0.2] text-xs font-mono text-slate-300 hover:text-white flex items-center justify-center gap-2.5 transition-all shadow-sm cursor-pointer group"
-          >
-            <ShieldCheck className="h-4 w-4 text-[#60A5FA] group-hover:scale-110 transition-transform" />
-            <span>Continue with Enterprise SSO (SAML 2.0 / Okta)</span>
-            {ssoPending ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin ml-auto text-slate-400" />
-            ) : (
-              <ChevronRight className="h-3.5 w-3.5 ml-auto text-slate-500 group-hover:text-slate-300" />
-            )}
-          </button>
-
-          <div className="relative flex items-center justify-center">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-white/[0.08]" />
-            </div>
-            <span className="relative px-3 bg-[#0B0F19] text-[10px] uppercase font-mono tracking-widest text-slate-500">
-              Or use root credentials
-            </span>
-          </div>
         </div>
 
         {/* Feedback Notifications */}
@@ -500,6 +467,46 @@ export function EnterpriseAuthDialog({
             </button>
           </div>
         </form>
+
+        {/* Enterprise SAML / Okta SSO Secondary Option */}
+        <div className="pt-1 text-center">
+          <button
+            type="button"
+            onClick={handleSsoClick}
+            className="inline-flex items-center gap-2 text-[11px] font-mono text-slate-400 hover:text-white transition-colors cursor-pointer group py-1 px-2.5 rounded-lg hover:bg-white/[0.04]"
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-[#60A5FA] group-hover:scale-110 transition-transform" />
+            <span>Enterprise SAML 2.0 / Okta SSO</span>
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#1F51FF]/20 text-[#60A5FA] border border-[#1F51FF]/30">
+              Enterprise Only
+            </span>
+          </button>
+        </div>
+
+        {ssoInfoOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="p-3.5 rounded-2xl bg-[#121826] border border-[#1F51FF]/30 text-xs flex items-start gap-2.5 font-mono shadow-lg"
+          >
+            <ShieldCheck className="h-4 w-4 shrink-0 text-[#60A5FA] mt-0.5" />
+            <div className="space-y-1 text-left flex-1">
+              <div className="flex items-center justify-between">
+                <strong className="text-white text-[11px]">Corporate SAML 2.0 & Okta SSO</strong>
+                <button
+                  type="button"
+                  onClick={() => setSsoInfoOpen(false)}
+                  className="text-slate-400 hover:text-white text-[10px] cursor-pointer"
+                >
+                  ✕ Close
+                </button>
+              </div>
+              <p className="text-[11px] leading-relaxed text-slate-300">
+                Corporate SSO requires domain DNS verification and identity provider configuration. For immediate access, please sign in or provision your account using your <strong>Work Email & Password</strong> above.
+              </p>
+            </div>
+          </motion.div>
+        )}
 
         {/* Developer Sandbox Alternative Banner */}
         <div className="pt-3 border-t border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
