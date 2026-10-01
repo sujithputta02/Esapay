@@ -2,6 +2,29 @@
 
 Meaningful milestones only — no fabricated history.
 
+## v1.0.5 — Titanium Auth Experience, Multi-Key Expiration & Idempotent CI/CD (2026)
+
+- **Titanium Security & Auth Redesign**: Enterprise-grade full-screen split authentication UI with real-time password strength entropy calculation, confirmation checks, and secure session termination.
+- **Granular API Key Management**: Support for multiple concurrent API keys per merchant with custom lifespan controls (30 days, 90 days, 1 year, or Never Expire) across both Test and Live environments.
+- **Idempotent CI/CD Release Automation**: Upgraded GitHub Actions release pipelines with idempotent package checks (`CURRENT_VER == REMOTE_VER`) across NPM and PyPI, preventing duplicate release collisions.
+- **Centered Hero Pay Simulation**: Redesigned front-and-center interactive payment simulator showcasing real-time routing decisions, P95 tail latency, and instant circuit-breaker trips.
+- **Cross-Platform Package Synchronization**: Published `esapay-cli@1.0.5`, `esapay@1.0.5` (npm), and `esapay@1.0.5` (PyPI) along with native zero-dependency CLI binaries for Linux, macOS (Apple Silicon & Intel), and Windows.
+
+## v1.0.4 — Enterprise Auth Documentation, Live Control Plane & SDK Reference (2026)
+
+- **Comprehensive API & Auth Specification**: Documented developer endpoints for checkout simulation, gateway telemetry, circuit breakers, and state fabric inspection in `docs/api.md`.
+- **Registry Documentation Overhaul**: Complete README refresh across NPM (`esapay-cli`, `esapay`) and PyPI (`esapay`) with copy-paste runnable snippets, CLI cheatsheets, and environment configuration guides (`ESA_API_KEY`, `ESA_BASE_URL`).
+- **Resilient Client Connection Pooling**: Hardened connection negotiation, Bearer authorization header injection, and automated fallback when connecting to remote or containerized ESA instances.
+- **Synchronized Multi-Platform Binaries**: Released compiled binaries for Linux (`x86_64`), macOS Intel (`x86_64`), macOS Apple Silicon (`aarch64`), and Windows (`x86_64`).
+
+## v1.0.3 — Cloud Deployments, Hugging Face AI Brain & Dual-Sandbox Control Plane (2026)
+
+- **Turnkey Cloud Deployment Blueprints**: Added `render.yaml` and `railway.json` blueprints for 1-click cloud deployments with `/healthz` alias support.
+- **Hugging Face ZeroGPU AI Brain**: Integrated neural reasoning agent running on sovereign Hugging Face Spaces for continuous failure pattern recognition.
+- **Dual-Sandbox Architecture**: Strict separation between Test Sandbox and Live Production Command Center workspaces with sandbox-restricted credential provisioning.
+- **Automated CLI & SDK Auth**: Added automated OAuth callback listening, auto-credential resolution, and seamless environment switching.
+- **Deterministic Docker Builds**: Aligned container runtime to Debian Bookworm (`rust:1-slim-bookworm`) resolving GLIBC mismatches across distribution targets.
+
 ## v1.0.2 — Resilient Standalone Mode & Command Center Direct Serve (2026)
 
 - **Universal CLI (`esapay-cli@1.0.2`)**: Autonomous client-side Standalone Evaluation Mode when offline; graceful fallbacks for `gateways`, `health`, `workloads`, `agents`, `checkout`, and `doctor`.
