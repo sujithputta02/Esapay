@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useEsaStore } from '@/lib/store';
@@ -7,7 +8,7 @@ import { queryClient } from '@/lib/queryClient';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient, getApiBaseUrl, setApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth } from '@/lib/supabase';
-import { ShieldCheck, LogOut, Key, Zap, Copy, Check, RefreshCw, ArrowRight } from 'lucide-react';
+import { ShieldCheck, LogOut, Key, Zap, Copy, Check, RefreshCw, ArrowRight, Menu, X, Server } from 'lucide-react';
 import type { TelemetryMessage } from '@/types';
 
 const navigation = [
@@ -80,11 +81,16 @@ export function Layout() {
   const [session, setSession] = useState(() => supabaseAuth.getSession());
   const [copiedActiveKey, setCopiedActiveKey] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const searchParams = new URLSearchParams(location.search);
   const isExplicitSandbox = searchParams.get('mode') === 'sandbox';
   const isSandboxMode = isExplicitSandbox || !session;
   const activeKey = searchParams.get('key') || (typeof window !== 'undefined' ? localStorage.getItem('esa_api_key') : null);
+
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     const handleAuthChange = () => {
@@ -306,7 +312,7 @@ export function Layout() {
               </span>
             </div>
 
-            {/* Server Endpoint Switcher Pill */}
+            {/* Server Endpoint Switcher Pill (Desktop) */}
             <button
               onClick={() => setShowServerModal(true)}
               className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#272727] hover:bg-[#333333] border border-white/[0.06] text-xs transition-colors cursor-pointer"
@@ -317,23 +323,199 @@ export function Layout() {
                 {getApiBaseUrl() ? getApiBaseUrl().replace(/^https?:\/\//, '') : 'local:8080'}
               </span>
             </button>
+
+            {/* Mobile Navigation Drawer Toggle */}
+            <button
+              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              className="md:hidden p-2 rounded-xl bg-[#272727] hover:bg-[#333333] border border-white/[0.08] text-white transition-colors cursor-pointer"
+              aria-label="Toggle Command Center Menu"
+            >
+              {isMobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
           </div>
         </div>
+
+        {/* Mobile Navigation Drawer with Subsystem Cards & Environment Switches */}
+        <AnimatePresence>
+          {isMobileMenuOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.22, ease: 'easeInOut' }}
+              className="md:hidden border-b border-white/[0.08] bg-[#161715]/95 backdrop-blur-2xl px-4 py-5 space-y-4 overflow-hidden"
+            >
+              {/* Current Context Pill Card */}
+              <div
+                className={cn(
+                  'p-3.5 rounded-2xl border flex items-center justify-between text-xs font-mono',
+                  isSandboxMode
+                    ? 'bg-amber-400/10 border-amber-400/30 text-amber-300'
+                    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'h-2 w-2 rounded-full',
+                      isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'
+                    )}
+                  />
+                  <span className="font-bold">
+                    {isSandboxMode ? 'TEST BENCH / SANDBOX' : 'LIVE PRODUCTION MESH'}
+                  </span>
+                </div>
+                {activeKey && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(activeKey);
+                      setCopiedActiveKey(true);
+                      setTimeout(() => setCopiedActiveKey(false), 2000);
+                    }}
+                    className="flex items-center gap-1 text-[11px] hover:text-white transition-colors cursor-pointer"
+                    title="Copy active key"
+                  >
+                    <span>Key: {activeKey.substring(0, 8)}...</span>
+                    {copiedActiveKey ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                  </button>
+                )}
+              </div>
+
+              {/* Command Center Subsystems Grid */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-text-muted">
+                    Command Subsystems
+                  </span>
+                  <span className="text-[10px] font-mono text-[#777777]">
+                    {visibleNavigation.length} Available
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {visibleNavigation.map((item) => {
+                    const isActive =
+                      location.pathname === item.path ||
+                      (item.path === '/dashboard' && location.pathname === '/app');
+                    const targetUrl = isSandboxMode
+                      ? `${item.path}?mode=sandbox${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ''}`
+                      : item.path;
+
+                    return (
+                      <Link
+                        key={item.path}
+                        to={targetUrl}
+                        onClick={() => setIsMobileMenuOpen(false)}
+                        className={cn(
+                          'p-3 rounded-2xl border text-xs font-mono transition-all flex flex-col justify-between gap-1.5',
+                          isActive
+                            ? 'bg-accent/15 border-accent text-accent font-bold shadow-sm'
+                            : 'bg-[#222222] border-white/[0.04] text-text-secondary hover:text-white'
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-sm text-white">{item.name}</span>
+                          {isActive && <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />}
+                        </div>
+                        <span className="text-[10px] text-text-muted">
+                          {item.testAllowed ? 'Test Enabled' : 'Live Enterprise'}
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Mobile Quick Controls */}
+              <div className="pt-2 border-t border-white/[0.06] space-y-2.5">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-text-muted px-1 block">
+                  Infrastructure & Diagnostics
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      setShowServerModal(true);
+                    }}
+                    className="p-3 rounded-xl bg-[#222222] border border-white/[0.06] text-xs font-mono text-left space-y-0.5 hover:bg-[#2b2b2b] transition-colors cursor-pointer"
+                  >
+                    <span className="text-[10px] text-text-muted flex items-center gap-1">
+                      <Server className="h-3 w-3 text-accent" />
+                      <span>Server Endpoint</span>
+                    </span>
+                    <span className="text-accent font-bold truncate block">
+                      {getApiBaseUrl() ? getApiBaseUrl().replace(/^https?:\/\//, '') : 'local:8080'}
+                    </span>
+                  </button>
+
+                  <div className="p-3 rounded-xl bg-[#222222] border border-white/[0.06] text-xs font-mono space-y-0.5">
+                    <span className="text-[10px] text-text-muted block">K8s Pods Mesh</span>
+                    <span className="text-white font-bold block">{totalPods} Replicas Active</span>
+                  </div>
+                </div>
+
+                {/* Mobile Auth & Mode Actions */}
+                <div className="pt-2 flex flex-col gap-2">
+                  {isSandboxMode ? (
+                    <>
+                      <Link
+                        to="/signup"
+                        onClick={() => setIsMobileMenuOpen(false)}
+                        className="w-full py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs font-mono transition-all flex items-center justify-center gap-1.5 shadow-md"
+                      >
+                        <span>Provision Live Enterprise Account</span>
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </Link>
+                      <Link
+                        to="/login"
+                        onClick={() => setIsMobileMenuOpen(false)}
+                        className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white font-mono text-xs flex items-center justify-center transition-colors"
+                      >
+                        Sign In to Enterprise
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      <Link
+                        to={activeKey ? `/dashboard?mode=sandbox&key=${encodeURIComponent(activeKey)}` : '/dashboard?mode=sandbox'}
+                        onClick={() => setIsMobileMenuOpen(false)}
+                        className="w-full py-2.5 rounded-xl bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        <Zap className="h-3.5 w-3.5 text-amber-400" />
+                        <span>Switch to Sandbox Simulation</span>
+                      </Link>
+                      <button
+                        onClick={() => {
+                          setIsMobileMenuOpen(false);
+                          handleSafeLogout();
+                        }}
+                        disabled={isLoggingOut}
+                        className="w-full py-2.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs font-mono font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        {isLoggingOut ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+                        <span>Safe Logout</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </header>
 
       {/* Dynamic Environment Ribbon: Stark Contrast between TEST / SANDBOX vs LIVE ENTERPRISE */}
       <div
         className={cn(
-          'w-full border-b px-3 sm:px-6 md:px-12 py-2.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs transition-colors',
+          'w-full border-b px-3 sm:px-6 md:px-12 py-2 sm:py-2.5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 text-xs transition-colors',
           isSandboxMode
             ? 'bg-[#18150D] border-amber-500/30 text-amber-200'
             : 'bg-[#070D1A] border-[#1F51FF]/30 text-slate-200'
         )}
       >
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
+        <div className="flex flex-wrap items-center justify-between sm:justify-start gap-2 sm:gap-3 w-full sm:w-auto">
           <span
             className={cn(
-              'px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0 shadow-sm',
+              'px-2.5 sm:px-3 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0 shadow-sm',
               isSandboxMode
                 ? 'bg-amber-400/20 text-amber-300 border border-amber-400/50'
                 : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/50'
@@ -345,16 +527,16 @@ export function Layout() {
                 isSandboxMode ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'
               )}
             />
-            {isSandboxMode ? '🧪 TEST BENCH / SANDBOX' : '🟢 LIVE PRODUCTION MESH'}
+            {isSandboxMode ? '🧪 TEST BENCH' : '🟢 LIVE MESH'}
           </span>
 
           <div className="flex items-center gap-2 text-xs flex-wrap">
             {isSandboxMode ? (
-              <span className="flex items-center gap-2 text-amber-200/90 font-mono text-[11px] flex-wrap">
-                <span className="hidden md:inline">Zero-risk mock routing · Synthetic corridor injection active</span>
+              <span className="flex items-center gap-1.5 text-amber-200/90 font-mono text-[11px] flex-wrap">
+                <span className="hidden md:inline">Zero-risk mock routing · Synthetic corridor active</span>
                 {activeKey && (
-                  <span className="bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px] flex items-center gap-1 max-w-[190px] truncate">
-                    <span>Key: {activeKey.substring(0, 10)}...</span>
+                  <span className="bg-amber-400/10 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded text-[11px] flex items-center gap-1 max-w-[170px] truncate">
+                    <span>Key: {activeKey.substring(0, 8)}...</span>
                     <button
                       onClick={() => {
                         navigator.clipboard.writeText(activeKey);
@@ -371,11 +553,11 @@ export function Layout() {
               </span>
             ) : (
               <div className="flex items-center gap-2 font-mono text-[11px] flex-wrap">
-                <span className="text-white font-bold max-w-[150px] truncate">
+                <span className="text-white font-bold max-w-[130px] truncate">
                   {session?.user?.organization_name || 'My Enterprise'}
                 </span>
                 <span className="text-white/20 hidden sm:inline">|</span>
-                <span className="text-slate-400 hidden sm:inline max-w-[140px] truncate">{session?.user?.email}</span>
+                <span className="text-slate-400 hidden sm:inline max-w-[120px] truncate">{session?.user?.email}</span>
                 <span className="hidden lg:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] border border-emerald-500/20">
                   <ShieldCheck className="h-3 w-3" />
                   PCI-DSS Level 1
@@ -385,29 +567,29 @@ export function Layout() {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto justify-end shrink-0">
           {isSandboxMode ? (
             <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
               <Link
                 to="/signup"
-                className="px-3.5 py-1.5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs font-mono transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                className="flex-1 sm:flex-none px-3.5 py-1.5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs font-mono transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <span>Provision Live Account</span>
+                <span>Provision Account</span>
                 <ArrowRight className="h-3 w-3" />
               </Link>
               <Link
                 to="/login"
-                className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white font-mono text-xs transition-colors"
+                className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white font-mono text-xs transition-colors shrink-0"
               >
                 Sign In
               </Link>
             </div>
           ) : (
-            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto justify-between sm:justify-end">
               <Link
                 to="/keys"
                 className={cn(
-                  'px-3 py-1 rounded-full text-xs font-mono transition-all flex items-center gap-1.5',
+                  'px-2.5 sm:px-3 py-1 rounded-full text-xs font-mono transition-all flex items-center gap-1.5',
                   location.pathname === '/keys'
                     ? 'bg-[#1F51FF] text-white shadow-md font-bold'
                     : 'bg-white/10 hover:bg-white/15 text-slate-300 hover:text-white'
@@ -420,17 +602,17 @@ export function Layout() {
 
               <Link
                 to={activeKey ? `/dashboard?mode=sandbox&key=${encodeURIComponent(activeKey)}` : '/dashboard?mode=sandbox'}
-                className="px-3 py-1 rounded-full bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono transition-colors flex items-center gap-1"
+                className="px-2.5 sm:px-3 py-1 rounded-full bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono transition-colors flex items-center gap-1"
                 title="Switch to Isolated Sandbox"
               >
                 <Zap className="h-3 w-3 text-amber-400" />
-                <span>Sandbox Mode</span>
+                <span>Sandbox</span>
               </Link>
 
               <button
                 onClick={handleSafeLogout}
                 disabled={isLoggingOut}
-                className="px-3 py-1 rounded-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-rose-200 border border-rose-500/30 text-xs font-mono font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                className="px-2.5 sm:px-3 py-1 rounded-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-rose-200 border border-rose-500/30 text-xs font-mono font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
                 title="Safely terminate session, purge tokens and clear sensitive keys"
               >
                 {isLoggingOut ? (
@@ -438,38 +620,42 @@ export function Layout() {
                 ) : (
                   <LogOut className="h-3 w-3" />
                 )}
-                <span>Safe Logout</span>
+                <span>Logout</span>
               </button>
             </div>
           )}
         </div>
       </div>
 
-      {/* Mobile navigation bar */}
-      <div className="md:hidden flex items-center gap-1.5 border-b border-white/[0.06] bg-[#222222] px-3 py-2.5 overflow-x-auto no-scrollbar scroll-smooth touch-pan-x">
-        {visibleNavigation.map((item) => {
-          const isActive =
-            location.pathname === item.path ||
-            (item.path === '/dashboard' && location.pathname === '/app');
-          const targetUrl = isSandboxMode
-            ? `${item.path}?mode=sandbox${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ''}`
-            : item.path;
+      {/* Mobile quick-navigation scroll bar with edge gradient fades */}
+      <div className="relative md:hidden border-b border-white/[0.06] bg-[#1E1F1D]">
+        <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-3 bg-gradient-to-r from-[#1E1F1D] to-transparent z-10" />
+        <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-3 bg-gradient-to-l from-[#1E1F1D] to-transparent z-10" />
+        <div className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto no-scrollbar scroll-smooth touch-pan-x">
+          {visibleNavigation.map((item) => {
+            const isActive =
+              location.pathname === item.path ||
+              (item.path === '/dashboard' && location.pathname === '/app');
+            const targetUrl = isSandboxMode
+              ? `${item.path}?mode=sandbox${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ''}`
+              : item.path;
 
-          return (
-            <Link
-              key={item.path}
-              to={targetUrl}
-              className={cn(
-                'px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all flex-shrink-0',
-                isActive
-                  ? 'bg-accent text-[#1D1E1C] font-bold shadow-sm'
-                  : 'text-text-secondary hover:text-white bg-[#2e2e2e]'
-              )}
-            >
-              {item.name}
-            </Link>
-          );
-        })}
+            return (
+              <Link
+                key={item.path}
+                to={targetUrl}
+                className={cn(
+                  'px-3.5 py-1.5 rounded-full text-xs font-mono font-medium whitespace-nowrap transition-all flex-shrink-0',
+                  isActive
+                    ? 'bg-accent text-[#1D1E1C] font-bold shadow-sm'
+                    : 'text-text-secondary hover:text-white bg-[#282926]'
+                )}
+              >
+                {item.name}
+              </Link>
+            );
+          })}
+        </div>
       </div>
 
       {/* Main Content with responsive breathing room */}
@@ -543,7 +729,7 @@ export function Layout() {
               />
             </div>
 
-            <div className="flex items-center gap-2 mt-3 text-xs text-text-muted">
+            <div className="flex flex-wrap items-center gap-2 mt-3 text-xs text-text-muted">
               <span>Quick Presets:</span>
               <button
                 type="button"

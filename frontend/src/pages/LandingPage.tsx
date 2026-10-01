@@ -28,6 +28,7 @@ import {
   Server,
   Eye,
   EyeOff,
+  Menu,
 } from 'lucide-react';
 import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
 import { supabaseAuth, evaluatePasswordStrength } from '@/lib/supabase';
@@ -531,6 +532,7 @@ export function LandingPage() {
   // Dedicated Merchant Auth Modal state
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -971,113 +973,329 @@ print(f"Transaction ID: {decision.transaction_id}")`,
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_40%,#295BFF_0%,#1F51FF_55%,#1644DF_100%)]" />
 
         {/* FLOATING TOP NAVBAR */}
-        <header className="relative z-30 pt-4 sm:pt-6 px-3 sm:px-8 max-w-7xl mx-auto w-full flex items-center justify-between gap-2">
-          <div className="bg-black/90 backdrop-blur-md rounded-full p-1 flex items-center shadow-xl border border-white/[0.08] flex-shrink-0">
-            <span className="hidden md:inline-block bg-black text-white px-3 sm:px-4 py-1.5 rounded-full text-xs font-semibold tracking-wider">
-              PRODUCT
-            </span>
-            <a
-              href="#corridors"
-              className="hidden sm:inline px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
-            >
-              CORRIDORS
-            </a>
-            <a
-              href="#sdk-cli"
-              className="hidden lg:inline px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
-            >
-              SDK & CLI
-            </a>
-            <button
-              onClick={() => setIsDocsOpen(true)}
-              className="px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors flex items-center gap-1.5"
-            >
-              <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
-              <span>DOCS</span>
-            </button>
-          </div>
-
-          <a href="#" className="flex items-center gap-1 group select-none flex-shrink-0">
-            <span className="text-2xl sm:text-4xl font-extrabold tracking-tighter text-white lowercase">
-              esa
-            </span>
-          </a>
-
-          <div className="bg-black/90 backdrop-blur-md rounded-full p-1 sm:p-1.5 flex items-center gap-1 sm:gap-2 text-xs font-semibold shadow-xl border border-white/[0.08] flex-shrink-0">
-            <a
-              href="#benchmarks"
-              className="hidden lg:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
-            >
-              BENCHMARKS
-            </a>
-
-            {/* Test Command Center (Requires generating test key first without login) */}
-            {sandboxApiKey ? (
-              <a
-                href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
-                className="px-2.5 sm:px-3.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1 sm:gap-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 shadow-sm text-[11px] sm:text-xs"
-                title={`Active Test Key: ${sandboxApiKey} — Click to enter Test Console`}
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span>TEST CONSOLE</span>
+        <header className="relative z-30 pt-3 sm:pt-6 px-3 sm:px-8 max-w-7xl mx-auto w-full">
+          {/* Mobile Floating Capsule (< md) */}
+          <div className="flex md:hidden items-center justify-between bg-black/90 backdrop-blur-md rounded-full px-3 py-1.5 border border-white/[0.1] shadow-2xl w-full">
+            {/* Left: Brand + Docs */}
+            <div className="flex items-center gap-2">
+              <a href="#" className="flex items-center select-none pl-1">
+                <span className="text-2xl font-extrabold tracking-tighter text-white lowercase">
+                  esa
+                </span>
               </a>
-            ) : (
               <button
-                onClick={handleGenerateSandboxKey}
-                disabled={isGeneratingKey}
-                className="px-2.5 sm:px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1 sm:gap-1.5 rounded-full hover:bg-white/10 border border-amber-400/30 cursor-pointer text-[11px] sm:text-xs"
-                title="Generate instant test API key without login"
+                onClick={() => setIsDocsOpen(true)}
+                className="px-2.5 py-1 text-slate-300 hover:text-white text-[11px] font-semibold tracking-wider transition-colors flex items-center gap-1 rounded-full bg-white/5 hover:bg-white/10"
               >
-                <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
-                <span>{isGeneratingKey ? 'GENERATING...' : '⚡ TEST KEY'}</span>
+                <BookOpen className="h-3 w-3 text-emerald-400" />
+                <span>DOCS</span>
               </button>
-            )}
+            </div>
 
-            {/* Merchant Identity / Live Console */}
-            {authSession ? (
-              <div className="flex items-center gap-1 sm:gap-2 pl-0.5 sm:pl-1">
+            {/* Right: Test Key / Console + Sign In + Hamburger Toggle */}
+            <div className="flex items-center gap-1.5">
+              {sandboxApiKey ? (
+                <a
+                  href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                  className="px-2.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1 rounded-full bg-amber-500/10 border border-amber-400/30 text-[11px]"
+                  title={`Active Test Key: ${sandboxApiKey}`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span>CONSOLE</span>
+                </a>
+              ) : (
+                <button
+                  onClick={handleGenerateSandboxKey}
+                  disabled={isGeneratingKey}
+                  className="px-2.5 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1 rounded-full bg-amber-400/10 border border-amber-400/30 text-[11px] cursor-pointer"
+                  title="Generate instant test API key"
+                >
+                  <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
+                  <span>{isGeneratingKey ? '...' : '⚡ TEST'}</span>
+                </button>
+              )}
+
+              {authSession ? (
                 <a
                   href="/dashboard?mode=live"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-2.5 sm:px-3.5 py-1 sm:py-1.5 font-bold transition-all shadow-md flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs"
-                  title="Open Live Merchant Portal"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-2.5 py-1 font-bold transition-all shadow-md flex items-center gap-1 text-[11px]"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 animate-pulse" />
-                  <span>LIVE CONSOLE</span>
+                  <span>LIVE</span>
                 </a>
-                <button
-                  onClick={() => {
-                    supabaseAuth.signOut();
-                    setAuthSession(null);
-                  }}
-                  className="text-slate-400 hover:text-white px-1.5 sm:px-2 py-1 transition-colors text-[10px] sm:text-[11px]"
-                >
-                  Sign Out
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-1 pl-0.5 sm:pl-1">
+              ) : (
                 <button
                   onClick={() => {
                     setAuthModalMode('signin');
                     setIsAuthModalOpen(true);
                   }}
-                  className="text-slate-300 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/10 transition-all font-mono font-medium text-xs"
+                  className="text-white hover:text-white px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 transition-all font-mono text-[11px]"
                 >
                   Sign In
                 </button>
-                <button
-                  onClick={() => {
-                    setAuthModalMode('signup');
-                    setIsAuthModalOpen(true);
-                  }}
-                  className="bg-white hover:bg-slate-100 text-slate-950 rounded-xl px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5 text-xs font-mono"
-                >
-                  <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
-                  <span>Register Entity</span>
-                  <ArrowRight className="h-3 w-3" />
-                </button>
-              </div>
+              )}
+
+              {/* Mobile Drawer Menu Toggle Button */}
+              <button
+                onClick={() => setIsMobileNavOpen(!isMobileNavOpen)}
+                className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+                aria-label="Toggle Navigation Menu"
+              >
+                {isMobileNavOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile Drawer Dropdown Sheet */}
+          <AnimatePresence>
+            {isMobileNavOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: -10, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.98 }}
+                transition={{ duration: 0.2 }}
+                className="md:hidden mt-2 p-4 rounded-3xl bg-[#090D18]/95 backdrop-blur-xl border border-white/10 shadow-2xl text-white space-y-4"
+              >
+                {/* Primary Action Buttons */}
+                <div className="grid grid-cols-2 gap-2">
+                  {!authSession ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          setIsMobileNavOpen(false);
+                          setAuthModalMode('signup');
+                          setIsAuthModalOpen(true);
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-white text-slate-950 font-bold text-xs font-mono flex items-center justify-center gap-1.5 shadow-md"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
+                        <span>Register Entity</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsMobileNavOpen(false);
+                          setAuthModalMode('signin');
+                          setIsAuthModalOpen(true);
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-white font-semibold text-xs font-mono flex items-center justify-center gap-1"
+                      >
+                        <span>Sign In</span>
+                        <ArrowRight className="h-3 w-3 text-slate-400" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <a
+                        href="/dashboard?mode=live"
+                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md"
+                      >
+                        <span className="h-2 w-2 rounded-full bg-emerald-300 animate-pulse" />
+                        <span>Live Console</span>
+                      </a>
+                      <button
+                        onClick={() => {
+                          supabaseAuth.signOut();
+                          setAuthSession(null);
+                          setIsMobileNavOpen(false);
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-white/10 text-slate-300 text-xs font-mono"
+                      >
+                        Sign Out
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {/* Developer Sandbox Key Quick Action */}
+                <div className="p-3 rounded-2xl bg-black/60 border border-white/5 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-amber-300 flex items-center gap-1.5">
+                      <Zap className="h-3.5 w-3.5 text-amber-400" />
+                      Instant Developer Key
+                    </span>
+                    {sandboxApiKey ? (
+                      <span className="text-[10px] text-emerald-400 font-bold">READY</span>
+                    ) : (
+                      <span className="text-[10px] text-slate-400">NO LOGIN REQUIRED</span>
+                    )}
+                  </div>
+                  {sandboxApiKey ? (
+                    <div className="flex items-center justify-between gap-2 bg-white/5 p-2 rounded-xl text-xs font-mono">
+                      <span className="text-amber-200 truncate">{sandboxApiKey}</span>
+                      <a
+                        href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                        className="px-2.5 py-1 rounded-lg bg-amber-400 text-black font-bold text-[11px] shrink-0"
+                      >
+                        Open Console
+                      </a>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        await handleGenerateSandboxKey();
+                      }}
+                      disabled={isGeneratingKey}
+                      className="w-full py-2 rounded-xl bg-amber-400/20 hover:bg-amber-400/30 border border-amber-400/40 text-amber-300 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all"
+                    >
+                      <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
+                      <span>{isGeneratingKey ? 'Provisioning...' : 'Generate 1-Click Sandbox Key'}</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Navigation Sections */}
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <a
+                    href="#corridors"
+                    onClick={() => setIsMobileNavOpen(false)}
+                    className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white flex items-center gap-2"
+                  >
+                    <span>🇮🇳</span>
+                    <span>Corridors</span>
+                  </a>
+                  <a
+                    href="#sdk-cli"
+                    onClick={() => setIsMobileNavOpen(false)}
+                    className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white flex items-center gap-2"
+                  >
+                    <span>⚡</span>
+                    <span>SDK & CLI</span>
+                  </a>
+                  <a
+                    href="#benchmarks"
+                    onClick={() => setIsMobileNavOpen(false)}
+                    className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white flex items-center gap-2"
+                  >
+                    <span>📊</span>
+                    <span>Benchmarks</span>
+                  </a>
+                  <button
+                    onClick={() => {
+                      setIsMobileNavOpen(false);
+                      setIsDocsOpen(true);
+                    }}
+                    className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white flex items-center gap-2 text-left"
+                  >
+                    <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Documentation</span>
+                  </button>
+                </div>
+              </motion.div>
             )}
+          </AnimatePresence>
+
+          {/* Desktop Floating 3-Capsule Navbar (md:flex) */}
+          <div className="hidden md:flex items-center justify-between gap-2 w-full">
+            {/* Capsule 1: Left */}
+            <div className="bg-black/90 backdrop-blur-md rounded-full p-1 flex items-center shadow-xl border border-white/[0.08] flex-shrink-0">
+              <span className="hidden md:inline-block bg-black text-white px-3 sm:px-4 py-1.5 rounded-full text-xs font-semibold tracking-wider">
+                PRODUCT
+              </span>
+              <a
+                href="#corridors"
+                className="hidden sm:inline px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              >
+                CORRIDORS
+              </a>
+              <a
+                href="#sdk-cli"
+                className="hidden lg:inline px-3 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              >
+                SDK & CLI
+              </a>
+              <button
+                onClick={() => setIsDocsOpen(true)}
+                className="px-2.5 sm:px-4 py-1.5 text-slate-300 hover:text-white text-xs font-semibold tracking-wider transition-colors flex items-center gap-1.5"
+              >
+                <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
+                <span>DOCS</span>
+              </button>
+            </div>
+
+            {/* Capsule 2: Center Brand */}
+            <a href="#" className="flex items-center gap-1 group select-none flex-shrink-0">
+              <span className="text-2xl sm:text-4xl font-extrabold tracking-tighter text-white lowercase">
+                esa
+              </span>
+            </a>
+
+            {/* Capsule 3: Right Auth & Action Controls */}
+            <div className="bg-black/90 backdrop-blur-md rounded-full p-1 sm:p-1.5 flex items-center gap-1 sm:gap-2 text-xs font-semibold shadow-xl border border-white/[0.08] flex-shrink-0">
+              <a
+                href="#benchmarks"
+                className="hidden lg:inline px-3 text-slate-300 hover:text-white transition-colors font-mono"
+              >
+                BENCHMARKS
+              </a>
+
+              {/* Test Command Center (Requires generating test key first without login) */}
+              {sandboxApiKey ? (
+                <a
+                  href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
+                  className="px-2.5 sm:px-3.5 py-1 text-amber-300 hover:text-amber-200 transition-all font-mono flex items-center gap-1 sm:gap-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 shadow-sm text-[11px] sm:text-xs"
+                  title={`Active Test Key: ${sandboxApiKey} — Click to enter Test Console`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span>TEST CONSOLE</span>
+                </a>
+              ) : (
+                <button
+                  onClick={handleGenerateSandboxKey}
+                  disabled={isGeneratingKey}
+                  className="px-2.5 sm:px-3 py-1 text-amber-300 hover:text-amber-200 transition-colors font-mono flex items-center gap-1 sm:gap-1.5 rounded-full hover:bg-white/10 border border-amber-400/30 cursor-pointer text-[11px] sm:text-xs"
+                  title="Generate instant test API key without login"
+                >
+                  <Zap className="h-3 w-3 text-amber-400 animate-pulse" />
+                  <span>{isGeneratingKey ? 'GENERATING...' : '⚡ TEST KEY'}</span>
+                </button>
+              )}
+
+              {/* Merchant Identity / Live Console */}
+              {authSession ? (
+                <div className="flex items-center gap-1 sm:gap-2 pl-0.5 sm:pl-1">
+                  <a
+                    href="/dashboard?mode=live"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-full px-2.5 sm:px-3.5 py-1 sm:py-1.5 font-bold transition-all shadow-md flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs"
+                    title="Open Live Merchant Portal"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 animate-pulse" />
+                    <span>LIVE CONSOLE</span>
+                  </a>
+                  <button
+                    onClick={() => {
+                      supabaseAuth.signOut();
+                      setAuthSession(null);
+                    }}
+                    className="text-slate-400 hover:text-white px-1.5 sm:px-2 py-1 transition-colors text-[10px] sm:text-[11px]"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 pl-0.5 sm:pl-1">
+                  <button
+                    onClick={() => {
+                      setAuthModalMode('signin');
+                      setIsAuthModalOpen(true);
+                    }}
+                    className="text-slate-300 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/10 transition-all font-mono font-medium text-xs"
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAuthModalMode('signup');
+                      setIsAuthModalOpen(true);
+                    }}
+                    className="bg-white hover:bg-slate-100 text-slate-950 rounded-xl px-3.5 py-1.5 font-bold transition-all shadow-md flex items-center gap-1.5 text-xs font-mono"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
+                    <span>Register Entity</span>
+                    <ArrowRight className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -1087,7 +1305,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
           className="relative z-10 flex-1 flex flex-col justify-between my-auto px-4 sm:px-8 max-w-7xl mx-auto w-full will-change-transform transform-gpu"
         >
           {/* Globe & Corridor inputs */}
-          <div className="relative flex-1 flex items-center justify-center min-h-[500px] sm:min-h-[620px] my-auto">
+          <div className="relative flex-1 flex items-center justify-center min-h-[460px] sm:min-h-[620px] my-auto">
             <DueIndiaGlobeCanvas
               isOutageSimulated={isOutageSimulated}
               routedGateway={isOutageSimulated ? 'PhonePe' : 'Razorpay'}
@@ -1095,7 +1313,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
             <div className="relative z-20 w-full max-w-6xl mx-auto px-2 sm:px-6">
               {/* Mobile Corridors Header (Hidden on md+) */}
-              <div className="flex md:hidden items-center justify-between w-full max-w-md mx-auto px-2 mb-4 text-white font-extrabold text-lg">
+              <div className="flex md:hidden items-center justify-between w-full max-w-[340px] sm:max-w-md mx-auto px-2 mb-3 text-white font-extrabold text-sm sm:text-lg">
                 <span className="flex items-center gap-1.5">
                   &rarr; {isOutageSimulated ? 'PhonePe UPI' : 'Razorpay'}
                   {isOutageSimulated && (
@@ -1129,37 +1347,37 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   </motion.div>
 
                   {/* Center Column: The Signature Pay Thing at TRUE DEAD CENTER */}
-                  <div className="w-full max-w-md mx-auto flex items-center justify-center">
+                  <div className="w-full max-w-[340px] sm:max-w-md mx-auto flex items-center justify-center">
                     <motion.div
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
                       transition={{ duration: 0.6, delay: 0.1 }}
                       className="w-full"
                     >
-                      <div className="bg-white text-slate-900 rounded-full px-4 sm:px-6 py-3.5 sm:py-4 shadow-[0_24px_70px_rgba(0,0,0,0.5)] flex items-center justify-between gap-3 transition-transform hover:scale-[1.02] border border-white/40">
-                        <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
-                          <div className="h-8 w-8 sm:h-9 sm:w-9 rounded-full bg-slate-100 flex items-center justify-center text-base sm:text-lg shadow-inner flex-shrink-0">
+                      <div className="bg-white text-slate-900 rounded-full px-3.5 sm:px-6 py-3 sm:py-4 shadow-[0_24px_70px_rgba(0,0,0,0.5)] flex items-center justify-between gap-2 sm:gap-3 transition-transform hover:scale-[1.02] border border-white/40">
+                        <div className="flex items-center gap-2 sm:gap-3.5 min-w-0">
+                          <div className="h-7 w-7 sm:h-9 sm:w-9 rounded-full bg-slate-100 flex items-center justify-center text-sm sm:text-lg shadow-inner flex-shrink-0">
                             🇮🇳
                           </div>
-                          <span className="font-mono font-extrabold text-2xl sm:text-3xl text-slate-900 flex-shrink-0">₹</span>
+                          <span className="font-mono font-extrabold text-xl sm:text-3xl text-slate-900 flex-shrink-0">₹</span>
                           <input
                             type="number"
                             value={amount}
                             onChange={(e) => setAmount(Number(e.target.value))}
-                            className="font-mono font-bold text-2xl sm:text-3xl text-slate-900 bg-transparent focus:outline-none w-24 sm:w-36 min-w-0"
+                            className="font-mono font-bold text-xl sm:text-3xl text-slate-900 bg-transparent focus:outline-none w-20 sm:w-36 min-w-0"
                             placeholder="500.00"
                           />
                         </div>
 
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <span className="bg-slate-100 text-slate-800 text-xs font-mono font-bold px-3 py-1.5 rounded-full border border-slate-200/60">
+                        <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+                          <span className="bg-slate-100 text-slate-800 text-[11px] sm:text-xs font-mono font-bold px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full border border-slate-200/60">
                             INR
                           </span>
 
                           <button
                             onClick={() => handleExecuteCheckout(true)}
                             disabled={isProcessingCheckout}
-                            className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2.5 sm:p-3 rounded-full transition-all flex items-center justify-center shadow-lg shadow-[#1F51FF]/30 hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer"
+                            className="bg-[#1F51FF] hover:bg-[#1644DF] text-white p-2 sm:p-3 rounded-full transition-all flex items-center justify-center shadow-lg shadow-[#1F51FF]/30 hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer"
                             title="Execute Autonomous Resilient Payment"
                           >
                             {isProcessingCheckout ? (
@@ -1186,42 +1404,42 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   </motion.div>
                 </div>
 
-                {/* Sub-Equator Telemetry & Action Launchers (Evenly placed below midline without offsetting the pay pill) */}
-                <div className="mt-4 sm:mt-5 flex flex-col items-center justify-center gap-2.5 w-full max-w-md mx-auto">
+                {/* Sub-Equator Telemetry & Action Launchers */}
+                <div className="mt-3.5 sm:mt-5 flex flex-col items-center justify-center gap-2.5 w-full max-w-[340px] sm:max-w-md mx-auto">
                   {/* Sub-Pill Telemetry & Routing Ribbon */}
-                  <div className="flex items-center justify-center gap-2.5 text-xs font-mono text-white/95 bg-black/40 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/10 shadow-sm">
+                  <div className="flex items-center justify-center gap-2 text-[11px] sm:text-xs font-mono text-white/95 bg-black/50 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10 shadow-sm max-w-full text-center">
                     <span className="flex items-center gap-1.5">
                       <span
-                        className={`h-2 w-2 rounded-full ${
+                        className={`h-2 w-2 rounded-full shrink-0 ${
                           isOutageSimulated ? 'bg-amber-300 animate-ping' : 'bg-emerald-300'
                         }`}
                       />
                       <span>
                         Active Route:{' '}
-                        <strong className="text-white">{isOutageSimulated ? 'PhonePe Direct UPI Switch' : 'Razorpay Express'}</strong>
+                        <strong className="text-white">{isOutageSimulated ? 'PhonePe UPI' : 'Razorpay Express'}</strong>
                       </span>
                     </span>
                     <span className="text-white/40">·</span>
-                    <span className="text-white/80">{liveP95}ms P95</span>
+                    <span className="text-white/80 shrink-0">{liveP95}ms P95</span>
                   </div>
 
                   {/* Enterprise Dual Action Console Launchers */}
-                  <div className="flex flex-wrap items-center justify-center gap-2.5">
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-2 w-full">
                     {!sandboxApiKey ? (
                       <button
                         onClick={handleGenerateSandboxKey}
                         disabled={isGeneratingKey}
-                        className="px-3.5 py-1.5 rounded-full bg-slate-900/80 hover:bg-slate-900 border border-slate-700/80 hover:border-amber-400/50 text-slate-300 hover:text-amber-300 font-mono text-xs flex items-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02] cursor-pointer"
+                        className="w-full sm:w-auto px-4 py-2 rounded-full bg-slate-900/80 hover:bg-slate-900 border border-slate-700/80 hover:border-amber-400/50 text-slate-300 hover:text-amber-300 font-mono text-xs flex items-center justify-center gap-2 backdrop-blur-md transition-all shadow-md hover:scale-[1.02] cursor-pointer"
                       >
                         <Zap className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
                         <span>{isGeneratingKey ? 'Generating Key...' : 'Developer Sandbox (Instant Key)'}</span>
                         <ArrowRight className="h-3 w-3" />
                       </button>
                     ) : (
-                      <div className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-700/80 rounded-full p-1 backdrop-blur-md shadow-md">
+                      <div className="flex items-center justify-between gap-1.5 bg-slate-900/90 border border-slate-700/80 rounded-full p-1 backdrop-blur-md shadow-md w-full sm:w-auto">
                         <div className="px-2.5 py-1 text-[11px] font-mono text-amber-300 flex items-center gap-1.5">
                           <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                          <span className="max-w-[110px] truncate">{sandboxApiKey}</span>
+                          <span className="max-w-[100px] truncate">{sandboxApiKey}</span>
                           <button
                             onClick={() => {
                               navigator.clipboard.writeText(sandboxApiKey);
@@ -1236,7 +1454,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                         </div>
                         <a
                           href={`/dashboard?mode=sandbox&key=${encodeURIComponent(sandboxApiKey)}`}
-                          className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs flex items-center gap-1 transition-all"
+                          className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs flex items-center gap-1 transition-all shrink-0"
                         >
                           <span>Sandbox Console</span>
                           <ArrowRight className="h-3 w-3" />
@@ -1250,7 +1468,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                           setAuthModalMode('signin');
                           setIsAuthModalOpen(true);
                         }}
-                        className="px-4 py-1.5 rounded-full bg-white hover:bg-slate-100 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02] cursor-pointer"
+                        className="w-full sm:w-auto px-4 py-2 rounded-full bg-white hover:bg-slate-100 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md hover:scale-[1.02] cursor-pointer"
                       >
                         <ShieldCheck className="h-3.5 w-3.5 text-[#1F51FF]" />
                         <span>Merchant Portal</span>
@@ -1258,9 +1476,9 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     ) : (
                       <a
                         href="/dashboard?mode=live"
-                        className="px-4 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
+                        className="w-full sm:w-auto px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md hover:scale-[1.02]"
                       >
-                        <span className="h-2 w-2 rounded-full bg-emerald-300 animate-ping" />
+                        <span className="h-2 w-2 rounded-full bg-emerald-300 animate-pulse" />
                         <span>Live Command Center</span>
                         <ArrowRight className="h-3 w-3" />
                       </a>
@@ -1272,7 +1490,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
           </div>
 
           {/* Bottom Hero Bar */}
-          <div className="pb-10 w-full flex flex-col md:flex-row items-start md:items-end justify-between gap-6">
+          <div className="pb-8 sm:pb-10 w-full flex flex-col md:flex-row items-start md:items-end justify-between gap-5 sm:gap-6">
             <div className="max-w-md space-y-2">
               <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-snug">
                 Route payments across India in milliseconds
@@ -1282,8 +1500,8 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               </p>
             </div>
 
-            <div className="bg-black/90 backdrop-blur-md rounded-2xl p-4 border border-white/[0.1] text-xs font-mono shadow-2xl flex flex-col sm:flex-row items-center gap-4">
-              <div>
+            <div className="w-full sm:w-auto bg-black/90 backdrop-blur-md rounded-2xl p-4 border border-white/[0.1] text-xs font-mono shadow-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+              <div className="text-center sm:text-left">
                 <span className="text-[10px] text-slate-400 block uppercase">Outage Simulator</span>
                 <span className="text-white font-bold">
                   {isOutageSimulated ? '⚡ Razorpay Outage Active' : '● All Indian Rails Operational'}
@@ -1292,7 +1510,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               <button
                 onClick={() => handleToggleGateway('razorpay')}
                 disabled={togglingGateway === 'razorpay'}
-                className={`px-4 py-2 rounded-xl font-bold transition-all text-xs flex items-center gap-2 ${
+                className={`w-full sm:w-auto justify-center px-4 py-2.5 rounded-xl font-bold transition-all text-xs flex items-center gap-2 ${
                   isOutageSimulated
                     ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-[0_0_20px_rgba(16,185,129,0.4)]'
                     : 'bg-amber-400 hover:bg-amber-300 text-black shadow-[0_0_20px_rgba(251,191,36,0.4)]'
