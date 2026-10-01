@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   X,
   Play,
+  ArrowRight,
 } from 'lucide-react';
 import { supabaseAuth, ApiKeyItem, getApiKeyStatusInfo, isApiKeyExpired } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
@@ -546,262 +547,410 @@ export function ApiKeysView() {
         )}
       </div>
 
-      {/* CREATE API KEY MODAL */}
+      {/* CREATE API KEY FULL-SCREEN WORKSPACE */}
       <AnimatePresence>
         {isCreateModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="w-full max-w-lg bg-[#0E1322] border border-white/[0.12] rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-5 sm:space-y-6 relative max-h-[90vh] overflow-y-auto"
+          <div className="fixed inset-0 z-50 w-screen h-screen overflow-hidden bg-[#070A12] text-white flex flex-col lg:flex-row font-sans">
+            {/* Top Right Floating Close Button */}
+            <button
+              onClick={() => setIsCreateModalOpen(false)}
+              className="absolute top-5 right-5 z-40 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white transition-all cursor-pointer border border-white/10 backdrop-blur-md shadow-xl"
+              title="Close"
             >
-              <div className="flex items-start justify-between">
+              <X className="h-5 w-5" />
+            </button>
+
+            {/* Left Column: Full-Height Mesh Visual Artwork */}
+            <div className="hidden lg:flex lg:w-1/2 h-full relative overflow-hidden flex-col justify-between p-12 lg:p-16 bg-black select-none border-r border-white/[0.08]">
+              <img
+                src="/auth-mesh-visual.jpg"
+                alt="ESAPay API Key Provisioning Infrastructure"
+                className="absolute inset-0 w-full h-full object-cover object-center filter brightness-95 contrast-105"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#070A12] via-[#070A12]/35 to-black/55" />
+              <div className="absolute inset-0 bg-gradient-to-r from-black/25 via-transparent to-[#070A12]/90" />
+
+              <div className="relative z-10 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-[#1F51FF] to-[#0A2680] flex items-center justify-center text-white font-black text-sm lowercase shadow-xl shadow-[#1F51FF]/40 border border-white/20">
+                  esa
+                </div>
                 <div>
-                  <h3 className="font-extrabold text-lg sm:text-xl text-white flex items-center gap-2">
-                    <Key className="h-5 w-5 text-[#1F51FF]" />
-                    <span>Generate New API Key</span>
-                  </h3>
-                  <p className="text-xs text-text-secondary mt-0.5">
-                    Generate an HMAC/SHA-256 merchant credential with automated expiration.
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-2xl tracking-tight text-white font-sans lowercase">
+                      esapay
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/10 text-slate-300 border border-white/10">
+                      KEY LEDGER
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-400">
+                    HMAC-SHA256 Cryptographic Credential Engine
                   </p>
                 </div>
-                <button
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                >
-                  <X className="h-4 w-4" />
-                </button>
               </div>
 
-              <form onSubmit={handleCreateKey} className="space-y-4 font-mono text-xs">
-                {/* Key Name */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] text-text-muted uppercase tracking-wider block">
-                    Key Purpose / Name
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={keyName}
-                    onChange={(e) => setKeyName(e.target.value)}
-                    placeholder="e.g. Production Core Gateway, Mobile App SDK"
-                    className="w-full px-4 py-2.5 rounded-xl border border-white/[0.12] bg-[#141724] text-white text-xs focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                  />
+              <div className="relative z-10 space-y-4 max-w-lg">
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#1F51FF]/25 border border-[#1F51FF]/40 text-[#60A5FA] text-xs font-mono backdrop-blur-md">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Hardware Isolation • Zero Plaintext Storage</span>
                 </div>
 
-                {/* Environment Selector */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] text-text-muted uppercase tracking-wider block">
-                    Environment Mesh
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setKeyEnv('live')}
-                      className={cn(
-                        'py-2.5 px-4 rounded-xl border font-bold text-center transition-all cursor-pointer flex items-center justify-center gap-2',
-                        keyEnv === 'live'
-                          ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-400 shadow-md'
-                          : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                      <span>Live Production (`esa_live_`)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setKeyEnv('test')}
-                      className={cn(
-                        'py-2.5 px-4 rounded-xl border font-bold text-center transition-all cursor-pointer flex items-center justify-center gap-2',
-                        keyEnv === 'test'
-                          ? 'bg-amber-500/15 border-amber-500/50 text-amber-400 shadow-md'
-                          : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-amber-400" />
-                      <span>Sandbox / Test (`esa_test_`)</span>
-                    </button>
+                <h3 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-white leading-tight font-sans">
+                  Enterprise API key provisioning with automated lifecycle enforcement.
+                </h3>
+
+                <p className="text-sm text-slate-300 leading-relaxed font-sans">
+                  API secrets are cryptographically hashed using SHA-256 before persistence. Raw keys are displayed only once upon generation and never stored in plaintext.
+                </p>
+
+                <div className="flex items-center gap-4 text-xs font-mono text-slate-400 pt-3 border-t border-white/10">
+                  <span className="text-emerald-400 font-semibold">SHA-256 Hashed</span>
+                  <span className="text-white/20">•</span>
+                  <span>Configurable Expiry</span>
+                  <span className="text-white/20">•</span>
+                  <span>Instant Revocation</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Full-Height Clean Form */}
+            <div className="w-full lg:w-1/2 h-full flex flex-col justify-between p-6 sm:p-12 lg:p-16 overflow-y-auto relative bg-[#070A12]">
+              {/* Mobile Header */}
+              <div className="flex lg:hidden items-center justify-between mb-6">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-[#1F51FF] to-[#0A2680] flex items-center justify-center text-white font-black text-xs lowercase shadow-md border border-white/20">
+                    esa
                   </div>
+                  <span className="font-bold text-lg tracking-tight text-white font-sans lowercase">
+                    esapay
+                  </span>
+                  <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/10 text-slate-300">
+                    KEY GENERATOR
+                  </span>
+                </div>
+              </div>
+
+              {/* Form Content */}
+              <div className="my-auto w-full max-w-md mx-auto space-y-7 py-4">
+                <div className="space-y-1.5 text-center lg:text-left">
+                  <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white font-sans">
+                    Generate New API Key
+                  </h2>
+                  <p className="text-xs sm:text-sm text-slate-400 font-sans">
+                    Create an HMAC/SHA-256 merchant credential with automated lifecycle expiration.
+                  </p>
                 </div>
 
-                {/* Expiration Options */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] text-text-muted uppercase tracking-wider block">
-                      Validity & Expiration Schedule
+                <form onSubmit={handleCreateKey} className="space-y-5 font-sans">
+                  {/* Key Purpose / Name */}
+                  <div className="space-y-1.5 text-left">
+                    <label className="text-xs font-semibold text-slate-300 font-sans">
+                      Key Purpose / Name
                     </label>
-                    <span className="text-[10px] text-emerald-400">Enforced by Gateway</span>
+                    <input
+                      type="text"
+                      required
+                      value={keyName}
+                      onChange={(e) => setKeyName(e.target.value)}
+                      placeholder="e.g. Production Core Gateway, Mobile App SDK"
+                      className="w-full px-4 py-3 rounded-xl border border-white/10 bg-[#0E1320] text-white placeholder:text-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#1F51FF] focus:border-transparent transition-all shadow-inner font-sans"
+                    />
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2">
-                    {[
-                      { id: '7', label: '7 Days' },
-                      { id: '30', label: '30 Days' },
-                      { id: '90', label: '90 Days' },
-                      { id: '365', label: '365 Days' },
-                      { id: 'custom', label: 'Custom Days' },
-                      { id: 'forever', label: '♾️ Forever' },
-                    ].map((opt) => (
+                  {/* Environment Mesh */}
+                  <div className="space-y-1.5 text-left">
+                    <label className="text-xs font-semibold text-slate-300 font-sans">
+                      Environment Mesh
+                    </label>
+                    <div className="grid grid-cols-2 gap-2.5">
                       <button
-                        key={opt.id}
                         type="button"
-                        onClick={() => setExpiryOption(opt.id as any)}
+                        onClick={() => setKeyEnv('live')}
                         className={cn(
-                          'py-2 px-3 rounded-xl border text-[11px] font-bold transition-all cursor-pointer text-center',
-                          expiryOption === opt.id
-                            ? 'bg-[#1F51FF] text-white border-[#1F51FF] shadow-sm'
-                            : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+                          'py-3 px-4 rounded-xl border font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-2',
+                          keyEnv === 'live'
+                            ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-400 shadow-md ring-1 ring-emerald-500/30'
+                            : 'bg-[#0E1320] border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.04]'
                         )}
                       >
-                        {opt.label}
+                        <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                        <span>Live (`esa_live_`)</span>
                       </button>
-                    ))}
-                  </div>
-
-                  {expiryOption === 'custom' && (
-                    <div className="pt-1.5 flex items-center gap-2">
-                      <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        value={customDays}
-                        onChange={(e) => setCustomDays(e.target.value)}
-                        placeholder="Number of days"
-                        className="w-32 px-3 py-2 rounded-xl border border-white/[0.12] bg-[#141724] text-white text-xs focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
-                      />
-                      <span className="text-slate-400 text-xs">
-                        days until automatic expiration
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setKeyEnv('test')}
+                        className={cn(
+                          'py-3 px-4 rounded-xl border font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-2',
+                          keyEnv === 'test'
+                            ? 'bg-amber-500/15 border-amber-500/50 text-amber-400 shadow-md ring-1 ring-amber-500/30'
+                            : 'bg-[#0E1320] border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.04]'
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-amber-400" />
+                        <span>Sandbox (`esa_test_`)</span>
+                      </button>
                     </div>
-                  )}
-
-                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-[11px] text-slate-400">
-                    {expiryOption === 'forever' ? (
-                      <span className="text-blue-300 font-bold">
-                        ♾️ Key will never expire. Recommended only for permanent backend services.
-                      </span>
-                    ) : (
-                      <span>
-                        Key will expire automatically on:{' '}
-                        <strong className="text-white">
-                          {new Date(
-                            Date.now() +
-                              (expiryOption === 'custom'
-                                ? parseInt(customDays || '30', 10)
-                                : parseInt(expiryOption, 10)) *
-                                86400 *
-                                1000
-                          ).toLocaleDateString('en-IN', {
-                            day: 'numeric',
-                            month: 'long',
-                            year: 'numeric',
-                          })}
-                        </strong>
-                      </span>
-                    )}
                   </div>
-                </div>
 
-                <div className="pt-2">
-                  <button
-                    type="submit"
-                    disabled={isGenerating || !keyName.trim()}
-                    className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#1F51FF] via-[#2A5CFF] to-[#1644DF] hover:brightness-110 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-[#1F51FF]/30 transition-all cursor-pointer border border-white/20"
-                  >
-                    {isGenerating ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Check className="h-4 w-4" />
+                  {/* Validity & Expiration Schedule */}
+                  <div className="space-y-2 text-left">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-300 font-sans">
+                        Validity & Expiration Schedule
+                      </label>
+                      <span className="text-[10px] font-mono text-emerald-400">Enforced by Gateway</span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: '7', label: '7 Days' },
+                        { id: '30', label: '30 Days' },
+                        { id: '90', label: '90 Days' },
+                        { id: '365', label: '365 Days' },
+                        { id: 'custom', label: 'Custom Days' },
+                        { id: 'forever', label: '♾️ Forever' },
+                      ].map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setExpiryOption(opt.id as any)}
+                          className={cn(
+                            'py-2.5 px-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer text-center',
+                            expiryOption === opt.id
+                              ? 'bg-[#1F51FF] text-white border-[#1F51FF] shadow-sm'
+                              : 'bg-[#0E1320] border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.04]'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {expiryOption === 'custom' && (
+                      <div className="pt-1.5 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          max="3650"
+                          value={customDays}
+                          onChange={(e) => setCustomDays(e.target.value)}
+                          placeholder="Days"
+                          className="w-28 px-3 py-2 rounded-xl border border-white/10 bg-[#0E1320] text-white text-xs focus:outline-none focus:ring-2 focus:ring-[#1F51FF]"
+                        />
+                        <span className="text-slate-400 text-xs">
+                          days until automatic expiration
+                        </span>
+                      </div>
                     )}
-                    <span>Generate & Activate API Key</span>
-                  </button>
-                </div>
-              </form>
-            </motion.div>
+
+                    <div className="p-3.5 rounded-xl bg-[#0E1320] border border-white/10 text-xs text-slate-400">
+                      {expiryOption === 'forever' ? (
+                        <span className="text-blue-300 font-medium">
+                          ♾️ Key will never expire. Recommended for permanent core backend microservices.
+                        </span>
+                      ) : (
+                        <span>
+                          Key will expire automatically on:{' '}
+                          <strong className="text-white font-semibold">
+                            {new Date(
+                              Date.now() +
+                                (expiryOption === 'custom'
+                                  ? parseInt(customDays || '30', 10)
+                                  : parseInt(expiryOption, 10)) *
+                                  86400 *
+                                  1000
+                            ).toLocaleDateString('en-IN', {
+                              day: 'numeric',
+                              month: 'long',
+                              year: 'numeric',
+                            })}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Primary CTA Button */}
+                  <div className="pt-2">
+                    <button
+                      type="submit"
+                      disabled={isGenerating || !keyName.trim()}
+                      className="w-full py-3.5 px-8 rounded-full font-bold text-sm tracking-wide bg-[#FAEE1C] hover:bg-[#F3E708] text-black shadow-lg shadow-amber-400/20 hover:scale-[1.01] active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2 font-sans"
+                    >
+                      {isGenerating ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 animate-spin text-black" />
+                          <span>Generating Cryptographic Key...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>Generate & Activate API Key</span>
+                          <ArrowRight className="h-4 w-4" />
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Bottom Micro Footer */}
+              <div className="pt-6 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-500">
+                <span>Cryptographic SHA-256 Ledger</span>
+                <span>PCI-DSS 4.0 Hardware Protected</span>
+              </div>
+            </div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* ONE-TIME SECRET KEY REVEAL MODAL */}
+      {/* ONE-TIME SECRET KEY REVEAL FULL-SCREEN WORKSPACE */}
       <AnimatePresence>
         {newlyCreatedKey && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/90 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="w-full max-w-lg bg-[#0B0F19] border border-emerald-500/40 rounded-3xl p-5 sm:p-8 shadow-2xl text-white space-y-5 sm:space-y-6 relative max-h-[90vh] overflow-y-auto"
+          <div className="fixed inset-0 z-50 w-screen h-screen overflow-hidden bg-[#070A12] text-white flex flex-col lg:flex-row font-sans">
+            {/* Top Right Floating Close Button */}
+            <button
+              onClick={() => setNewlyCreatedKey(null)}
+              className="absolute top-5 right-5 z-40 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white transition-all cursor-pointer border border-white/10 backdrop-blur-md shadow-xl"
+              title="Close"
             >
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">
-                  <CheckCircle2 className="h-5 w-5" />
+              <X className="h-5 w-5" />
+            </button>
+
+            {/* Left Column: Visual Artwork */}
+            <div className="hidden lg:flex lg:w-1/2 h-full relative overflow-hidden flex-col justify-between p-12 lg:p-16 bg-black select-none border-r border-white/[0.08]">
+              <img
+                src="/auth-mesh-visual.jpg"
+                alt="ESAPay API Key Provisioning Infrastructure"
+                className="absolute inset-0 w-full h-full object-cover object-center filter brightness-95 contrast-105"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#070A12] via-[#070A12]/35 to-black/55" />
+              <div className="absolute inset-0 bg-gradient-to-r from-black/25 via-transparent to-[#070A12]/90" />
+
+              <div className="relative z-10 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-800 flex items-center justify-center text-white font-black text-sm lowercase shadow-xl shadow-emerald-500/40 border border-white/20">
+                  esa
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-lg text-white">API Key Successfully Created</h3>
-                  <p className="text-xs text-emerald-400/90 font-mono">
-                    {newlyCreatedKey.item.name} [{newlyCreatedKey.item.environment.toUpperCase()}]
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-2xl tracking-tight text-white font-sans lowercase">
+                      esapay
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      KEY ACTIVE
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-400">
+                    One-Time Plaintext Secret Reveal
                   </p>
                 </div>
               </div>
 
-              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono space-y-1">
-                <div className="flex items-center gap-2 font-bold">
-                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
-                  <span>Important Security Notice</span>
+              <div className="relative z-10 space-y-4 max-w-lg">
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-xs font-mono backdrop-blur-md">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span>Key Hash Active in Production Ledger</span>
                 </div>
-                <p className="text-[11px] leading-relaxed text-amber-200/90">
-                  Please copy and store this API secret immediately. For security reasons, ESAPay does not store raw secrets and you will not be able to view it again.
-                </p>
-              </div>
 
-              {/* Secret display box */}
-              <div className="space-y-2 font-mono">
-                <label className="text-[10px] text-slate-400 uppercase tracking-wider block">
-                  Your Full Secret API Key
-                </label>
-                <div className="p-3.5 rounded-2xl bg-[#06080E] border border-white/10 flex items-center justify-between gap-3">
-                  <span className="text-emerald-400 font-mono text-xs select-all break-all">
-                    {showRawSecret
-                      ? newlyCreatedKey.rawKey
-                      : '••••••••••••••••••••••••••••••••••••••••••••••••'}
-                  </span>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      onClick={() => setShowRawSecret(!showRawSecret)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer"
-                      title={showRawSecret ? 'Hide secret' : 'Show secret'}
-                    >
-                      {showRawSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(newlyCreatedKey.rawKey);
-                        setCopiedRawSecret(true);
-                        setTimeout(() => setCopiedRawSecret(false), 2500);
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
-                    >
-                      {copiedRawSecret ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                      <span>{copiedRawSecret ? 'Copied!' : 'Copy Key'}</span>
-                    </button>
+                <h3 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-white leading-tight font-sans">
+                  Your merchant API credential has been generated successfully.
+                </h3>
+
+                <p className="text-sm text-slate-300 leading-relaxed font-sans">
+                  Copy this key now. In accordance with zero-trust architectural standards, ESAPay stores only the SHA-256 hash. This plaintext secret will never be visible again.
+                </p>
+
+                <div className="flex items-center gap-4 text-xs font-mono text-slate-400 pt-3 border-t border-white/10">
+                  <span className="text-emerald-400 font-semibold">Immediate Availability</span>
+                  <span className="text-white/20">•</span>
+                  <span>TLS 1.3 Strict</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Key Details & Quickstart */}
+            <div className="w-full lg:w-1/2 h-full flex flex-col justify-between p-6 sm:p-12 lg:p-16 overflow-y-auto relative bg-[#070A12]">
+              {/* Center Content */}
+              <div className="my-auto w-full max-w-md mx-auto space-y-6 py-4">
+                <div className="space-y-1.5 text-center lg:text-left">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-mono mb-2">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>{newlyCreatedKey.item.name} • [{newlyCreatedKey.item.environment.toUpperCase()}]</span>
+                  </div>
+                  <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white font-sans">
+                    API Key Created
+                  </h2>
+                  <p className="text-xs sm:text-sm text-slate-400 font-sans">
+                    Save this key securely. It cannot be recovered once this screen is dismissed.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-sans space-y-1">
+                  <div className="flex items-center gap-2 font-bold">
+                    <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                    <span>One-Time Security Notice</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-amber-200/90 font-sans">
+                    Store this key in your environment variables or secret manager. It will not be shown again.
+                  </p>
+                </div>
+
+                {/* Secret display box */}
+                <div className="space-y-2 font-mono">
+                  <label className="text-xs font-semibold text-slate-300 font-sans block">
+                    Your Secret API Key
+                  </label>
+                  <div className="p-4 rounded-2xl bg-[#0E1320] border border-white/10 flex items-center justify-between gap-3">
+                    <span className="text-emerald-400 font-mono text-xs select-all break-all">
+                      {showRawSecret
+                        ? newlyCreatedKey.rawKey
+                        : '••••••••••••••••••••••••••••••••••••••••••••••••'}
+                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => setShowRawSecret(!showRawSecret)}
+                        className="p-2 rounded-xl text-slate-400 hover:text-white transition-colors cursor-pointer hover:bg-white/5"
+                        title={showRawSecret ? 'Hide secret' : 'Show secret'}
+                      >
+                        {showRawSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(newlyCreatedKey.rawKey);
+                          setCopiedRawSecret(true);
+                          setTimeout(() => setCopiedRawSecret(false), 2500);
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
+                      >
+                        {copiedRawSecret ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        <span>{copiedRawSecret ? 'Copied!' : 'Copy Key'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
+
+                {/* Quick CLI Test command */}
+                <div className="p-4 rounded-2xl bg-[#0E1320] border border-white/10 text-xs font-mono space-y-1.5 text-slate-300">
+                  <span className="text-slate-400 block text-[11px] font-sans">Terminal CLI Test:</span>
+                  <div className="p-2.5 rounded-xl bg-[#070A12] border border-white/5 text-[11px] select-all overflow-x-auto text-[#60A5FA]">
+                    <code>npx esapay-cli --key {newlyCreatedKey.rawKey.substring(0, 18)}... status</code>
+                  </div>
+                </div>
+
+                {/* Done Button */}
+                <button
+                  onClick={() => setNewlyCreatedKey(null)}
+                  className="w-full py-3.5 px-8 rounded-full font-bold text-sm tracking-wide bg-[#FAEE1C] hover:bg-[#F3E708] text-black shadow-lg shadow-amber-400/20 hover:scale-[1.01] active:scale-[0.99] transition-all cursor-pointer font-sans"
+                >
+                  I have securely saved my key (Done)
+                </button>
               </div>
 
-              {/* Quick CLI usage */}
-              <div className="p-3.5 rounded-2xl bg-[#141724] border border-white/[0.08] text-[11px] font-mono space-y-1 text-slate-300">
-                <span className="text-slate-400 block text-[10px] uppercase">Quick CLI Test Command:</span>
-                <code>npx esapay-cli --key {newlyCreatedKey.rawKey.substring(0, 16)}... status</code>
+              {/* Bottom Micro Footer */}
+              <div className="pt-6 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-500">
+                <span>Cryptographic SHA-256 Ledger</span>
+                <span>Ready for live traffic</span>
               </div>
-
-              <button
-                onClick={() => setNewlyCreatedKey(null)}
-                className="w-full py-3 rounded-2xl bg-white/10 hover:bg-white/15 text-white font-bold text-xs font-mono transition-colors cursor-pointer"
-              >
-                I have securely saved my key
-              </button>
-            </motion.div>
+            </div>
           </div>
         )}
       </AnimatePresence>
