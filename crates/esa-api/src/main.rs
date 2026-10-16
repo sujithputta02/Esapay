@@ -101,12 +101,13 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
 
     // 1. Syntax / validity check for ESA_ENABLE_SIMULATED_CHECKOUT
     let mut explicit_sim_opt_in = false;
+    let mut explicit_sim_disabled = false;
     if let Some(ref val) = sim_flag {
         let v = val.to_ascii_lowercase();
         if v == "true" || v == "1" || v == "yes" || v == "on" {
             explicit_sim_opt_in = true;
         } else if v == "false" || v == "0" || v == "no" || v == "off" {
-            explicit_sim_opt_in = false;
+            explicit_sim_disabled = true;
         } else {
             return PaymentCheckoutMode::Misconfigured(format!(
                 "Invalid ESA_ENABLE_SIMULATED_CHECKOUT value '{}'. Expected 'true' or 'false'.",
@@ -199,12 +200,36 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
         };
     }
 
-    // 6. SIMULATION OPT-IN CHECK
+    // 6. CONFLICT CHECK: Detect contradictory non-live configurations
+    if explicit_sim_disabled {
+        let mut conflicting = Vec::new();
+        if esa_mode_sim {
+            conflicting.push(format!(
+                "ESA_PAYMENT_MODE='{}'",
+                esa_mode.as_deref().unwrap_or_default()
+            ));
+        }
+        if env_sim {
+            conflicting.push(format!(
+                "ENVIRONMENT='{}'",
+                env_mode.as_deref().unwrap_or_default()
+            ));
+        }
+        if !conflicting.is_empty() {
+            return PaymentCheckoutMode::Misconfigured(format!(
+                "Conflicting payment mode configuration: ESA_ENABLE_SIMULATED_CHECKOUT is explicitly disabled ('{}'), but {} requested sandbox/simulation mode.",
+                sim_flag.as_deref().unwrap_or_default(),
+                conflicting.join(" and ")
+            ));
+        }
+    }
+
+    // 7. SIMULATION OPT-IN CHECK
     if explicit_sim_opt_in || esa_mode_sim || env_sim {
         return PaymentCheckoutMode::Simulated;
     }
 
-    // 7. Missing/Unconfigured mode -> Fail safely
+    // 8. Missing/Unconfigured mode -> Fail safely
     PaymentCheckoutMode::Unconfigured
 }
 
@@ -3676,6 +3701,56 @@ mod integration_tests {
             clear_mode_env_vars();
         }
 
+        // 2b. Explicitly contradictory configurations fail safely with 400 BAD REQUEST
+        {
+            let conflict_cases: &[&[(&str, &str)]] = &[
+                &[
+                    ("ESA_ENABLE_SIMULATED_CHECKOUT", "false"),
+                    ("ESA_PAYMENT_MODE", "sandbox"),
+                ],
+                &[
+                    ("ESA_ENABLE_SIMULATED_CHECKOUT", "false"),
+                    ("ENVIRONMENT", "sandbox"),
+                ],
+                &[
+                    ("ESA_ENABLE_SIMULATED_CHECKOUT", "false"),
+                    ("ESA_PAYMENT_MODE", "sandbox"),
+                    ("ENVIRONMENT", "sandbox"),
+                ],
+            ];
+
+            for case in conflict_cases {
+                clear_mode_env_vars();
+                for (var, val) in *case {
+                    std::env::set_var(var, val);
+                }
+
+                let state = create_test_state();
+                let app = build_app(state);
+
+                let resp = app.oneshot(make_checkout_req()).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "Conflicting mode case {:?} must cause 400 Bad Request",
+                    case
+                );
+                let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                    .await
+                    .unwrap();
+                let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(
+                    resp_json.get("error").and_then(|v| v.as_str()),
+                    Some("payment_mode_misconfigured")
+                );
+                assert_eq!(
+                    resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                    Some(false)
+                );
+            }
+            clear_mode_env_vars();
+        }
+
         // 3. Production mode via ENVIRONMENT=production & ESA_PAYMENT_MODE=live fails with 501 NOT IMPLEMENTED
         {
             for (var, val) in [("ENVIRONMENT", "production"), ("ESA_PAYMENT_MODE", "live")] {
@@ -3888,6 +3963,63 @@ mod integration_tests {
         ));
         assert!(is_production_mode());
         assert!(!is_demo_mutation_allowed());
+
+        // Explicitly contradictory configurations -> PaymentCheckoutMode::Misconfigured
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "false");
+        std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Misconfigured(_)
+        ));
+        assert!(is_production_mode());
+        assert!(!is_demo_mutation_allowed());
+
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "false");
+        std::env::set_var("ENVIRONMENT", "sandbox");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Misconfigured(_)
+        ));
+        assert!(is_production_mode());
+        assert!(!is_demo_mutation_allowed());
+
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "false");
+        std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
+        std::env::set_var("ENVIRONMENT", "sandbox");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Misconfigured(_)
+        ));
+
+        // Various representations of false/0/no/off with sandbox -> Misconfigured
+        for false_val in ["0", "no", "off"] {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", false_val);
+            std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
+            assert!(matches!(
+                detect_checkout_mode(),
+                PaymentCheckoutMode::Misconfigured(_)
+            ));
+        }
+
+        // False alone without sandbox/live -> Unconfigured
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "false");
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Unconfigured);
+        assert!(!is_production_mode());
+        assert!(!is_demo_mutation_allowed());
+
+        // Multiple harmonious sandbox opt-ins -> Simulated
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
+        std::env::set_var("ENVIRONMENT", "sandbox");
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Simulated);
+        assert!(!is_production_mode());
+        assert!(is_demo_mutation_allowed());
 
         clear_mode_env_vars();
     }
