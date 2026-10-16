@@ -126,7 +126,7 @@ esapay login --guest
 ### 3. Direct API Key Login
 Store your production (`esa_live_...`) or sandbox (`esa_test_...`) key directly:
 ```bash
-esapay login --key esa_live_9f82b71c04a2d8e3
+esapay login --key esa_test_demo_sample_key
 ```
 
 ### 4. Session Identity (`whoami`)
@@ -140,8 +140,8 @@ esapay whoami
   ⚡ ESAPay CLI — Authenticated Merchant Session
 ================================================================================
   Merchant User:  merchant@company.com
-  Environment:    live (Production)
-  Active Key:     esa_live_9f82b... [REDACTED]
+  Environment:    test (Sandbox)
+  Active Key:     esa_test_demo_... [REDACTED]
   API Endpoint:   https://esapay-api.onrender.com
   Config File:    ~/.esa/credentials.json
 ```
