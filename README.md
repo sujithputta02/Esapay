@@ -20,6 +20,22 @@
 
 ---
 
+## Help make Esapay better
+
+Esapay is an open-source experiment in safer payment-infrastructure resilience. I’m looking for developers to **try it, review the design, report edge cases, improve the docs, and send pull requests**. You do not need to understand the whole codebase to start.
+
+**A few concrete ways to help:**
+
+- 🧭 [Verify the quick start on a clean machine](https://github.com/sujithputta02/Esapay/issues/13) — report missing steps or setup failures.
+- 🧪 [Add reproducible payment-rail failure scenarios](https://github.com/sujithputta02/Esapay/issues/14) — latency spikes, intermittent errors, and unavailable rails.
+- 🛡️ [Improve safe timeout handling examples for the SDKs](https://github.com/sujithputta02/Esapay/issues/15) — especially avoiding unsafe retries when a payment outcome is unknown.
+
+**How to join in:** open an issue with a reproducible bug or suggestion, comment on a task before starting a larger change, or submit a focused pull request. See the [contributor guide](CONTRIBUTING.md). Testing and constructive criticism are just as valuable as new code.
+
+> **Scope note:** Esapay's published benchmarks use simulated workloads. It is not a production payment processor and does not claim PCI-DSS certification or RBI authorization. Please use sandbox/local simulations only when testing.
+
+---
+
 ### Instant Install & Try
 
 | Target | Package | Install Command | Quick Run |
