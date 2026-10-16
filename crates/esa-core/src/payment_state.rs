@@ -52,6 +52,13 @@ pub enum PaymentError {
         event: String,
         reason: String,
     },
+
+    #[error("Unsupported combination: gateway '{provider}' does not support currency '{currency}' with payment method '{method}'.")]
+    UnsupportedProviderCurrencyMethod {
+        provider: String,
+        currency: String,
+        method: String,
+    },
 }
 
 /// Universally valid ISO-4217 Currency Metadata.
@@ -249,6 +256,54 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires HK$4.00 HKD minimum charge due to higher fixed processing fee floor in Hong Kong.",
     },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "INR",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 paise (₹0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of ₹0.50 INR (50 paise) for card and cross-border processing.",
+    },
+    ProviderMinimumPolicy {
+        provider: "phonepe",
+        currency: "INR",
+        payment_method: "all",
+        minimum_amount_minor: 100, // 100 paise (₹1.00)
+        source: "PhonePe PG Developer Documentation (https://developer.phonepe.com/v1/reference/standard-pay-api)",
+        policy_justification: "PhonePe enforces a minimum transaction amount of 100 paise (₹1.00) for UPI and card checkouts.",
+    },
+    ProviderMinimumPolicy {
+        provider: "cashfree",
+        currency: "INR",
+        payment_method: "all",
+        minimum_amount_minor: 100, // 100 paise (₹1.00)
+        source: "Cashfree Payment Gateway API Documentation (https://docs.cashfree.com/reference/createorder)",
+        policy_justification: "Cashfree requires a minimum order value of 100 paise (₹1.00) for domestic transaction routing.",
+    },
+    ProviderMinimumPolicy {
+        provider: "paytm",
+        currency: "INR",
+        payment_method: "all",
+        minimum_amount_minor: 100, // 100 paise (₹1.00)
+        source: "Paytm Payment Gateway Documentation (https://developer.paytm.com/docs/v1/api/initiate-transaction-api/)",
+        policy_justification: "Paytm requires a minimum transaction amount of 100 paise (₹1.00) for UPI and wallet processing.",
+    },
+    ProviderMinimumPolicy {
+        provider: "adyen",
+        currency: "USD",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 cents ($0.50)
+        source: "Adyen Payments Documentation (https://docs.adyen.com/online-payments/build-your-integration/)",
+        policy_justification: "Adyen enforces a minimum ticket size of $0.50 USD to cover acquirer scheme processing minimums.",
+    },
+    ProviderMinimumPolicy {
+        provider: "adyen",
+        currency: "EUR",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 euro cents (€0.50)
+        source: "Adyen Payments Documentation (https://docs.adyen.com/online-payments/build-your-integration/)",
+        policy_justification: "Adyen enforces a minimum ticket size of €0.50 EUR across SEPA card and domestic rails.",
+    },
 ];
 
 /// Validated ISO-4217 Currency representation backed by the supported currency registry.
@@ -338,19 +393,25 @@ impl Currency {
 
     /// Look up minimum transaction amount for a specific payment provider and method.
     /// Evaluates provider- and payment-method-specific requirements without conflating them
-    /// with generic currency minimums.
-    pub fn minimum_amount_for_provider(&self, provider: &str, method: Option<&str>) -> u64 {
+    /// with generic currency minimums. Returns `PaymentError::UnsupportedProviderCurrencyMethod`
+    /// if the combination is not supported by any configured provider policy.
+    pub fn minimum_amount_for_provider(
+        &self,
+        provider: &str,
+        method: Option<&str>,
+    ) -> Result<u64, PaymentError> {
         let p_clean = provider.trim().to_lowercase();
         let m_clean = method.unwrap_or("").trim().to_lowercase();
 
-        // 1. Specific match: provider + currency + specific payment_method
+        // 1. Specific match: provider + currency + specific payment_method (or provider policy covering "all" methods)
         if !m_clean.is_empty() && m_clean != "all" {
             if let Some(p) = PROVIDER_MINIMUM_POLICIES.iter().find(|p| {
                 p.currency == self.0
                     && p.provider.eq_ignore_ascii_case(&p_clean)
-                    && p.payment_method.eq_ignore_ascii_case(&m_clean)
+                    && (p.payment_method.eq_ignore_ascii_case(&m_clean)
+                        || p.payment_method == "all")
             }) {
-                return p.minimum_amount_minor;
+                return Ok(p.minimum_amount_minor);
             }
         }
 
@@ -360,7 +421,7 @@ impl Currency {
                 && p.provider.eq_ignore_ascii_case(&p_clean)
                 && p.payment_method == "all"
         }) {
-            return p.minimum_amount_minor;
+            return Ok(p.minimum_amount_minor);
         }
 
         // 3. Provider primary match: if method is unspecified ("" or "all"), check if provider has a primary policy for that currency
@@ -369,12 +430,21 @@ impl Currency {
                 .iter()
                 .find(|p| p.currency == self.0 && p.provider.eq_ignore_ascii_case(&p_clean))
             {
-                return p.minimum_amount_minor;
+                return Ok(p.minimum_amount_minor);
             }
         }
 
-        // 4. Fallback to generic currency baseline (does NOT infer method-specific floors)
-        self.default_minimum_amount_minor()
+        // 4. Do not silently apply a generic fallback for unsupported provider/currency/method combinations!
+        // Explicitly distinguish supported combinations from unsupported ones.
+        Err(PaymentError::UnsupportedProviderCurrencyMethod {
+            provider: provider.to_string(),
+            currency: self.0.clone(),
+            method: if m_clean.is_empty() {
+                "all".to_string()
+            } else {
+                m_clean
+            },
+        })
     }
 }
 
@@ -412,7 +482,7 @@ impl PaymentAmount {
         payment_method: Option<&str>,
     ) -> Result<Self, PaymentError> {
         let currency = Currency::new(currency_code)?;
-        let min_amount = currency.minimum_amount_for_provider(provider, payment_method);
+        let min_amount = currency.minimum_amount_for_provider(provider, payment_method)?;
         if amount_minor < min_amount {
             return Err(PaymentError::AmountBelowMinimum {
                 amount_minor,
@@ -1417,18 +1487,76 @@ mod tests {
         // Provider policies separate with verified sources
         let rzp_min = Currency::new("INR")
             .unwrap()
-            .minimum_amount_for_provider("razorpay", Some("upi"));
+            .minimum_amount_for_provider("razorpay", Some("upi"))
+            .unwrap();
         assert_eq!(rzp_min, 100);
 
         let stripe_usd_min = Currency::new("USD")
             .unwrap()
-            .minimum_amount_for_provider("stripe", Some("card"));
+            .minimum_amount_for_provider("stripe", Some("card"))
+            .unwrap();
         assert_eq!(stripe_usd_min, 50);
 
         let stripe_hkd_min = Currency::new("HKD")
             .unwrap()
-            .minimum_amount_for_provider("stripe", Some("card"));
+            .minimum_amount_for_provider("stripe", Some("card"))
+            .unwrap();
         assert_eq!(stripe_hkd_min, 400);
+
+        let stripe_inr_min = Currency::new("INR")
+            .unwrap()
+            .minimum_amount_for_provider("stripe", Some("card"))
+            .unwrap();
+        assert_eq!(stripe_inr_min, 50); // 50 paise = ₹0.50 per official Stripe doc
+
+        let stripe_aed_min = Currency::new("AED")
+            .unwrap()
+            .minimum_amount_for_provider("stripe", Some("card"))
+            .unwrap();
+        assert_eq!(stripe_aed_min, 200); // 200 fils = 2.00 AED preserved
+
+        let phonepe_min = Currency::new("INR")
+            .unwrap()
+            .minimum_amount_for_provider("phonepe", Some("upi"))
+            .unwrap();
+        assert_eq!(phonepe_min, 100);
+
+        // Unsupported combinations must be explicitly rejected with UnsupportedProviderCurrencyMethod
+        let unsupp_rzp_usd = Currency::new("USD")
+            .unwrap()
+            .minimum_amount_for_provider("razorpay", Some("card"));
+        assert_eq!(
+            unsupp_rzp_usd,
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "razorpay".to_string(),
+                currency: "USD".to_string(),
+                method: "card".to_string(),
+            })
+        );
+
+        let unsupp_stripe_upi = Currency::new("INR")
+            .unwrap()
+            .minimum_amount_for_provider("stripe", Some("upi"));
+        assert_eq!(
+            unsupp_stripe_upi,
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "stripe".to_string(),
+                currency: "INR".to_string(),
+                method: "upi".to_string(),
+            })
+        );
+
+        let unsupp_gw = Currency::new("INR")
+            .unwrap()
+            .minimum_amount_for_provider("unregistered_gateway", None);
+        assert_eq!(
+            unsupp_gw,
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "unregistered_gateway".to_string(),
+                currency: "INR".to_string(),
+                method: "all".to_string(),
+            })
+        );
 
         // Every provider policy must have a non-empty source citation and policy justification
         for policy in PROVIDER_MINIMUM_POLICIES {
@@ -1564,16 +1692,24 @@ mod tests {
             PaymentAmount::new_with_provider_policy(401, "HKD", "stripe", Some("card")).is_ok()
         );
 
-        // Invariant: Method-specific requirements are NOT inferred for other methods
-        // Non-card payment methods on Stripe or other providers do not inherit the card minimum
-        assert!(PaymentAmount::new_with_provider_policy(
-            10,
-            "USD",
-            "stripe",
-            Some("bank_transfer")
-        )
-        .is_ok());
-        assert!(PaymentAmount::new_with_provider_policy(10, "USD", "custom_gateway", None).is_ok());
+        // Invariant: Unsupported provider/currency/method combinations are explicitly rejected
+        // Non-card payment methods on Stripe or unregistered providers do NOT silently fall back
+        assert_eq!(
+            PaymentAmount::new_with_provider_policy(10, "USD", "stripe", Some("bank_transfer")),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "stripe".to_string(),
+                currency: "USD".to_string(),
+                method: "bank_transfer".to_string(),
+            })
+        );
+        assert_eq!(
+            PaymentAmount::new_with_provider_policy(10, "USD", "custom_gateway", None),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "custom_gateway".to_string(),
+                currency: "USD".to_string(),
+                method: "all".to_string(),
+            })
+        );
 
         // resolve_from_all_inputs_with_provider wire compatibility
         let resolved = PaymentAmount::resolve_from_all_inputs_with_provider(

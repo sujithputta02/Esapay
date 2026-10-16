@@ -1989,9 +1989,8 @@ struct UniversalCheckoutRequest {
     currency: String,
     #[serde(default = "default_gateway")]
     gateway: String,
-    #[allow(dead_code)]
-    #[serde(default = "default_method")]
-    method: String,
+    #[serde(default)]
+    method: Option<String>,
     #[allow(dead_code)]
     customer_id: Option<String>,
 }
@@ -2001,9 +2000,6 @@ fn default_currency() -> String {
 }
 fn default_gateway() -> String {
     "auto".to_string()
-}
-fn default_method() -> String {
-    "UPI".to_string()
 }
 
 async fn list_gateways(State(state): State<AppState>) -> Json<Vec<GatewayHealth>> {
@@ -2271,7 +2267,7 @@ async fn universal_checkout(
         req.amount_cents,
         Some(&req.currency),
         routed.as_str(),
-        Some(&req.method),
+        req.method.as_deref(),
     ) {
         Ok(amt) => amt,
         Err(esa_core::PaymentError::ConflictingAmountInputs {
@@ -2300,7 +2296,23 @@ async fn universal_checkout(
                     "error": "amount_below_minimum",
                     "message": format!(
                         "Amount {} is below minimum required {} minor units for provider '{}' currency {} (method: '{}')",
-                        amount_minor, minimum_required, routed.as_str(), currency, req.method
+                        amount_minor, minimum_required, routed.as_str(), currency, req.method.as_deref().unwrap_or("default")
+                    )
+                })),
+            ));
+        }
+        Err(esa_core::PaymentError::UnsupportedProviderCurrencyMethod {
+            provider,
+            currency,
+            method,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "unsupported_provider_currency_method",
+                    "message": format!(
+                        "Gateway '{}' does not support currency '{}' with payment method '{}'",
+                        provider, currency, method
                     )
                 })),
             ));
@@ -2325,41 +2337,52 @@ async fn universal_checkout(
         }
     };
 
+    let is_prod = is_production_mode();
+
+    // In production/live mode, fail explicitly until real upstream payment gateway order creation is implemented.
+    // Do NOT return a successful fake-checkout response or falsely imply payment authorization!
+    if is_prod {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "live_checkout_not_implemented",
+                "message": "Live gateway order creation is not yet connected to upstream payment networks. Real transactions are disabled in production mode until gateway order integration is deployed.",
+                "is_simulated": false
+            })),
+        ));
+    }
+
     let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
     let checkout_url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
 
-    let is_prod = is_production_mode();
-
     // In demo/sandbox mode, ingest a simulated telemetry event into StateFabric so demonstration dashboards animate.
-    // In live/production mode, DO NOT falsely report a payment as authorized or captured!
-    if !is_prod {
-        let payment_event = PaymentEvent {
-            event_id: tx_id.clone(),
-            event_type: PaymentEventType::PaymentAuthorized,
-            timestamp: chrono::Utc::now(),
-            region: match routed {
-                PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
-                    Region::IndiaSouth
-                }
-                PaymentGateway::Paytm => Region::IndiaNorth,
-                _ => Region::IndiaWest,
-            },
-            payment_method_class: match req.method.to_lowercase().as_str() {
-                "card" => PaymentMethodClass::Card,
-                "netbanking" => PaymentMethodClass::NetBanking,
-                "wallet" => PaymentMethodClass::Wallet,
-                _ => PaymentMethodClass::Upi,
-            },
-            pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
-            amount_cents: Some(resolved_amount.amount_minor),
-            amount_minor: Some(resolved_amount.amount_minor),
-            currency: resolved_amount.currency.clone(),
-            processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
-            success: true,
-        };
-        let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
-        publish_payment_side_effects(&state, &apply_res);
-    }
+    let payment_event = PaymentEvent {
+        event_id: tx_id.clone(),
+        event_type: PaymentEventType::PaymentAuthorized,
+        timestamp: chrono::Utc::now(),
+        region: match routed {
+            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
+                Region::IndiaSouth
+            }
+            PaymentGateway::Paytm => Region::IndiaNorth,
+            _ => Region::IndiaWest,
+        },
+        payment_method_class: match req.method.as_deref().unwrap_or("").to_lowercase().as_str() {
+            "card" => PaymentMethodClass::Card,
+            "netbanking" => PaymentMethodClass::NetBanking,
+            "wallet" => PaymentMethodClass::Wallet,
+            _ if !req.currency.eq_ignore_ascii_case("INR") => PaymentMethodClass::Card,
+            _ => PaymentMethodClass::Upi,
+        },
+        pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
+        amount_cents: Some(resolved_amount.amount_minor),
+        amount_minor: Some(resolved_amount.amount_minor),
+        currency: resolved_amount.currency.clone(),
+        processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
+        success: true,
+    };
+    let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+    publish_payment_side_effects(&state, &apply_res);
 
     Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
@@ -2371,7 +2394,7 @@ async fn universal_checkout(
         failover_triggered: failover,
         routing_reason: reason,
         checkout_url,
-        is_simulated: !is_prod,
+        is_simulated: true,
         timestamp: chrono::Utc::now(),
     }))
 }
@@ -2889,6 +2912,30 @@ mod integration_tests {
                 minimum: 100,
             },
             PolicyCase {
+                gateway: "phonepe",
+                currency: "INR",
+                method: "upi",
+                minimum: 100,
+            },
+            PolicyCase {
+                gateway: "cashfree",
+                currency: "INR",
+                method: "upi",
+                minimum: 100,
+            },
+            PolicyCase {
+                gateway: "paytm",
+                currency: "INR",
+                method: "upi",
+                minimum: 100,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "INR",
+                method: "card",
+                minimum: 50, // 50 paise = ₹0.50
+            },
+            PolicyCase {
                 gateway: "stripe",
                 currency: "USD",
                 method: "card",
@@ -2922,7 +2969,7 @@ mod integration_tests {
                 gateway: "stripe",
                 currency: "AED",
                 method: "card",
-                minimum: 200,
+                minimum: 200, // AED 2.00 preserved
             },
             PolicyCase {
                 gateway: "stripe",
@@ -2947,6 +2994,18 @@ mod integration_tests {
                 currency: "HKD",
                 method: "card",
                 minimum: 400,
+            },
+            PolicyCase {
+                gateway: "adyen",
+                currency: "USD",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "adyen",
+                currency: "EUR",
+                method: "card",
+                minimum: 50,
             },
         ];
 
@@ -3055,13 +3114,86 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_checkout_unsupported_provider_currency_method_rejected() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-unsupp-key");
+
+        let state = create_test_state();
+
+        // 1. Razorpay with USD (Razorpay only supports domestic INR in ESA)
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "USD",
+                "gateway": "razorpay",
+                "method": "card",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-unsupp-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 2. Stripe with unsupported UPI method
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "stripe",
+                "method": "upi",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-unsupp-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
     async fn test_checkout_simulation_vs_production_mode() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
         std::env::set_var("ESA_TEST_API_KEY", "test-sim-prod-key");
 
-        // 1. Sandbox / Demo mode: response indicates is_simulated: true
+        // 1. Sandbox / Demo mode: response indicates is_simulated: true, status 200 OK
         {
             std::env::remove_var("ENVIRONMENT");
+            std::env::remove_var("RAZORPAY_MODE");
             let state = create_test_state();
             let app = build_app(state);
 
@@ -3093,9 +3225,10 @@ mod integration_tests {
             );
         }
 
-        // 2. Production mode: response indicates is_simulated: false, no fake PaymentAuthorized emission
+        // 2. Production mode via ENVIRONMENT=production: fails explicitly with 501 NOT IMPLEMENTED, is_simulated: false
         {
             std::env::set_var("ENVIRONMENT", "production");
+            std::env::remove_var("RAZORPAY_MODE");
             let state = create_test_state();
             let app = build_app(state);
 
@@ -3116,16 +3249,60 @@ mod integration_tests {
                 .unwrap();
 
             let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
             let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
                 .await
                 .unwrap();
             let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             assert_eq!(
+                resp_json.get("error").and_then(|v| v.as_str()),
+                Some("live_checkout_not_implemented")
+            );
+            assert_eq!(
                 resp_json.get("is_simulated").and_then(|v| v.as_bool()),
                 Some(false)
             );
             std::env::remove_var("ENVIRONMENT");
+        }
+
+        // 3. Live mode via RAZORPAY_MODE=live: fails explicitly with 501 NOT IMPLEMENTED, is_simulated: false
+        {
+            std::env::remove_var("ENVIRONMENT");
+            std::env::set_var("RAZORPAY_MODE", "live");
+            let state = create_test_state();
+            let app = build_app(state);
+
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "upi",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-sim-prod-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                resp_json.get("error").and_then(|v| v.as_str()),
+                Some("live_checkout_not_implemented")
+            );
+            assert_eq!(
+                resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+            std::env::remove_var("RAZORPAY_MODE");
         }
 
         std::env::remove_var("ESA_TEST_API_KEY");
