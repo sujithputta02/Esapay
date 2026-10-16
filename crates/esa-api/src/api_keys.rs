@@ -171,6 +171,14 @@ pub struct CachedVerificationKey {
     pub algorithm: Algorithm,
 }
 
+impl std::fmt::Debug for CachedVerificationKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedVerificationKey")
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
+}
+
 /// Thread-safe bounded cache for Supabase JWKS keys with TTL and cooldown
 #[derive(Clone)]
 pub struct JwksKeyCache {
@@ -182,6 +190,38 @@ pub struct JwksKeyCache {
     jwks_url: Option<String>,
 }
 
+fn fetch_jwks_endpoint(endpoint: &str, timeout: Duration) -> Result<String, AuthError> {
+    let endpoint = endpoint.to_string();
+    let runner = move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| {
+                AuthError::KeyDiscoveryFailed(format!("HTTP client build failed: {}", e))
+            })?;
+        let resp = client.get(&endpoint).send().map_err(|e| {
+            AuthError::KeyDiscoveryFailed(format!("Failed to fetch JWKS from endpoint: {}", e))
+        })?;
+        if !resp.status().is_success() {
+            return Err(AuthError::KeyDiscoveryFailed(format!(
+                "JWKS endpoint returned HTTP status {}",
+                resp.status()
+            )));
+        }
+        resp.text().map_err(|e| {
+            AuthError::KeyDiscoveryFailed(format!("Failed to read JWKS response body: {}", e))
+        })
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(runner)
+            .join()
+            .map_err(|_| AuthError::KeyDiscoveryFailed("JWKS fetch thread panicked".to_string()))?
+    } else {
+        runner()
+    }
+}
+
 impl Default for JwksKeyCache {
     fn default() -> Self {
         Self::new()
@@ -190,12 +230,21 @@ impl Default for JwksKeyCache {
 
 impl JwksKeyCache {
     pub fn new() -> Self {
+        let ttl_secs = std::env::var("SUPABASE_JWKS_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600); // 10 minutes TTL
+        let cooldown_secs = std::env::var("SUPABASE_JWKS_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10); // 10 seconds cooldown between network refreshes
+
         Self {
             keys: Arc::new(RwLock::new(HashMap::new())),
             last_fetched: Arc::new(RwLock::new(None)),
             last_attempt: Arc::new(RwLock::new(None)),
-            ttl: Duration::from_secs(3600),   // 1 hour TTL
-            cooldown: Duration::from_secs(5), // 5 seconds between network refreshes
+            ttl: Duration::from_secs(ttl_secs),
+            cooldown: Duration::from_secs(cooldown_secs),
             jwks_url: None,
         }
     }
@@ -217,9 +266,19 @@ impl JwksKeyCache {
         self
     }
 
+    #[cfg(test)]
+    pub fn expire_cache_for_test(&self) {
+        *self.last_fetched.write() = Some(Instant::now() - self.ttl - Duration::from_secs(1));
+    }
+
+    #[cfg(test)]
+    pub fn clear_cooldown_for_test(&self) {
+        *self.last_attempt.write() = None;
+    }
+
     pub fn load_jwk_set(&self, set: &JwkSet) -> Result<usize, AuthError> {
         let mut count = 0;
-        let mut map = self.keys.write();
+        let mut new_map = HashMap::new();
         for jwk in &set.keys {
             let alg = match jwk.common.key_algorithm {
                 Some(KeyAlgorithm::RS256) => Algorithm::RS256,
@@ -232,7 +291,7 @@ impl JwksKeyCache {
             };
             if let Ok(decoding_key) = DecodingKey::from_jwk(jwk) {
                 let kid = jwk.common.key_id.clone().unwrap_or_default();
-                map.insert(
+                new_map.insert(
                     kid,
                     CachedVerificationKey {
                         decoding_key,
@@ -242,6 +301,14 @@ impl JwksKeyCache {
                 count += 1;
             }
         }
+        if count == 0 && !set.keys.is_empty() {
+            return Err(AuthError::KeyDiscoveryFailed(
+                "JWKS set contained keys but none had supported algorithms or valid formats"
+                    .to_string(),
+            ));
+        }
+        // Atomically replace active key set, removing old keys not present in new set
+        *self.keys.write() = new_map;
         *self.last_fetched.write() = Some(Instant::now());
         Ok(count)
     }
@@ -276,40 +343,45 @@ impl JwksKeyCache {
         let target_kid = kid.unwrap_or("").trim();
         let now = Instant::now();
 
-        // 1. Check in-memory cache
-        {
-            let keys = self.keys.read();
-            let is_fresh = self
-                .last_fetched
-                .read()
-                .map(|t| now.duration_since(t) < self.ttl)
-                .unwrap_or(false);
+        // 1. Check in-memory cache if and only if the cache is currently fresh (within TTL)
+        let is_fresh = self
+            .last_fetched
+            .read()
+            .map(|t| now.duration_since(t) < self.ttl)
+            .unwrap_or(false);
 
-            if is_fresh || !keys.is_empty() {
-                if !target_kid.is_empty() {
-                    if let Some(key) = keys.get(target_kid) {
-                        if key.algorithm == target_alg {
-                            return Ok(key.clone());
-                        } else {
-                            return Err(AuthError::UnsupportedAlgorithm(format!(
-                                "Key ID '{}' configured with algorithm {:?}, but token requires {:?}",
-                                target_kid, key.algorithm, target_alg
-                            )));
-                        }
-                    }
-                } else {
-                    let matching: Vec<_> = keys
-                        .values()
-                        .filter(|k| k.algorithm == target_alg)
-                        .collect();
-                    if matching.len() == 1 {
-                        return Ok(matching[0].clone());
+        if is_fresh {
+            let keys = self.keys.read();
+            if !target_kid.is_empty() {
+                if let Some(key) = keys.get(target_kid) {
+                    if key.algorithm == target_alg {
+                        return Ok(key.clone());
+                    } else {
+                        return Err(AuthError::UnsupportedAlgorithm(format!(
+                            "Key ID '{}' configured with algorithm {:?}, but token requires {:?}",
+                            target_kid, key.algorithm, target_alg
+                        )));
                     }
                 }
+                // target_kid not found in fresh cache: key might have rotated remotely, proceed to refresh
+            } else {
+                let matching: Vec<_> = keys
+                    .values()
+                    .filter(|k| k.algorithm == target_alg)
+                    .collect();
+                if matching.len() == 1 {
+                    return Ok(matching[0].clone());
+                } else if matching.len() > 1 {
+                    return Err(AuthError::UnknownKeyId(format!(
+                        "Multiple keys found with algorithm {:?}; kid is required",
+                        target_alg
+                    )));
+                }
+                // 0 matching keys: proceed to refresh
             }
         }
 
-        // 2. Refresh needed: attempt fetch if URL configured and cooldown elapsed
+        // 2. Refresh needed: resolve URL and verify cooldown
         let url = custom_jwks_url
             .map(|s| s.to_string())
             .or_else(|| self.jwks_url.clone())
@@ -323,33 +395,74 @@ impl JwksKeyCache {
                 })
             });
 
-        if let Some(endpoint) = url {
-            let allow_fetch = {
-                let mut last = self.last_attempt.write();
-                match *last {
-                    Some(prev) if now.duration_since(prev) < self.cooldown => false,
-                    _ => {
-                        *last = Some(now);
-                        true
-                    }
+        let endpoint = match url {
+            Some(u) => u,
+            None => {
+                if !is_fresh {
+                    return Err(AuthError::KeyDiscoveryFailed(
+                        "JWKS cache expired and no JWKS URL configured to refresh".to_string(),
+                    ));
+                } else {
+                    return Err(AuthError::UnknownKeyId(target_kid.to_string()));
                 }
-            };
+            }
+        };
 
-            if allow_fetch {
-                if let Ok(client) = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(4))
-                    .build()
-                {
-                    if let Ok(resp) = client.get(&endpoint).send() {
-                        if let Ok(body) = resp.text() {
-                            let _ = self.load_jwks_json(&body);
-                        }
-                    }
+        let allow_fetch = {
+            let mut last = self.last_attempt.write();
+            match *last {
+                Some(prev) if now.duration_since(prev) < self.cooldown => false,
+                _ => {
+                    *last = Some(now);
+                    true
                 }
+            }
+        };
+
+        if !allow_fetch {
+            if !is_fresh {
+                return Err(AuthError::KeyDiscoveryFailed(
+                    "JWKS cache expired; refresh currently on cooldown following recent attempt"
+                        .to_string(),
+                ));
+            } else {
+                return Err(AuthError::UnknownKeyId(target_kid.to_string()));
             }
         }
 
-        // 3. Check cache after refresh
+        // Execute fetch without holding locks across network I/O
+        let body = match fetch_jwks_endpoint(&endpoint, Duration::from_secs(4)) {
+            Ok(b) => b,
+            Err(e) => {
+                if !is_fresh {
+                    return Err(AuthError::KeyDiscoveryFailed(format!(
+                        "Failed to refresh expired JWKS cache: {}",
+                        e
+                    )));
+                } else {
+                    return Err(AuthError::UnknownKeyId(format!(
+                        "Key ID '{}' not found and JWKS refresh failed: {}",
+                        target_kid, e
+                    )));
+                }
+            }
+        };
+
+        if let Err(e) = self.load_jwks_json(&body) {
+            if !is_fresh {
+                return Err(AuthError::KeyDiscoveryFailed(format!(
+                    "Failed to parse refreshed JWKS response: {}",
+                    e
+                )));
+            } else {
+                return Err(AuthError::UnknownKeyId(format!(
+                    "Key ID '{}' not found and refreshed JWKS was invalid: {}",
+                    target_kid, e
+                )));
+            }
+        }
+
+        // 3. Cache is now freshly populated after authoritative refresh
         let keys = self.keys.read();
         if !target_kid.is_empty() {
             if let Some(key) = keys.get(target_kid) {
@@ -370,12 +483,18 @@ impl JwksKeyCache {
             .filter(|k| k.algorithm == target_alg)
             .collect();
         if matching.len() == 1 {
-            return Ok(matching[0].clone());
+            Ok(matching[0].clone())
+        } else if matching.is_empty() {
+            Err(AuthError::UnknownKeyId(format!(
+                "No key found matching algorithm {:?}",
+                target_alg
+            )))
+        } else {
+            Err(AuthError::UnknownKeyId(format!(
+                "Multiple keys found matching algorithm {:?}; kid is required",
+                target_alg
+            )))
         }
-
-        Err(AuthError::UnknownKeyId(
-            "Key identifier not found in JWKS".to_string(),
-        ))
     }
 }
 
@@ -942,6 +1061,58 @@ pub(crate) mod tests {
     use base64::Engine;
     use jsonwebtoken::{encode, EncodingKey, Header};
 
+    fn start_mock_jwks_server() -> (
+        String,
+        Arc<parking_lot::RwLock<String>>,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::io::{Read, Write};
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind ephemeral test port");
+        let port = listener.local_addr().unwrap().port();
+        let body_holder = Arc::new(parking_lot::RwLock::new(String::new()));
+        let return_500 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let body_clone = body_holder.clone();
+        let return_500_clone = return_500.clone();
+        let request_count_clone = request_count.clone();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                request_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+
+                if return_500_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else {
+                    let body = body_clone.read().clone();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+                let _ = stream.flush();
+            }
+        });
+
+        (
+            format!("http://127.0.0.1:{}/jwks.json", port),
+            body_holder,
+            return_500,
+            request_count,
+        )
+    }
+
     fn generate_ephemeral_test_rsa_keys() -> Option<(String, String)> {
         let priv_out = std::process::Command::new("openssl")
             .args(["genrsa", "2048"])
@@ -1275,6 +1446,152 @@ pub(crate) mod tests {
         assert!(
             res_v1_overlap.is_ok(),
             "Existing key v1 remains valid during key rotation overlap"
+        );
+
+        // 5. Cache TTL expires -> cached keys cannot be trusted without refresh
+        cache.expire_cache_for_test();
+        let res_v1_expired = verify_supabase_jwt_with_key(
+            &token_v1,
+            SupabaseVerificationKey::JwksCache(cache.clone()),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(
+            matches!(res_v1_expired, Err(AuthError::KeyDiscoveryFailed(_))),
+            "Expired cache without refresh endpoint must fail closed: {:?}",
+            res_v1_expired
+        );
+
+        // 6. Refreshed JWKS set replaces active keys (kid-v1 removed, only kid-v2 present)
+        let ec_jwks_v2_only = r#"{
+            "keys": [
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "kid-v2",
+                    "alg": "ES256",
+                    "x": "f83OJ3D2xFmTNgTeib43uVrn8UWCazaEvbQDolZ_2QI",
+                    "y": "x_daQauBhQ0tZxFlGQM2Q_Gfiw02z9q0aEnW65GQ-hs"
+                }
+            ]
+        }"#;
+        let count = cache
+            .load_jwks_json(ec_jwks_v2_only)
+            .expect("Valid JWKS JSON must parse");
+        assert_eq!(count, 1);
+
+        // Kid-v2 is present in refreshed set
+        let res_v2_resolved = cache.resolve_key(Some("kid-v2"), Algorithm::ES256, None);
+        assert!(res_v2_resolved.is_ok(), "Rotated kid-v2 must be resolved");
+
+        // Old key kid-v1 was removed during refresh and is now strictly rejected!
+        let res_v1_after_refresh = cache.resolve_key(Some("kid-v1"), Algorithm::ES256, None);
+        assert_eq!(
+            res_v1_after_refresh.err(),
+            Some(AuthError::UnknownKeyId("kid-v1".to_string())),
+            "Old key kid-v1 must be rejected after removal from refreshed JWKS"
+        );
+    }
+
+    #[test]
+    fn test_jwks_network_refresh_rotation_and_failed_refresh_safety() {
+        let (server_url, body_holder, return_500, request_count) = start_mock_jwks_server();
+
+        let jwks_v1 = r#"{
+            "keys": [
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "server-kid-1",
+                    "alg": "ES256",
+                    "x": "f83OJ3D2xFmTNgTeib43uVrn8UWCazaEvbQDolZ_2QI",
+                    "y": "x_daQauBhQ0tZxFlGQM2Q_Gfiw02z9q0aEnW65GQ-hs"
+                }
+            ]
+        }"#;
+        *body_holder.write() = jwks_v1.to_string();
+
+        let cache = Arc::new(JwksKeyCache::new().with_jwks_url(server_url));
+
+        // 1. First resolution: cache is cold, triggers initial network fetch
+        let key1 = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        assert!(
+            key1.is_ok(),
+            "Initial JWKS fetch must resolve key: {:?}",
+            key1.err()
+        );
+        assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // 2. Fresh cached key works without contacting the network
+        let key1_cached = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        assert!(key1_cached.is_ok(), "Fresh cached key must succeed");
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Fresh cached key must NOT trigger extra network requests"
+        );
+
+        // 3. Rotate keys on server: server now returns server-kid-2 only (server-kid-1 revoked)
+        let jwks_v2 = r#"{
+            "keys": [
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "server-kid-2",
+                    "alg": "ES256",
+                    "x": "f83OJ3D2xFmTNgTeib43uVrn8UWCazaEvbQDolZ_2QI",
+                    "y": "x_daQauBhQ0tZxFlGQM2Q_Gfiw02z9q0aEnW65GQ-hs"
+                }
+            ]
+        }"#;
+        *body_holder.write() = jwks_v2.to_string();
+
+        // 4. Cache expires: must refresh before existing key is trusted again
+        cache.expire_cache_for_test();
+        cache.clear_cooldown_for_test();
+
+        // Requesting old key server-kid-1 triggers refresh, but server no longer advertises it
+        let old_key_res = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        assert_eq!(
+            old_key_res.err(),
+            Some(AuthError::UnknownKeyId("server-kid-1".to_string())),
+            "Old key must be rejected after removal from authoritative JWKS"
+        );
+        assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // Requesting new key server-kid-2 succeeds from the freshly populated cache
+        let new_key_res = cache.resolve_key(Some("server-kid-2"), Algorithm::ES256, None);
+        assert!(
+            new_key_res.is_ok(),
+            "New key server-kid-2 must be available"
+        );
+
+        // 5. Failed refresh does not silently trust an expired or revoked key
+        cache.expire_cache_for_test();
+        cache.clear_cooldown_for_test();
+        return_500.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let failed_refresh_res = cache.resolve_key(Some("server-kid-2"), Algorithm::ES256, None);
+        assert!(
+            matches!(failed_refresh_res, Err(AuthError::KeyDiscoveryFailed(_))),
+            "Failed refresh must return KeyDiscoveryFailed and never trust expired key: {:?}",
+            failed_refresh_res
+        );
+
+        // 6. Unknown kid fails safely
+        cache.clear_cooldown_for_test();
+        return_500.store(false, std::sync::atomic::Ordering::SeqCst);
+        let unknown_res = cache.resolve_key(Some("non_existent_kid"), Algorithm::ES256, None);
+        assert_eq!(
+            unknown_res.err(),
+            Some(AuthError::UnknownKeyId("non_existent_kid".to_string()))
+        );
+
+        // 7. Unsupported algorithm mismatch fails safely
+        let alg_mismatch_res = cache.resolve_key(Some("server-kid-2"), Algorithm::RS256, None);
+        assert!(
+            matches!(alg_mismatch_res, Err(AuthError::UnsupportedAlgorithm(_))),
+            "Algorithm mismatch must return UnsupportedAlgorithm: {:?}",
+            alg_mismatch_res
         );
     }
 
