@@ -42,3 +42,4 @@ governor.workspace = true
 base64 = "0.21"
 hmac = "0.12"
 thiserror.workspace = true
+jsonwebtoken = "9.3"

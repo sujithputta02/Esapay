@@ -3,15 +3,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[allow(dead_code)]
@@ -79,6 +74,7 @@ impl CallerIdentity {
 
 /// JWT Header
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SupabaseJwtHeader {
     pub alg: String,
     #[serde(default)]
@@ -154,111 +150,70 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     extract_token(headers)
 }
 
-/// Decode base64 URL-safe with or without padding
-fn decode_base64_url(input: &str) -> Result<Vec<u8>, AuthError> {
-    URL_SAFE_NO_PAD
-        .decode(input)
-        .or_else(|_| {
-            let padded = match input.len() % 4 {
-                2 => format!("{}==", input),
-                3 => format!("{}=", input),
-                _ => input.to_string(),
-            };
-            base64::engine::general_purpose::STANDARD.decode(padded)
-        })
-        .map_err(|_| AuthError::InvalidTokenFormat)
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+
+/// Key specification for Supabase JWT verification
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum SupabaseVerificationKey<'a> {
+    /// Symmetric HMAC key (HS256) using SUPABASE_JWT_SECRET
+    Secret(&'a str),
+    /// Asymmetric RSA public key in PEM format (RS256)
+    RsaPem(&'a str),
+    /// Auto-detect from environment (SUPABASE_JWT_SECRET for HS256, SUPABASE_JWT_PUBLIC_KEY for RS256)
+    FromEnvironment,
 }
 
-/// Verify cryptographic signature and claims of a Supabase HS256 JWT
-pub fn verify_supabase_jwt(
-    token: &str,
-    secret: &str,
-    expected_issuer: Option<&str>,
-) -> Result<SupabaseJwtClaims, AuthError> {
-    let clean_secret = secret.trim();
-    if clean_secret.is_empty() {
-        warn!("Supabase JWT verification failed: secret is empty");
-        return Err(AuthError::InvalidSignature);
-    }
-
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(AuthError::InvalidTokenFormat);
-    }
-
-    // 1. Decode and check header algorithm
-    let header_bytes = decode_base64_url(parts[0])?;
-    let header: SupabaseJwtHeader =
-        serde_json::from_slice(&header_bytes).map_err(|_| AuthError::InvalidTokenFormat)?;
-
-    if header.alg != "HS256" {
-        warn!("Rejected JWT with unsupported algorithm: {}", header.alg);
-        return Err(AuthError::UnsupportedAlgorithm(header.alg));
-    }
-
-    // 2. Cryptographically verify signature
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let mut mac = HmacSha256::new_from_slice(clean_secret.as_bytes())
-        .map_err(|_| AuthError::InvalidSignature)?;
-    mac.update(signing_input.as_bytes());
-    let expected_sig = mac.finalize().into_bytes();
-
-    let actual_sig = decode_base64_url(parts[2])?;
-    if !constant_time_eq(&expected_sig, &actual_sig) {
-        warn!("Supabase JWT signature mismatch");
-        return Err(AuthError::InvalidSignature);
-    }
-
-    // 3. Decode payload
-    let payload_bytes = decode_base64_url(parts[1])?;
-    let claims: SupabaseJwtClaims =
-        serde_json::from_slice(&payload_bytes).map_err(|_| AuthError::InvalidTokenFormat)?;
-
-    // 4. Validate claims
-    let now = chrono::Utc::now().timestamp();
-
-    // Expiration check (required)
-    match claims.exp {
-        Some(exp) if exp <= now => return Err(AuthError::TokenExpired),
-        None => return Err(AuthError::TokenExpired),
-        _ => {}
-    }
-
-    // Not-before check (if present)
-    if let Some(nbf) = claims.nbf {
-        if nbf > now {
-            return Err(AuthError::TokenNotYetValid);
+/// Resolve the canonical Supabase issuer (e.g. https://<project>.supabase.co/auth/v1)
+pub fn resolve_supabase_expected_issuer(param_issuer: Option<&str>) -> Option<String> {
+    if let Some(param) = param_issuer {
+        let clean = param.trim();
+        if !clean.is_empty() {
+            return Some(if clean.ends_with("/auth/v1") {
+                clean.to_string()
+            } else {
+                format!("{}/auth/v1", clean.trim_end_matches('/'))
+            });
         }
     }
-
-    // Audience check (must contain "authenticated")
-    if let Some(aud_val) = &claims.aud {
-        let has_aud = match aud_val {
-            serde_json::Value::String(s) => s == "authenticated",
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .any(|v| v.as_str().map(|s| s == "authenticated").unwrap_or(false)),
-            _ => false,
-        };
-        if !has_aud {
-            return Err(AuthError::InvalidAudience);
-        }
-    } else {
-        return Err(AuthError::InvalidAudience);
-    }
-
-    // Issuer check (if configured)
-    if let Some(expected_iss) = expected_issuer {
-        if let Some(iss) = &claims.iss {
-            let clean_expected = expected_iss.trim().trim_end_matches('/');
-            let clean_iss = iss.trim().trim_end_matches('/');
-            if !clean_iss.starts_with(clean_expected) {
-                return Err(AuthError::InvalidIssuer(iss.clone()));
-            }
+    if let Ok(iss) = std::env::var("SUPABASE_JWT_ISSUER") {
+        let clean = iss.trim();
+        if !clean.is_empty() {
+            return Some(clean.to_string());
         }
     }
+    if let Ok(url) = std::env::var("SUPABASE_URL") {
+        let clean = url.trim().trim_end_matches('/');
+        if !clean.is_empty() {
+            return Some(format!("{}/auth/v1", clean));
+        }
+    }
+    None
+}
 
-    // Subject check (must be non-empty)
+fn map_jwt_error(err: jsonwebtoken::errors::Error) -> AuthError {
+    use jsonwebtoken::errors::ErrorKind;
+    match err.kind() {
+        ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+        ErrorKind::ImmatureSignature => AuthError::TokenNotYetValid,
+        ErrorKind::InvalidAudience => AuthError::InvalidAudience,
+        ErrorKind::InvalidIssuer => {
+            AuthError::InvalidIssuer("Issuer mismatch or missing".to_string())
+        }
+        ErrorKind::InvalidAlgorithmName | ErrorKind::InvalidAlgorithm => {
+            AuthError::UnsupportedAlgorithm(format!("{:?}", err.kind()))
+        }
+        ErrorKind::InvalidSignature => AuthError::InvalidSignature,
+        ErrorKind::InvalidToken => AuthError::InvalidTokenFormat,
+        _ => AuthError::InvalidSignature,
+    }
+}
+
+fn validate_claims_payload(
+    claims: &SupabaseJwtClaims,
+    expected_iss: &str,
+) -> Result<(), AuthError> {
+    // Subject check: must be non-empty
     if claims
         .sub
         .as_ref()
@@ -268,21 +223,158 @@ pub fn verify_supabase_jwt(
         return Err(AuthError::MissingSubject);
     }
 
-    Ok(claims)
+    // Exact issuer check
+    match &claims.iss {
+        Some(iss) => {
+            if iss.trim() != expected_iss.trim() {
+                return Err(AuthError::InvalidIssuer(iss.clone()));
+            }
+        }
+        None => return Err(AuthError::InvalidIssuer("Missing issuer claim".to_string())),
+    }
+
+    Ok(())
+}
+
+/// Verify cryptographic signature and claims of a Supabase JWT (HS256 or RS256)
+pub fn verify_supabase_jwt_with_key(
+    token: &str,
+    key_spec: SupabaseVerificationKey,
+    expected_issuer: Option<&str>,
+) -> Result<SupabaseJwtClaims, AuthError> {
+    let clean_token = token.trim();
+    if clean_token.is_empty() {
+        return Err(AuthError::MissingToken);
+    }
+
+    let header = decode_header(clean_token).map_err(|e| match e.kind() {
+        jsonwebtoken::errors::ErrorKind::InvalidAlgorithmName => {
+            AuthError::UnsupportedAlgorithm("unsupported algorithm".to_string())
+        }
+        jsonwebtoken::errors::ErrorKind::Json(serde_err) => {
+            let msg = serde_err.to_string();
+            if msg.contains("unknown variant") || msg.contains("algorithm") {
+                AuthError::UnsupportedAlgorithm(msg)
+            } else {
+                AuthError::InvalidTokenFormat
+            }
+        }
+        jsonwebtoken::errors::ErrorKind::InvalidToken => AuthError::InvalidTokenFormat,
+        _ => AuthError::InvalidTokenFormat,
+    })?;
+
+    let expected_iss = resolve_supabase_expected_issuer(expected_issuer).ok_or_else(|| {
+        AuthError::InvalidIssuer(
+            "Expected issuer is required for verification (configure SUPABASE_URL or pass expected_issuer)"
+                .to_string(),
+        )
+    })?;
+
+    match header.alg {
+        Algorithm::HS256 => {
+            let secret_str = match key_spec {
+                SupabaseVerificationKey::Secret(s) => s.to_string(),
+                SupabaseVerificationKey::FromEnvironment => std::env::var("SUPABASE_JWT_SECRET")
+                    .map_err(|_| {
+                        warn!(
+                            "Supabase JWT verification failed: SUPABASE_JWT_SECRET not configured"
+                        );
+                        AuthError::InvalidSignature
+                    })?,
+                SupabaseVerificationKey::RsaPem(_) => {
+                    return Err(AuthError::UnsupportedAlgorithm(
+                        "Token uses HS256 but an RSA PEM key was supplied".to_string(),
+                    ));
+                }
+            };
+
+            let clean_secret = secret_str.trim();
+            if clean_secret.is_empty() {
+                warn!("Supabase JWT verification failed: secret is empty");
+                return Err(AuthError::InvalidSignature);
+            }
+
+            let decoding_key = DecodingKey::from_secret(clean_secret.as_bytes());
+            let mut validation = Validation::new(Algorithm::HS256);
+            validation.validate_exp = true;
+            validation.validate_nbf = true;
+            validation.set_audience(&["authenticated"]);
+            validation.set_issuer(&[&expected_iss]);
+
+            let token_data = decode::<SupabaseJwtClaims>(clean_token, &decoding_key, &validation)
+                .map_err(map_jwt_error)?;
+
+            validate_claims_payload(&token_data.claims, &expected_iss)?;
+            Ok(token_data.claims)
+        }
+        Algorithm::RS256 => {
+            let pem_str = match key_spec {
+                SupabaseVerificationKey::RsaPem(pem) => pem.to_string(),
+                SupabaseVerificationKey::FromEnvironment => {
+                    std::env::var("SUPABASE_JWT_PUBLIC_KEY").map_err(|_| {
+                        warn!(
+                        "Supabase JWT verification failed: SUPABASE_JWT_PUBLIC_KEY not configured"
+                    );
+                        AuthError::InvalidSignature
+                    })?
+                }
+                SupabaseVerificationKey::Secret(_) => {
+                    return Err(AuthError::UnsupportedAlgorithm(
+                        "Token uses RS256 but an HMAC secret was supplied".to_string(),
+                    ));
+                }
+            };
+
+            let clean_pem = pem_str.trim();
+            if clean_pem.is_empty() {
+                warn!("Supabase JWT verification failed: RSA public key is empty");
+                return Err(AuthError::InvalidSignature);
+            }
+
+            let decoding_key = DecodingKey::from_rsa_pem(clean_pem.as_bytes())
+                .map_err(|_| AuthError::InvalidSignature)?;
+            let mut validation = Validation::new(Algorithm::RS256);
+            validation.validate_exp = true;
+            validation.validate_nbf = true;
+            validation.set_audience(&["authenticated"]);
+            validation.set_issuer(&[&expected_iss]);
+
+            let token_data = decode::<SupabaseJwtClaims>(clean_token, &decoding_key, &validation)
+                .map_err(map_jwt_error)?;
+
+            validate_claims_payload(&token_data.claims, &expected_iss)?;
+            Ok(token_data.claims)
+        }
+        other => {
+            warn!("Rejected JWT with unsupported algorithm: {:?}", other);
+            Err(AuthError::UnsupportedAlgorithm(format!("{:?}", other)))
+        }
+    }
+}
+
+/// Verify cryptographic signature and claims of a Supabase HS256 JWT
+#[allow(dead_code)]
+pub fn verify_supabase_jwt(
+    token: &str,
+    secret: &str,
+    expected_issuer: Option<&str>,
+) -> Result<SupabaseJwtClaims, AuthError> {
+    verify_supabase_jwt_with_key(
+        token,
+        SupabaseVerificationKey::Secret(secret),
+        expected_issuer,
+    )
 }
 
 /// Fallback for read-only backwards compatibility
 pub fn parse_supabase_jwt(token: &str) -> Option<SupabaseJwtClaims> {
-    let secret = std::env::var("SUPABASE_JWT_SECRET")
-        .or_else(|_| std::env::var("SUPABASE_SECRET_KEY"))
-        .unwrap_or_default();
-    let expected_iss = std::env::var("SUPABASE_URL").ok();
-
-    if secret.is_empty() {
-        return None;
-    }
-
-    verify_supabase_jwt(token, &secret, expected_iss.as_deref()).ok()
+    let expected_iss = resolve_supabase_expected_issuer(None);
+    verify_supabase_jwt_with_key(
+        token,
+        SupabaseVerificationKey::FromEnvironment,
+        expected_iss.as_deref(),
+    )
+    .ok()
 }
 
 /// Verify an API key against configured environment hashes (standalone mode)
@@ -383,17 +475,8 @@ pub fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthEr
 
     // Check if token is a JWT (starts with "eyJ" and has 3 parts)
     if clean.starts_with("eyJ") && clean.split('.').count() == 3 {
-        let secret = std::env::var("SUPABASE_JWT_SECRET")
-            .or_else(|_| std::env::var("SUPABASE_SECRET_KEY"))
-            .unwrap_or_default();
-        let expected_iss = std::env::var("SUPABASE_URL").ok();
-
-        if secret.trim().is_empty() {
-            warn!("Cannot verify Supabase JWT: SUPABASE_JWT_SECRET not configured");
-            return Err(AuthError::InvalidSignature);
-        }
-
-        let claims = verify_supabase_jwt(clean, &secret, expected_iss.as_deref())?;
+        let claims =
+            verify_supabase_jwt_with_key(clean, SupabaseVerificationKey::FromEnvironment, None)?;
         let user_id = claims.sub.unwrap_or_default();
         let role = claims.role.unwrap_or_else(|| "authenticated".to_string());
         let short_id = if user_id.len() >= 12 {
@@ -471,33 +554,28 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
 
     // Check if token is Supabase JWT
     if key.starts_with("eyJ") && key.split('.').count() == 3 {
-        let secret = std::env::var("SUPABASE_JWT_SECRET")
-            .or_else(|_| std::env::var("SUPABASE_SECRET_KEY"))
-            .unwrap_or_default();
-        let expected_iss = std::env::var("SUPABASE_URL").ok();
+        if let Ok(claims) =
+            verify_supabase_jwt_with_key(key, SupabaseVerificationKey::FromEnvironment, None)
+        {
+            let user_id = claims.sub.unwrap_or_else(|| "user_unknown".to_string());
+            let email = claims
+                .email
+                .unwrap_or_else(|| "authenticated_user".to_string());
+            let short_id = if user_id.len() >= 12 {
+                &user_id[..12]
+            } else {
+                &user_id
+            };
 
-        if !secret.trim().is_empty() {
-            if let Ok(claims) = verify_supabase_jwt(key, &secret, expected_iss.as_deref()) {
-                let user_id = claims.sub.unwrap_or_else(|| "user_unknown".to_string());
-                let email = claims
-                    .email
-                    .unwrap_or_else(|| "authenticated_user".to_string());
-                let short_id = if user_id.len() >= 12 {
-                    &user_id[..12]
-                } else {
-                    &user_id
-                };
-
-                return (
-                    StatusCode::OK,
-                    Json(ValidateKeyResponse {
-                        valid: true,
-                        environment: "production".to_string(),
-                        merchant_id: format!("usr_{}", short_id),
-                        message: format!("Supabase JWT validated for {}", email),
-                    }),
-                );
-            }
+            return (
+                StatusCode::OK,
+                Json(ValidateKeyResponse {
+                    valid: true,
+                    environment: "production".to_string(),
+                    merchant_id: format!("usr_{}", short_id),
+                    message: format!("Supabase JWT validated for {}", email),
+                }),
+            );
         }
     }
 
@@ -554,26 +632,59 @@ pub async fn auth_me_handler(headers: HeaderMap) -> impl IntoResponse {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use jsonwebtoken::{encode, EncodingKey, Header};
 
-    fn create_test_jwt(secret: &str, claims_json: &serde_json::Value) -> String {
-        let header = serde_json::json!({
-            "alg": "HS256",
-            "typ": "JWT"
-        });
-        let header_str = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-        let payload_str = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims_json).unwrap());
+    fn generate_ephemeral_test_rsa_keys() -> Option<(String, String)> {
+        let priv_out = std::process::Command::new("openssl")
+            .args(["genrsa", "2048"])
+            .output()
+            .ok()?;
+        if !priv_out.status.success() {
+            return None;
+        }
+        let priv_pem = String::from_utf8(priv_out.stdout).ok()?;
 
-        let signing_input = format!("{}.{}", header_str, payload_str);
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(signing_input.as_bytes());
-        let sig_str = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let mut child = std::process::Command::new("openssl")
+            .args(["rsa", "-pubout"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
 
-        format!("{}.{}", signing_input, sig_str)
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(priv_pem.as_bytes());
+        }
+        let pub_out = child.wait_with_output().ok()?;
+        if !pub_out.status.success() {
+            return None;
+        }
+        let pub_pem = String::from_utf8(pub_out.stdout).ok()?;
+
+        Some((priv_pem, pub_pem))
+    }
+
+    fn create_hs256_token(secret: &str, claims: &serde_json::Value) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("Failed to encode test HS256 JWT")
+    }
+
+    fn create_rs256_token(priv_pem: &str, claims: &serde_json::Value) -> String {
+        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes())
+            .expect("Failed to parse test RSA private key");
+        encode(&Header::new(Algorithm::RS256), claims, &key)
+            .expect("Failed to encode test RS256 JWT")
     }
 
     #[test]
-    fn test_valid_supabase_jwt_verification() {
-        let secret = "test_super_secret_jwt_key_12345678";
+    fn test_valid_supabase_jwt_verification_hs256() {
+        let secret = "test_mock_jwt_secret_for_tests_only";
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
             "sub": "b2c1d3e4-5f6a-7b8c-9d0e-1f2a3b4c5d6e",
@@ -581,14 +692,15 @@ pub(crate) mod tests {
             "role": "authenticated",
             "aud": "authenticated",
             "exp": now + 3600,
+            "nbf": now - 10,
             "iss": "https://test.supabase.co/auth/v1"
         });
 
-        let token = create_test_jwt(secret, &claims);
+        let token = create_hs256_token(secret, &claims);
         let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
         assert!(
             res.is_ok(),
-            "Valid JWT must pass verification: {:?}",
+            "Valid HS256 JWT must pass verification: {:?}",
             res.err()
         );
         let verified = res.unwrap();
@@ -596,88 +708,237 @@ pub(crate) mod tests {
             verified.sub,
             Some("b2c1d3e4-5f6a-7b8c-9d0e-1f2a3b4c5d6e".to_string())
         );
+        assert_eq!(verified.email, Some("merchant@example.com".to_string()));
     }
 
     #[test]
+    fn test_valid_supabase_jwt_verification_rs256() {
+        let (priv_pem, pub_pem) = match generate_ephemeral_test_rsa_keys() {
+            Some(keys) => keys,
+            None => {
+                eprintln!("Skipping RS256 test: openssl CLI unavailable in test environment");
+                return;
+            }
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_rsa_123456789",
+            "email": "rsa_user@example.com",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "nbf": now - 10,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token = create_rs256_token(&priv_pem, &claims);
+        let res = verify_supabase_jwt_with_key(
+            &token,
+            SupabaseVerificationKey::RsaPem(&pub_pem),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(
+            res.is_ok(),
+            "Valid RS256 JWT must pass verification: {:?}",
+            res.err()
+        );
+        let verified = res.unwrap();
+        assert_eq!(verified.sub, Some("user_rsa_123456789".to_string()));
+    }
+
+    #[test]
+    fn test_forged_rs256_jwt_rejected() {
+        let (priv_pem1, _) = match generate_ephemeral_test_rsa_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+        let (_, pub_pem2) = match generate_ephemeral_test_rsa_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_rsa_123456789",
+            "email": "rsa_user@example.com",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token = create_rs256_token(&priv_pem1, &claims);
+        let res = verify_supabase_jwt_with_key(
+            &token,
+            SupabaseVerificationKey::RsaPem(&pub_pem2),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert_eq!(res, Err(AuthError::InvalidSignature));
+    }
+
+    const TEST_JWT_SECRET: &str = "test_mock_jwt_secret_for_tests_only";
+    const ATTACKER_JWT_SECRET: &str = "test_mock_attacker_key_for_tests_only";
+
+    #[test]
     fn test_forged_jwt_signature_rejected() {
-        let secret = "test_super_secret_jwt_key_12345678";
+        let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
             "sub": "attacker-id",
             "role": "admin",
             "aud": "authenticated",
-            "exp": now + 3600
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
         });
 
-        // Token signed with an attacker's key/secret
-        let forged_token = create_test_jwt("attacker_secret_key_8765432100", &claims);
-        let res = verify_supabase_jwt(&forged_token, secret, None);
+        // Signed with an attacker's key
+        let forged_token = create_hs256_token(ATTACKER_JWT_SECRET, &claims);
+        let res = verify_supabase_jwt(&forged_token, secret, Some("https://test.supabase.co"));
         assert_eq!(res, Err(AuthError::InvalidSignature));
 
-        // Token with modified payload
-        let valid_token = create_test_jwt(secret, &claims);
+        // Tampered payload
+        let valid_token = create_hs256_token(secret, &claims);
         let parts: Vec<&str> = valid_token.split('.').collect();
         let tampered_payload = URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&serde_json::json!({
                 "sub": "admin-elevated-id",
                 "role": "service_role",
                 "aud": "authenticated",
-                "exp": now + 3600
+                "exp": now + 3600,
+                "iss": "https://test.supabase.co/auth/v1"
             }))
             .unwrap(),
         );
         let tampered_token = format!("{}.{}.{}", parts[0], tampered_payload, parts[2]);
-        let res_tampered = verify_supabase_jwt(&tampered_token, secret, None);
+        let res_tampered =
+            verify_supabase_jwt(&tampered_token, secret, Some("https://test.supabase.co"));
         assert_eq!(res_tampered, Err(AuthError::InvalidSignature));
     }
 
     #[test]
     fn test_expired_jwt_rejected() {
-        let secret = "test_super_secret_jwt_key_12345678";
+        let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
             "sub": "user_id_123",
             "role": "authenticated",
             "aud": "authenticated",
-            "exp": now - 100 // Expired
+            "exp": now - 100, // Expired
+            "iss": "https://test.supabase.co/auth/v1"
         });
 
-        let token = create_test_jwt(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, None);
+        let token = create_hs256_token(secret, &claims);
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
         assert_eq!(res, Err(AuthError::TokenExpired));
     }
 
     #[test]
-    fn test_wrong_audience_rejected() {
-        let secret = "test_super_secret_jwt_key_12345678";
-        let now = chrono::Utc::now().timestamp();
-        let claims = serde_json::json!({
-            "sub": "user_id_123",
-            "role": "authenticated",
-            "aud": "wrong_aud",
-            "exp": now + 3600
-        });
-
-        let token = create_test_jwt(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, None);
-        assert_eq!(res, Err(AuthError::InvalidAudience));
-    }
-
-    #[test]
-    fn test_wrong_issuer_rejected() {
-        let secret = "test_super_secret_jwt_key_12345678";
+    fn test_not_yet_valid_nbf_rejected() {
+        let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
             "sub": "user_id_123",
             "role": "authenticated",
             "aud": "authenticated",
             "exp": now + 3600,
-            "iss": "https://malicious.issuer.com"
+            "nbf": now + 1200, // Not yet valid
+            "iss": "https://test.supabase.co/auth/v1"
         });
 
-        let token = create_test_jwt(secret, &claims);
+        let token = create_hs256_token(secret, &claims);
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        assert_eq!(res, Err(AuthError::TokenNotYetValid));
+    }
+
+    #[test]
+    fn test_wrong_audience_rejected() {
+        let secret = TEST_JWT_SECRET;
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_id_123",
+            "role": "authenticated",
+            "aud": "wrong_aud",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token = create_hs256_token(secret, &claims);
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        assert_eq!(res, Err(AuthError::InvalidAudience));
+    }
+
+    #[test]
+    fn test_wrong_issuer_rejected() {
+        let secret = TEST_JWT_SECRET;
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_id_123",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://malicious.issuer.com/auth/v1"
+        });
+
+        let token = create_hs256_token(secret, &claims);
         let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
         assert!(matches!(res, Err(AuthError::InvalidIssuer(_))));
+    }
+
+    #[test]
+    fn test_missing_issuer_rejected() {
+        let secret = TEST_JWT_SECRET;
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_id_123",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600
+        });
+
+        let token = create_hs256_token(secret, &claims);
+        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
+        assert!(matches!(res, Err(AuthError::InvalidIssuer(_))));
+    }
+
+    #[test]
+    fn test_missing_subject_rejected() {
+        let secret = TEST_JWT_SECRET;
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://trusted.supabase.co/auth/v1"
+        });
+
+        let token = create_hs256_token(secret, &claims);
+        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
+        assert_eq!(res, Err(AuthError::MissingSubject));
+    }
+
+    #[test]
+    fn test_unsupported_none_algorithm_rejected() {
+        let now = chrono::Utc::now().timestamp();
+        let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\",\"typ\":\"JWT\"}");
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "sub": "user_123",
+                "role": "admin",
+                "aud": "authenticated",
+                "exp": now + 3600,
+                "iss": "https://trusted.supabase.co/auth/v1"
+            }))
+            .unwrap(),
+        );
+        let none_token = format!("{}.{}.", header, payload);
+        let res = verify_supabase_jwt(
+            &none_token,
+            TEST_JWT_SECRET,
+            Some("https://trusted.supabase.co"),
+        );
+        assert!(matches!(res, Err(AuthError::UnsupportedAlgorithm(_))));
     }
 
     pub(crate) static TEST_ENV_MUTEX: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
@@ -686,12 +947,12 @@ pub(crate) mod tests {
     fn test_prefix_only_bypass_eliminated() {
         let _guard = TEST_ENV_MUTEX.lock();
         std::env::set_var(
-            "ESA_LIVE_API_KEY",
-            "esa_live_sec_real_production_secret_12345",
+            "ESA_TEST_API_KEY",
+            "esa_test_key_real_evaluation_secret_12345",
         );
 
         // An attacker creates an arbitrary string matching the prefix and length
-        let fake_key = "esa_live_sec_00000000000000000000000000000000";
+        let fake_key = "esa_test_key_00000000000000000000000000000000";
         assert!(!is_key_authorized(fake_key));
 
         // Hardcoded dev master key is rejected
@@ -700,10 +961,10 @@ pub(crate) mod tests {
 
         // Only the real secret is authorized
         assert!(is_key_authorized(
-            "esa_live_sec_real_production_secret_12345"
+            "esa_test_key_real_evaluation_secret_12345"
         ));
 
-        std::env::remove_var("ESA_LIVE_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[test]
