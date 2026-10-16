@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 
 mod api_keys;
 mod benchmark;
@@ -31,7 +31,7 @@ use live_data::{
     verdict_record_json,
 };
 use vitals::VitalsStore;
-use websocket::{websocket_handler, TelemetryBroadcaster, TelemetryMessage};
+use websocket::{websocket_handler_with_auth, TelemetryBroadcaster, TelemetryMessage};
 
 pub(crate) fn is_production_mode() -> bool {
     std::env::var("ENVIRONMENT")
@@ -1314,26 +1314,48 @@ async fn ws_telemetry_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let token = api_keys::extract_token(&headers)
-        .or_else(|| params.get("token").cloned())
-        .or_else(|| params.get("api_key").cloned())
-        .or_else(|| params.get("key").cloned());
+    let header_token = api_keys::extract_token(&headers);
+    let query_token = params
+        .get("token")
+        .or_else(|| params.get("api_key"))
+        .or_else(|| params.get("key"))
+        .cloned();
 
-    if let Some(t) = token {
+    let pre_auth = if let Some(t) = header_token {
         if !api_keys::is_key_authorized(&t) {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized: Invalid or expired credentials for WebSocket telemetry".to_string(),
             ));
         }
-    } else if is_production_mode() {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "Unauthorized: Missing authentication token for WebSocket telemetry".to_string(),
-        ));
-    }
+        true
+    } else if let Some(t) = query_token {
+        // Query param auth leaks tokens into server access logs, CDN logs, and browser history
+        if is_production_mode() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: Credentials via URL query parameters are rejected in production mode. Use in-band authentication or Authorization headers.".to_string(),
+            ));
+        }
+        warn!("WebSocket credential passed via URL query parameter; this is deprecated due to log exposure risks");
+        if !api_keys::is_key_authorized(&t) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: Invalid credentials for WebSocket telemetry".to_string(),
+            ));
+        }
+        true
+    } else {
+        false
+    };
 
-    Ok(websocket_handler(ws, State(state.broadcaster)).await)
+    let is_prod = is_production_mode();
+    Ok(websocket_handler_with_auth(
+        ws,
+        state.broadcaster,
+        pre_auth,
+        is_prod,
+    ))
 }
 
 // ============ NEW ENDPOINTS FOR 100% DEMO READINESS ============

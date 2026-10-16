@@ -87,18 +87,88 @@ pub enum TelemetryMessage {
     },
 }
 
+pub fn websocket_handler_with_auth(
+    ws: WebSocketUpgrade,
+    broadcaster: Arc<TelemetryBroadcaster>,
+    pre_authenticated: bool,
+    require_auth: bool,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, pre_authenticated, require_auth))
+}
+
+#[allow(dead_code)]
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(broadcaster): State<Arc<TelemetryBroadcaster>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster))
+    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, false, false))
 }
 
-async fn handle_socket(socket: WebSocket, broadcaster: Arc<TelemetryBroadcaster>) {
+async fn handle_socket(
+    socket: WebSocket,
+    broadcaster: Arc<TelemetryBroadcaster>,
+    pre_authenticated: bool,
+    require_auth: bool,
+) {
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = broadcaster.subscribe();
 
-    info!("WebSocket client connected");
+    let authenticated = if pre_authenticated {
+        true
+    } else {
+        // Wait up to 5 seconds for in-band auth frame
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), receiver.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+                    if msg_type == "auth" || msg_type == "authenticate" {
+                        let token = v
+                            .get("token")
+                            .and_then(|t| t.as_str())
+                            .or_else(|| v.get("apiKey").and_then(|t| t.as_str()));
+                        if let Some(t) = token {
+                            crate::api_keys::is_key_authorized(t)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    };
+
+    if !authenticated {
+        if require_auth {
+            info!("Closing unauthenticated WebSocket client in production mode");
+            let _ = sender
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4401,
+                    reason: "Unauthorized: Invalid or missing WebSocket authentication".into(),
+                })))
+                .await;
+            return;
+        } else {
+            info!(
+                "WebSocket client connected without credentials (allowed in non-production mode)"
+            );
+        }
+    } else if !pre_authenticated {
+        let ack = serde_json::json!({
+            "type": "auth_ack",
+            "status": "authenticated",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        if let Ok(json) = serde_json::to_string(&ack) {
+            let _ = sender.send(Message::Text(json)).await;
+        }
+    }
+
+    let mut rx = broadcaster.subscribe();
+    info!("WebSocket client connected and authorized");
 
     // Send initial connection message
     let welcome = TelemetryMessage::AgentActivity {
