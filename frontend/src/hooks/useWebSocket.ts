@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TelemetryMessage } from '@/types';
-import { getApiBaseUrl } from '@/lib/api';
+import { getApiBaseUrl, getApiKey } from '@/lib/api';
 
 function getWebSocketBaseUrl(): string {
   const apiBase = getApiBaseUrl();
@@ -31,7 +31,10 @@ export function useWebSocket(onMessage: (message: TelemetryMessage) => void) {
     function connect() {
       if (isUnmounting) return;
 
-      const ws = new WebSocket(`${getWebSocketBaseUrl()}/ws/telemetry`);
+      const apiKey = getApiKey();
+      const base = `${getWebSocketBaseUrl()}/ws/telemetry`;
+      const url = apiKey ? `${base}?token=${encodeURIComponent(apiKey)}` : base;
+      const ws = new WebSocket(url);
       
       ws.onopen = () => {
         if (isUnmounting) {
