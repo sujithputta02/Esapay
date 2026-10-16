@@ -134,6 +134,12 @@ pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> 
         payment_id.chars().rev().take(8).collect::<String>()
     );
 
+    let currency = entity
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INR")
+        .to_string();
+
     Ok(PaymentEvent {
         event_id: format!("rzp_{}", payment_id),
         event_type,
@@ -142,6 +148,8 @@ pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> 
         payment_method_class: method_class,
         pseudonymous_reference: pseudo_ref,
         amount_cents: amount,
+        amount_minor: amount,
+        currency,
         processing_latency_ms: None,
         success,
     })
@@ -187,6 +195,12 @@ pub fn payment_entity_to_event(entity: &serde_json::Value) -> Result<PaymentEven
         payment_id.chars().rev().take(8).collect::<String>()
     );
 
+    let currency = entity
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INR")
+        .to_string();
+
     Ok(PaymentEvent {
         event_id: format!("rzp_{}", payment_id),
         event_type,
@@ -195,6 +209,8 @@ pub fn payment_entity_to_event(entity: &serde_json::Value) -> Result<PaymentEven
         payment_method_class: method_class,
         pseudonymous_reference: pseudo_ref,
         amount_cents: amount,
+        amount_minor: amount,
+        currency,
         processing_latency_ms: None,
         success,
     })

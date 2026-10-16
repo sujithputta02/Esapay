@@ -6,6 +6,7 @@ pub mod audit;
 pub mod errors;
 pub mod events;
 pub mod intent;
+pub mod payment_state;
 pub mod types;
 
 pub use actions::*;
@@ -14,4 +15,5 @@ pub use audit::*;
 pub use errors::*;
 pub use events::*;
 pub use intent::*;
+pub use payment_state::*;
 pub use types::*;
