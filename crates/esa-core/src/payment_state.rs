@@ -213,9 +213,9 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         provider: "stripe",
         currency: "AED",
         payment_method: "card",
-        minimum_amount_minor: 100, // 100 fils (1.00 AED)
+        minimum_amount_minor: 200, // 200 fils (2.00 AED)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
-        policy_justification: "Stripe enforces 1.00 AED minimum charge to ensure processing costs do not exceed total ticket value.",
+        policy_justification: "Stripe requires a minimum charge of 2.00 AED to ensure processing costs do not exceed total ticket value.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -319,11 +319,14 @@ impl Currency {
         self.metadata().minor_unit_name
     }
 
-    /// Default minimum transaction amount in minor units derived from provider policies.
+    /// Default baseline minimum transaction amount in minor units for currency.
+    /// Only currency-wide universal policies (payment_method: "all") apply by default.
+    /// Payment-method-specific requirements (e.g. Stripe card floors) are NOT inferred
+    /// as generic currency minimums.
     pub fn default_minimum_amount_minor(&self) -> u64 {
         PROVIDER_MINIMUM_POLICIES
             .iter()
-            .find(|p| p.currency == self.0)
+            .find(|p| p.currency == self.0 && p.payment_method == "all")
             .map(|p| p.minimum_amount_minor)
             .unwrap_or(1)
     }
@@ -334,20 +337,44 @@ impl Currency {
     }
 
     /// Look up minimum transaction amount for a specific payment provider and method.
+    /// Evaluates provider- and payment-method-specific requirements without conflating them
+    /// with generic currency minimums.
     pub fn minimum_amount_for_provider(&self, provider: &str, method: Option<&str>) -> u64 {
         let p_clean = provider.trim().to_lowercase();
-        let m_clean = method.unwrap_or("all").trim().to_lowercase();
+        let m_clean = method.unwrap_or("").trim().to_lowercase();
 
-        PROVIDER_MINIMUM_POLICIES
-            .iter()
-            .find(|p| {
+        // 1. Specific match: provider + currency + specific payment_method
+        if !m_clean.is_empty() && m_clean != "all" {
+            if let Some(p) = PROVIDER_MINIMUM_POLICIES.iter().find(|p| {
                 p.currency == self.0
                     && p.provider.eq_ignore_ascii_case(&p_clean)
-                    && (p.payment_method == "all"
-                        || p.payment_method.eq_ignore_ascii_case(&m_clean))
-            })
-            .map(|p| p.minimum_amount_minor)
-            .unwrap_or_else(|| self.default_minimum_amount_minor())
+                    && p.payment_method.eq_ignore_ascii_case(&m_clean)
+            }) {
+                return p.minimum_amount_minor;
+            }
+        }
+
+        // 2. Provider universal match: provider + currency with payment_method == "all"
+        if let Some(p) = PROVIDER_MINIMUM_POLICIES.iter().find(|p| {
+            p.currency == self.0
+                && p.provider.eq_ignore_ascii_case(&p_clean)
+                && p.payment_method == "all"
+        }) {
+            return p.minimum_amount_minor;
+        }
+
+        // 3. Provider primary match: if method is unspecified ("" or "all"), check if provider has a primary policy for that currency
+        if m_clean.is_empty() || m_clean == "all" {
+            if let Some(p) = PROVIDER_MINIMUM_POLICIES
+                .iter()
+                .find(|p| p.currency == self.0 && p.provider.eq_ignore_ascii_case(&p_clean))
+            {
+                return p.minimum_amount_minor;
+            }
+        }
+
+        // 4. Fallback to generic currency baseline (does NOT infer method-specific floors)
+        self.default_minimum_amount_minor()
     }
 }
 
@@ -434,6 +461,47 @@ impl PaymentAmount {
             }
             (Some(minor), _) => Self::new(minor, currency),
             (None, Some(legacy)) => Self::new(legacy, currency),
+            (None, None) => Err(PaymentError::MissingAmount),
+        }
+    }
+
+    /// Resolves canonical amount from potentially ambiguous or legacy input fields,
+    /// and enforces provider- and method-specific monetary validation on the selected gateway.
+    pub fn resolve_from_all_inputs_with_provider(
+        amount_minor_input: Option<u64>,
+        legacy_amount_input: Option<u64>,
+        amount_cents_input: Option<u64>,
+        currency_code: Option<&str>,
+        provider: &str,
+        payment_method: Option<&str>,
+    ) -> Result<Self, PaymentError> {
+        let currency = currency_code.unwrap_or(Currency::INR);
+
+        // Check conflicts between legacy amount and amount_cents
+        if let (Some(a), Some(c)) = (legacy_amount_input, amount_cents_input) {
+            if a != c {
+                return Err(PaymentError::ConflictingAmountInputs {
+                    amount_minor: c,
+                    legacy_amount: a,
+                });
+            }
+        }
+
+        let resolved_legacy = legacy_amount_input.or(amount_cents_input);
+
+        match (amount_minor_input, resolved_legacy) {
+            (Some(minor), Some(legacy)) if minor != legacy => {
+                Err(PaymentError::ConflictingAmountInputs {
+                    amount_minor: minor,
+                    legacy_amount: legacy,
+                })
+            }
+            (Some(minor), _) => {
+                Self::new_with_provider_policy(minor, currency, provider, payment_method)
+            }
+            (None, Some(legacy)) => {
+                Self::new_with_provider_policy(legacy, currency, provider, payment_method)
+            }
             (None, None) => Err(PaymentError::MissingAmount),
         }
     }
@@ -1226,21 +1294,42 @@ mod tests {
 
     #[test]
     fn test_currency_provider_minimum_amounts() {
-        // INR minimum is 100 paise (₹1)
+        // INR universal baseline minimum is 100 paise (₹1) across all methods
         assert!(PaymentAmount::new(99, "INR").is_err());
         assert!(PaymentAmount::new(100, "INR").is_ok());
 
-        // USD minimum is 50 cents ($0.50)
-        assert!(PaymentAmount::new(49, "USD").is_err());
-        assert!(PaymentAmount::new(50, "USD").is_ok());
+        // Generic currency baseline floor is 1 minor unit (rejects 0-amount transactions)
+        // Payment-method-specific requirements are NOT inferred as generic currency minimums!
+        assert!(PaymentAmount::new(0, "USD").is_err());
+        assert!(PaymentAmount::new(1, "USD").is_ok());
+        assert!(PaymentAmount::new(49, "USD").is_ok());
 
-        // JPY minimum is 50 yen
-        assert!(PaymentAmount::new(49, "JPY").is_err());
-        assert!(PaymentAmount::new(50, "JPY").is_ok());
+        // Provider policy enforcement (new_with_provider_policy) enforces method-specific floors:
+        // Stripe card USD minimum is 50 cents ($0.50)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "USD", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "USD", "stripe", Some("card")).is_ok());
 
-        // GBP minimum is 30 pence
-        assert!(PaymentAmount::new(29, "GBP").is_err());
-        assert!(PaymentAmount::new(30, "GBP").is_ok());
+        // Stripe card JPY minimum is 50 yen (¥50)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "JPY", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "JPY", "stripe", Some("card")).is_ok());
+
+        // Stripe card GBP minimum is 30 pence (£0.30)
+        assert!(
+            PaymentAmount::new_with_provider_policy(29, "GBP", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(30, "GBP", "stripe", Some("card")).is_ok());
+
+        // Stripe card AED minimum is 200 fils (2.00 AED)
+        assert!(
+            PaymentAmount::new_with_provider_policy(199, "AED", "stripe", Some("card")).is_err()
+        );
+        assert!(
+            PaymentAmount::new_with_provider_policy(200, "AED", "stripe", Some("card")).is_ok()
+        );
 
         // Large justified amounts are permitted without arbitrary artificial bounds
         assert!(PaymentAmount::new(100_000_000_000, "USD").is_ok());
@@ -1392,22 +1481,124 @@ mod tests {
 
     #[test]
     fn test_provider_specific_policy_enforcement() {
-        // Razorpay domestic requires 100 paise
+        // 1. Razorpay INR (100 paise domestic minimum)
         assert!(PaymentAmount::new_with_provider_policy(99, "INR", "razorpay", None).is_err());
         assert!(PaymentAmount::new_with_provider_policy(100, "INR", "razorpay", None).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(101, "INR", "razorpay", None).is_ok());
 
-        // Stripe card requires 50 cents USD
+        // 2. Stripe USD card (50 cents)
         assert!(
             PaymentAmount::new_with_provider_policy(49, "USD", "stripe", Some("card")).is_err()
         );
         assert!(PaymentAmount::new_with_provider_policy(50, "USD", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "USD", "stripe", Some("card")).is_ok());
 
-        // Stripe HKD requires 400 cents (HK$4.00)
+        // 3. Stripe EUR card (€0.50 = 50 euro cents)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "EUR", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "EUR", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "EUR", "stripe", Some("card")).is_ok());
+
+        // 4. Stripe GBP card (£0.30 = 30 pence)
+        assert!(
+            PaymentAmount::new_with_provider_policy(29, "GBP", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(30, "GBP", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(31, "GBP", "stripe", Some("card")).is_ok());
+
+        // 5. Stripe JPY card (¥50 = 50 yen, zero decimal scale)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "JPY", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "JPY", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "JPY", "stripe", Some("card")).is_ok());
+
+        // 6. Stripe SGD card (S$0.50 = 50 cents)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "SGD", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "SGD", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "SGD", "stripe", Some("card")).is_ok());
+
+        // 7. Stripe AED card (2.00 AED = 200 fils, official Stripe Currency Guide)
+        assert!(
+            PaymentAmount::new_with_provider_policy(199, "AED", "stripe", Some("card")).is_err()
+        );
+        assert!(
+            PaymentAmount::new_with_provider_policy(200, "AED", "stripe", Some("card")).is_ok()
+        );
+        assert!(
+            PaymentAmount::new_with_provider_policy(201, "AED", "stripe", Some("card")).is_ok()
+        );
+
+        // 8. Stripe CAD card (C$0.50 = 50 cents)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "CAD", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "CAD", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "CAD", "stripe", Some("card")).is_ok());
+
+        // 9. Stripe AUD card (A$0.50 = 50 cents)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "AUD", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "AUD", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "AUD", "stripe", Some("card")).is_ok());
+
+        // 10. Stripe CHF card (0.50 CHF = 50 centimes)
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "CHF", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "CHF", "stripe", Some("card")).is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(51, "CHF", "stripe", Some("card")).is_ok());
+
+        // 11. Stripe HKD card (HK$4.00 = 400 cents)
         assert!(
             PaymentAmount::new_with_provider_policy(399, "HKD", "stripe", Some("card")).is_err()
         );
         assert!(
             PaymentAmount::new_with_provider_policy(400, "HKD", "stripe", Some("card")).is_ok()
         );
+        assert!(
+            PaymentAmount::new_with_provider_policy(401, "HKD", "stripe", Some("card")).is_ok()
+        );
+
+        // Invariant: Method-specific requirements are NOT inferred for other methods
+        // Non-card payment methods on Stripe or other providers do not inherit the card minimum
+        assert!(PaymentAmount::new_with_provider_policy(
+            10,
+            "USD",
+            "stripe",
+            Some("bank_transfer")
+        )
+        .is_ok());
+        assert!(PaymentAmount::new_with_provider_policy(10, "USD", "custom_gateway", None).is_ok());
+
+        // resolve_from_all_inputs_with_provider wire compatibility
+        let resolved = PaymentAmount::resolve_from_all_inputs_with_provider(
+            None,
+            Some(200),
+            None,
+            Some("AED"),
+            "stripe",
+            Some("card"),
+        )
+        .expect("Legacy amount input must resolve against provider policy");
+        assert_eq!(resolved.amount_minor, 200);
+        assert_eq!(resolved.currency, "AED");
+
+        let conflict = PaymentAmount::resolve_from_all_inputs_with_provider(
+            Some(200),
+            Some(199),
+            None,
+            Some("AED"),
+            "stripe",
+            Some("card"),
+        );
+        assert!(matches!(
+            conflict,
+            Err(PaymentError::ConflictingAmountInputs { .. })
+        ));
     }
 }

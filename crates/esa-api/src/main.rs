@@ -2175,66 +2175,7 @@ async fn universal_checkout(
     // 1. Rate Limiting Check (Token Bucket protection against DDoS/scraping)
     state.rate_limiter.check_checkout()?;
 
-    // 2. Input Validation & Amount Resolution (Strict bounds & conflict check)
-    let resolved_amount = match esa_core::PaymentAmount::resolve_from_all_inputs(
-        req.amount_minor,
-        req.amount,
-        req.amount_cents,
-        Some(&req.currency),
-    ) {
-        Ok(amt) => amt,
-        Err(esa_core::PaymentError::ConflictingAmountInputs {
-            amount_minor,
-            legacy_amount,
-        }) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "conflicting_amounts",
-                    "message": format!(
-                        "Conflicting amount inputs: 'amount_minor' is {} but legacy amount field is {}",
-                        amount_minor, legacy_amount
-                    )
-                })),
-            ));
-        }
-        Err(esa_core::PaymentError::AmountBelowMinimum {
-            amount_minor,
-            minimum_required,
-            currency,
-        }) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "amount_below_minimum",
-                    "message": format!(
-                        "Amount {} is below minimum required {} minor units for currency {}",
-                        amount_minor, minimum_required, currency
-                    )
-                })),
-            ));
-        }
-        Err(esa_core::PaymentError::InvalidCurrency(msg)) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_currency",
-                    "message": msg
-                })),
-            ));
-        }
-        Err(err) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_amount",
-                    "message": format!("Invalid amount: {}", err)
-                })),
-            ));
-        }
-    };
-
-    // 3. Mandatory Authorization check
+    // 2. Mandatory Authorization check
     let caller = match api_keys::authenticate_caller(&headers).await {
         Ok(c) => c,
         Err(err) => {
@@ -2262,6 +2203,7 @@ async fn universal_checkout(
         ));
     }
 
+    // 3. Corridor health evaluation and gateway selection
     let requested = match req.gateway.to_lowercase().as_str() {
         "razorpay" => PaymentGateway::Razorpay,
         "stripe" => PaymentGateway::Stripe,
@@ -2322,36 +2264,102 @@ async fn universal_checkout(
         ),
     };
 
+    // 4. Input Validation & Amount Resolution against the SELECTED gateway provider policy
+    let resolved_amount = match esa_core::PaymentAmount::resolve_from_all_inputs_with_provider(
+        req.amount_minor,
+        req.amount,
+        req.amount_cents,
+        Some(&req.currency),
+        routed.as_str(),
+        Some(&req.method),
+    ) {
+        Ok(amt) => amt,
+        Err(esa_core::PaymentError::ConflictingAmountInputs {
+            amount_minor,
+            legacy_amount,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "conflicting_amounts",
+                    "message": format!(
+                        "Conflicting amount inputs: 'amount_minor' is {} but legacy amount field is {}",
+                        amount_minor, legacy_amount
+                    )
+                })),
+            ));
+        }
+        Err(esa_core::PaymentError::AmountBelowMinimum {
+            amount_minor,
+            minimum_required,
+            currency,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "amount_below_minimum",
+                    "message": format!(
+                        "Amount {} is below minimum required {} minor units for provider '{}' currency {} (method: '{}')",
+                        amount_minor, minimum_required, routed.as_str(), currency, req.method
+                    )
+                })),
+            ));
+        }
+        Err(esa_core::PaymentError::InvalidCurrency(msg)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_currency",
+                    "message": msg
+                })),
+            ));
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_amount",
+                    "message": format!("Invalid amount: {}", err)
+                })),
+            ));
+        }
+    };
+
     let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
     let checkout_url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
 
-    // Ingest the transaction into StateFabric so real customer payments drive live vitals and spikes!
-    let payment_event = PaymentEvent {
-        event_id: tx_id.clone(),
-        event_type: PaymentEventType::PaymentAuthorized,
-        timestamp: chrono::Utc::now(),
-        region: match routed {
-            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
-                Region::IndiaSouth
-            }
-            PaymentGateway::Paytm => Region::IndiaNorth,
-            _ => Region::IndiaWest,
-        },
-        payment_method_class: match req.method.to_lowercase().as_str() {
-            "card" => PaymentMethodClass::Card,
-            "netbanking" => PaymentMethodClass::NetBanking,
-            "wallet" => PaymentMethodClass::Wallet,
-            _ => PaymentMethodClass::Upi,
-        },
-        pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
-        amount_cents: Some(resolved_amount.amount_minor),
-        amount_minor: Some(resolved_amount.amount_minor),
-        currency: resolved_amount.currency.clone(),
-        processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
-        success: true,
-    };
-    let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
-    publish_payment_side_effects(&state, &apply_res);
+    let is_prod = is_production_mode();
+
+    // In demo/sandbox mode, ingest a simulated telemetry event into StateFabric so demonstration dashboards animate.
+    // In live/production mode, DO NOT falsely report a payment as authorized or captured!
+    if !is_prod {
+        let payment_event = PaymentEvent {
+            event_id: tx_id.clone(),
+            event_type: PaymentEventType::PaymentAuthorized,
+            timestamp: chrono::Utc::now(),
+            region: match routed {
+                PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
+                    Region::IndiaSouth
+                }
+                PaymentGateway::Paytm => Region::IndiaNorth,
+                _ => Region::IndiaWest,
+            },
+            payment_method_class: match req.method.to_lowercase().as_str() {
+                "card" => PaymentMethodClass::Card,
+                "netbanking" => PaymentMethodClass::NetBanking,
+                "wallet" => PaymentMethodClass::Wallet,
+                _ => PaymentMethodClass::Upi,
+            },
+            pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
+            amount_cents: Some(resolved_amount.amount_minor),
+            amount_minor: Some(resolved_amount.amount_minor),
+            currency: resolved_amount.currency.clone(),
+            processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
+            success: true,
+        };
+        let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+        publish_payment_side_effects(&state, &apply_res);
+    }
 
     Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
@@ -2363,6 +2371,7 @@ async fn universal_checkout(
         failover_triggered: failover,
         routing_reason: reason,
         checkout_url,
+        is_simulated: !is_prod,
         timestamp: chrono::Utc::now(),
     }))
 }
@@ -2856,6 +2865,268 @@ mod integration_tests {
             resp_json.get("error").and_then(|v| v.as_str()),
             Some("invalid_currency")
         );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_real_api_handler_for_all_supported_provider_policies_boundary_cases() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-provider-policies-key");
+
+        struct PolicyCase {
+            gateway: &'static str,
+            currency: &'static str,
+            method: &'static str,
+            minimum: u64,
+        }
+
+        let cases = [
+            PolicyCase {
+                gateway: "razorpay",
+                currency: "INR",
+                method: "upi",
+                minimum: 100,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "USD",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "EUR",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "GBP",
+                method: "card",
+                minimum: 30,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "JPY",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "SGD",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "AED",
+                method: "card",
+                minimum: 200,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "CAD",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "AUD",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "CHF",
+                method: "card",
+                minimum: 50,
+            },
+            PolicyCase {
+                gateway: "stripe",
+                currency: "HKD",
+                method: "card",
+                minimum: 400,
+            },
+        ];
+
+        for c in cases {
+            // Case A: Just below minimum -> strictly rejected with 400 Bad Request
+            {
+                let state = create_test_state();
+                let app = build_app(state);
+                let req_body = serde_json::to_string(&serde_json::json!({
+                    "amount_minor": c.minimum - 1,
+                    "currency": c.currency,
+                    "gateway": c.gateway,
+                    "method": c.method,
+                }))
+                .unwrap();
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/payments/checkout")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-provider-policies-key")
+                    .body(axum::body::Body::from(req_body))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "Amount {} below minimum {} for {} {} on {} must be rejected with 400",
+                    c.minimum - 1,
+                    c.minimum,
+                    c.currency,
+                    c.method,
+                    c.gateway
+                );
+            }
+
+            // Case B: Exactly at minimum -> successfully accepted with 200 OK
+            {
+                let state = create_test_state();
+                let app = build_app(state);
+                let req_body = serde_json::to_string(&serde_json::json!({
+                    "amount_minor": c.minimum,
+                    "currency": c.currency,
+                    "gateway": c.gateway,
+                    "method": c.method,
+                }))
+                .unwrap();
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/payments/checkout")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-provider-policies-key")
+                    .body(axum::body::Body::from(req_body))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "Amount {} exactly at minimum {} for {} {} on {} must succeed with 200",
+                    c.minimum,
+                    c.minimum,
+                    c.currency,
+                    c.method,
+                    c.gateway
+                );
+            }
+
+            // Case C: Just above minimum -> successfully accepted with 200 OK
+            {
+                let state = create_test_state();
+                let app = build_app(state);
+                let req_body = serde_json::to_string(&serde_json::json!({
+                    "amount_minor": c.minimum + 1,
+                    "currency": c.currency,
+                    "gateway": c.gateway,
+                    "method": c.method,
+                }))
+                .unwrap();
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/payments/checkout")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-provider-policies-key")
+                    .body(axum::body::Body::from(req_body))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "Amount {} just above minimum {} for {} {} on {} must succeed with 200",
+                    c.minimum + 1,
+                    c.minimum,
+                    c.currency,
+                    c.method,
+                    c.gateway
+                );
+            }
+        }
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_simulation_vs_production_mode() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-sim-prod-key");
+
+        // 1. Sandbox / Demo mode: response indicates is_simulated: true
+        {
+            std::env::remove_var("ENVIRONMENT");
+            let state = create_test_state();
+            let app = build_app(state);
+
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "upi",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-sim-prod-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+
+        // 2. Production mode: response indicates is_simulated: false, no fake PaymentAuthorized emission
+        {
+            std::env::set_var("ENVIRONMENT", "production");
+            let state = create_test_state();
+            let app = build_app(state);
+
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "upi",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-sim-prod-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+            std::env::remove_var("ENVIRONMENT");
+        }
 
         std::env::remove_var("ESA_TEST_API_KEY");
     }

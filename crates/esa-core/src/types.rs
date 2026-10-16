@@ -103,6 +103,8 @@ pub struct GatewayRouteDecision {
     pub failover_triggered: bool,
     pub routing_reason: String,
     pub checkout_url: String,
+    #[serde(default)]
+    pub is_simulated: bool,
     pub timestamp: DateTime<Utc>,
 }
 
