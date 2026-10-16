@@ -2,9 +2,10 @@ name: ESA CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, security/p0-auth-hardening, payment/p1-state-machine ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, security/p0-auth-hardening ]
+  workflow_dispatch:
 
 jobs:
   test-backend:

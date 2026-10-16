@@ -168,7 +168,7 @@ from esapay import EsaGateway
 # Authenticate with an API Key generated from the ESA Command Center
 esa = EsaGateway(
     api_url="http://localhost:8080",      # ESA cluster endpoint
-    api_key="esa_live_9f86d081884c...",   # Live (esa_live_...) or Sandbox (esa_test_...)
+    api_key="esa_test_demo_sample_key",   # Sandbox (esa_test_...) or Live (esa_live_...)
     timeout=10.0,                          # Request timeout in seconds
     auto_failover=True,                    # Enable dynamic routing
     corridors=["phonepe", "razorpay", "paytm", "cashfree"]

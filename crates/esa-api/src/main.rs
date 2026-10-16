@@ -1,7 +1,7 @@
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{ws::WebSocketUpgrade, Path, Query, State},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 
 mod api_keys;
 mod benchmark;
@@ -31,7 +31,62 @@ use live_data::{
     verdict_record_json,
 };
 use vitals::VitalsStore;
-use websocket::{websocket_handler, TelemetryBroadcaster, TelemetryMessage};
+use websocket::{websocket_handler_with_auth, TelemetryBroadcaster, TelemetryMessage};
+
+pub(crate) fn is_production_mode() -> bool {
+    std::env::var("ENVIRONMENT")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
+        || std::env::var("RAZORPAY_MODE")
+            .map(|v| v.eq_ignore_ascii_case("live"))
+            .unwrap_or(false)
+}
+
+fn configure_cors() -> CorsLayer {
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS").ok();
+    let mut origins = Vec::new();
+
+    if let Some(origins_str) = allowed_origins {
+        for origin in origins_str.split(',') {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                if let Ok(header_val) = trimmed.parse::<HeaderValue>() {
+                    origins.push(header_val);
+                }
+            }
+        }
+    }
+
+    if origins.is_empty() {
+        origins = vec![
+            "http://localhost:5173".parse().unwrap(),
+            "http://127.0.0.1:5173".parse().unwrap(),
+            "http://localhost:3000".parse().unwrap(),
+            "http://127.0.0.1:3000".parse().unwrap(),
+            "http://localhost:8080".parse().unwrap(),
+            "http://127.0.0.1:8080".parse().unwrap(),
+        ];
+    }
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::ORIGIN,
+            HeaderName::from_static("x-api-key"),
+            HeaderName::from_static("x-razorpay-signature"),
+        ])
+        .allow_credentials(true)
+}
 
 fn publish_metrics_telemetry(state: &AppState) {
     let workloads = state.state_fabric.list_workloads();
@@ -358,6 +413,21 @@ async fn main() -> anyhow::Result<()> {
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
+    let app = build_app(app_state);
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    info!("ESA API listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    orch_handle.await?;
+
+    Ok(())
+}
+
+fn build_app(app_state: AppState) -> Router {
     // Build router with full /api/v1/ versioning and backwards-compatible /api/ aliases
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -516,38 +586,36 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
 
-    let app = app
-        .layer(axum::middleware::from_fn(
-            |req: axum::extract::Request, next: axum::middleware::Next| async move {
-                let mut res = next.run(req).await;
-                let headers = res.headers_mut();
-                headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-                headers.insert("x-frame-options", "DENY".parse().unwrap());
-                headers.insert(
-                    "referrer-policy",
-                    "strict-origin-when-cross-origin".parse().unwrap(),
-                );
+    app.layer(axum::middleware::from_fn(
+        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let is_https = req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("https"))
+                .unwrap_or(false);
+            let is_prod = is_production_mode();
+
+            let mut res = next.run(req).await;
+            let headers = res.headers_mut();
+            headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+            headers.insert("x-frame-options", "DENY".parse().unwrap());
+            headers.insert(
+                "referrer-policy",
+                "strict-origin-when-cross-origin".parse().unwrap(),
+            );
+            if is_https || is_prod {
                 headers.insert(
                     "strict-transport-security",
                     "max-age=31536000; includeSubDomains".parse().unwrap(),
                 );
-                headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
-                res
-            },
-        ))
-        .layer(CorsLayer::permissive())
-        .with_state(app_state);
-
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr = format!("0.0.0.0:{}", port);
-    info!("ESA API listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    orch_handle.await?;
-
-    Ok(())
+            }
+            headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+            res
+        },
+    ))
+    .layer(configure_cors())
+    .with_state(app_state)
 }
 
 #[derive(Clone)]
@@ -613,26 +681,49 @@ async fn get_workload(
 
 async fn create_workload(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(workload): Json<WorkloadEntity>,
 ) -> Result<Json<WorkloadEntity>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to create workload: {}", e))
+    })?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "workloads:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'workloads:write' scope".into(),
+        ));
+    }
+
     state.state_fabric.upsert_workload(workload.clone())?;
     Ok(Json(workload))
 }
 
 async fn ingest_payment_event(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(event): Json<PaymentEvent>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
+    let _caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required to ingest payment events: {}",
+            e
+        ))
+    })?;
+
     let result = payment::apply_payment_event(&state.state_fabric, &event);
     publish_payment_side_effects(&state, &result);
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": "accepted",
         "event_id": result.event_id,
         "auto_spike_triggered": result.workload_updated,
         "workload_id": result.workload_id,
         "message": "Payment processed and workload metrics automatically adjusted"
-    }))
+    })))
 }
 
 async fn razorpay_webhook(
@@ -673,7 +764,11 @@ async fn razorpay_webhook(
             }))
             .into_response();
         }
-        Err(WebhookError::InvalidSignature | WebhookError::MissingSignature) => {
+        Err(
+            WebhookError::InvalidSignature
+            | WebhookError::MissingSignature
+            | WebhookError::MissingWebhookSecret,
+        ) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "invalid webhook signature" })),
@@ -687,10 +782,17 @@ async fn razorpay_webhook(
             )
                 .into_response();
         }
-        Err(WebhookError::MalformedPayload) => {
+        Err(WebhookError::MalformedPayload(msg)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "malformed webhook payload" })),
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::UnsupportedEvent(msg)) | Err(WebhookError::UnsupportedStatus(msg)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response();
         }
@@ -725,7 +827,12 @@ async fn razorpay_status(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn razorpay_verify_keys(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to verify keys: {}", e))
+    })?;
+
     let adapter = state
         .razorpay
         .as_ref()
@@ -749,8 +856,23 @@ struct RazorpayCreateOrderRequest {
 
 async fn razorpay_create_order(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RazorpayCreateOrderRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to create order: {}", e))
+    })?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
     let adapter = state
         .razorpay
         .as_ref()
@@ -800,8 +922,22 @@ struct RazorpayConfirmRequest {
 /// Checkout success fallback when webhook signature mismatches (fetches payment from Razorpay API).
 async fn razorpay_confirm_payment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RazorpayConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to confirm payment: {}", e))
+    })?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
     let adapter = state
         .razorpay
         .as_ref()
@@ -839,6 +975,12 @@ struct TriggerSpikeRequest {
 }
 
 async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Demo seeding is disabled in production mode".to_string(),
+        ));
+    }
+
     info!("Seeding demo data");
 
     use chrono::Utc;
@@ -949,6 +1091,12 @@ async fn trigger_spike(
     State(state): State<AppState>,
     Json(req): Json<TriggerSpikeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Demo spike endpoints are disabled in production mode".to_string(),
+        ));
+    }
+
     // Rate limit demo/spike endpoint to prevent abuse
     if let Err((_status, err_json)) = state.rate_limiter.check_demo() {
         return Ok((StatusCode::TOO_MANY_REQUESTS, err_json).into_response());
@@ -1162,9 +1310,52 @@ async fn get_recent_actions(State(state): State<AppState>) -> impl IntoResponse 
 
 async fn ws_telemetry_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    websocket_handler(ws, State(state.broadcaster)).await
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let header_token = api_keys::extract_token(&headers);
+    let query_token = params
+        .get("token")
+        .or_else(|| params.get("api_key"))
+        .or_else(|| params.get("key"))
+        .cloned();
+
+    let pre_auth = if let Some(t) = header_token {
+        if !api_keys::is_key_authorized_async(&t).await {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: Invalid or expired credentials for WebSocket telemetry".to_string(),
+            ));
+        }
+        true
+    } else if let Some(t) = query_token {
+        // Query param auth leaks tokens into server access logs, CDN logs, and browser history
+        if is_production_mode() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: Credentials via URL query parameters are rejected in production mode. Use in-band authentication or Authorization headers.".to_string(),
+            ));
+        }
+        warn!("WebSocket credential passed via URL query parameter; this is deprecated due to log exposure risks");
+        if !api_keys::is_key_authorized_async(&t).await {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: Invalid credentials for WebSocket telemetry".to_string(),
+            ));
+        }
+        true
+    } else {
+        false
+    };
+
+    let is_prod = is_production_mode();
+    Ok(websocket_handler_with_auth(
+        ws,
+        state.broadcaster,
+        pre_auth,
+        is_prod,
+    ))
 }
 
 // ============ NEW ENDPOINTS FOR 100% DEMO READINESS ============
@@ -1255,6 +1446,12 @@ async fn verify_audit_chain(State(state): State<AppState>) -> impl IntoResponse 
 async fn run_benchmark_ablations(
     State(state): State<AppState>,
 ) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Benchmark ablations are disabled in production mode".to_string(),
+        ));
+    }
+
     let result = benchmark_harness::run_ablation_study(
         state.state_fabric.clone(),
         state.orchestrator.clone(),
@@ -1486,6 +1683,12 @@ async fn trigger_scenario(
     Path(scenario): Path<String>,
     Json(req): Json<ScenarioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Demo scenario triggers are disabled in production mode".to_string(),
+        ));
+    }
+
     use chrono::Utc;
 
     let intensity = req.intensity.unwrap_or(1.0);
@@ -1668,6 +1871,12 @@ async fn run_benchmark(
     State(state): State<AppState>,
     Json(req): Json<BenchmarkRequest>,
 ) -> Result<Json<benchmark::BenchmarkComparison>, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Benchmark execution is disabled in production mode".to_string(),
+        ));
+    }
+
     let comparison = benchmark::run_comparison(
         Arc::clone(&state.state_fabric),
         Arc::clone(&state.orchestrator),
@@ -1714,6 +1923,12 @@ async fn run_benchmark_harness(
     State(state): State<AppState>,
     Json(req): Json<HarnessRequest>,
 ) -> Result<Json<benchmark_harness::HarnessResult>, AppError> {
+    if is_production_mode() {
+        return Err(AppError::Forbidden(
+            "Benchmark harness execution is disabled in production mode".to_string(),
+        ));
+    }
+
     let ollama_url =
         std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let ollama_reachable = benchmark_harness::probe_ollama(&ollama_url).await;
@@ -1740,6 +1955,8 @@ async fn run_benchmark_harness(
 enum AppError {
     NotFound(String),
     Internal(String),
+    Unauthorized(String),
+    Forbidden(String),
 }
 
 impl From<EsaError> for AppError {
@@ -1753,6 +1970,8 @@ impl IntoResponse for AppError {
         let (status, err_msg) = match self {
             AppError::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
             AppError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
+            AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
+            AppError::Forbidden(msg) => (axum::http::StatusCode::FORBIDDEN, msg),
         };
         (status, Json(serde_json::json!({ "error": err_msg }))).into_response()
     }
@@ -1892,8 +2111,36 @@ async fn list_gateways(State(state): State<AppState>) -> Json<Vec<GatewayHealth>
 
 async fn toggle_gateway(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let caller = match api_keys::authenticate_caller(&headers).await {
+        Ok(c) => c,
+        Err(err) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized",
+                    "message": format!("Authentication required to toggle gateway status: {}", err)
+                })),
+            ));
+        }
+    };
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "gateways:toggle" || s == "admin" || s == "*")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Caller lacks required 'gateways:toggle' scope"
+            })),
+        ));
+    }
+
     let lower = name.to_lowercase();
     let mut overrides = state
         .gateway_overrides
@@ -1904,14 +2151,15 @@ async fn toggle_gateway(
     overrides.insert(lower.clone(), new_state);
 
     info!(
+        caller = %caller.user_id,
         "Switched gateway '{}' healthy status to: {}",
         lower, new_state
     );
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "gateway": lower,
         "is_healthy": new_state,
         "message": format!("Gateway '{}' status set to {}", lower, if new_state { "Healthy" } else { "Degraded (Outage Simulation Active)" })
-    }))
+    })))
 }
 
 async fn universal_checkout(
@@ -1944,17 +2192,32 @@ async fn universal_checkout(
         ));
     }
 
-    // 3. Optional Authorization check (validates Bearer token or API key if provided)
-    if let Some(token) = api_keys::extract_bearer_token(&headers) {
-        if !api_keys::is_key_authorized(&token) {
+    // 3. Mandatory Authorization check
+    let caller = match api_keys::authenticate_caller(&headers).await {
+        Ok(c) => c,
+        Err(err) => {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
                     "error": "unauthorized",
-                    "message": "Provided Authorization Bearer token is invalid or expired."
+                    "message": format!("Authentication required for checkout: {}", err)
                 })),
             ));
         }
+    };
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Caller lacks required 'payments:write' scope"
+            })),
+        ));
     }
 
     let requested = match req.gateway.to_lowercase().as_str() {
@@ -2057,4 +2320,251 @@ async fn universal_checkout(
         checkout_url,
         timestamp: chrono::Utc::now(),
     }))
+}
+
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod integration_tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn create_test_state() -> AppState {
+        let state_fabric = Arc::new(StateFabric::new());
+        let audit_store = Arc::new(AuditStore::new());
+        let ollama_client = OllamaClient::new(
+            "http://localhost:11434".to_string(),
+            "deepseek-r1:1.5b".to_string(),
+        );
+        let orchestrator = Arc::new(EsaOrchestrator::new(
+            Arc::clone(&state_fabric),
+            ollama_client.clone(),
+            Arc::clone(&audit_store),
+            None,
+        ));
+        let broadcaster = Arc::new(TelemetryBroadcaster::new());
+        let agent_status = Arc::new(std::sync::RwLock::new(AgentStatusState::default()));
+        let vitals = VitalsStore::new();
+        let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
+        let rate_limiter = rate_limiter::ApiRateLimiter::new();
+
+        AppState {
+            state_fabric,
+            orchestrator,
+            ollama_client,
+            fluid_reasoner,
+            broadcaster,
+            audit_store,
+            agent_status,
+            razorpay: None,
+            vitals,
+            rate_limiter,
+            last_benchmark: Arc::new(std::sync::RwLock::new(None)),
+            last_ablation: Arc::new(std::sync::RwLock::new(None)),
+            gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_checkout_rejected() {
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_invalid_token_rejected() {
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer forged_or_invalid_api_key_12345")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_valid_key_succeeds() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_LIVE_API_KEY", "esa_live_test_secret_checkout_key_8888");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                "Bearer esa_live_test_secret_checkout_key_8888",
+            )
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        std::env::remove_var("ESA_LIVE_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_toggle_gateway_rejected() {
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/gateways/razorpay/toggle")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_gateway_with_valid_key_succeeds() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "esa_test_gateway_toggle_key_9999");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/gateways/razorpay/toggle")
+            .header("x-api-key", "esa_test_gateway_toggle_key_9999")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_public_health_check_unauthenticated() {
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_demo_spike_disabled_in_production() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ENVIRONMENT", "production");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "multiplier": 3.0
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/demo/trigger-spike")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        std::env::remove_var("ENVIRONMENT");
+    }
+
+    #[tokio::test]
+    async fn test_create_workload_anonymous_rejected() {
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let workload = WorkloadEntity {
+            workload_id: "test-workload".to_string(),
+            shard_id: "shard-1".to_string(),
+            state: WorkloadState::Healthy,
+            region: Region::IndiaSouth,
+            metrics: WorkloadMetrics {
+                rate_per_min: 100.0,
+                p50_latency_ms: 10.0,
+                p95_latency_ms: 20.0,
+                p99_latency_ms: 30.0,
+                error_rate: 0.0,
+                queue_depth: 0,
+                timestamp: chrono::Utc::now(),
+            },
+            replication: ReplicationPolicy {
+                min_replicas: 1,
+                max_replicas: 3,
+                current_replicas: 1,
+                consistency_mode: ConsistencyMode::Strong,
+            },
+            locality: LocalityPreference {
+                preferred_region: Region::IndiaSouth,
+                fallback_regions: vec![],
+            },
+            lifecycle: LifecycleState::Active,
+            version: 1,
+            updated_at: chrono::Utc::now(),
+        };
+
+        let req_body = serde_json::to_string(&workload).unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workloads")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }

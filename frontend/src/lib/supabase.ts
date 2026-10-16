@@ -3,17 +3,15 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-// Strictly loaded from environment variables with production project fallbacks.
-const DEFAULT_SUPABASE_URL = 'https://yvmhffpbmtclskpwruwn.supabase.co';
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_IGVSm4995fY4fciemFSRvQ_u797gEMM';
-
+// Strictly loaded from environment variables (never hardcoded in source code).
+// Dummy placeholder prevents runtime crash if env is unmounted during offline testing.
 const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const rawSupabaseKey =
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-const SUPABASE_URL = (rawSupabaseUrl || DEFAULT_SUPABASE_URL).replace(/\/$/, '');
-const SUPABASE_ANON_KEY = rawSupabaseKey || DEFAULT_SUPABASE_ANON_KEY;
+const SUPABASE_URL = (rawSupabaseUrl || 'https://placeholder.supabase.co').replace(/\/$/, '');
+const SUPABASE_ANON_KEY = rawSupabaseKey || 'placeholder-anon-key';
 
 export const isSupabaseConfigured = Boolean(
   SUPABASE_URL &&
@@ -381,7 +379,7 @@ export const supabaseAuth = {
         {
           id: `key_live_${Math.random().toString(36).substring(2, 9)}`,
           name: 'Production Core Gateway',
-          key_prefix: 'esa_live_sec_8a4f91b2...',
+          key_prefix: 'esa_test_sample_8a4f91b2...',
           environment: 'live',
           created_at: new Date(now - 14 * 86400 * 1000).toISOString(),
           expires_at: in90Days,
@@ -401,7 +399,7 @@ export const supabaseAuth = {
         {
           id: `key_exp_${Math.random().toString(36).substring(2, 9)}`,
           name: 'Legacy Mobile POS (Sample Expired Key)',
-          key_prefix: 'esa_live_sec_1e0892a7...',
+          key_prefix: 'esa_test_sample_1e0892a7...',
           environment: 'live',
           created_at: new Date(now - 35 * 86400 * 1000).toISOString(),
           expires_at: expiredPast, // Expired 5 days ago!

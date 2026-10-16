@@ -407,11 +407,14 @@ impl ActionGateway {
         self.commit_workload_change(workload, &before, expected)
     }
 
+    pub fn is_kubernetes_enabled() -> bool {
+        std::env::var("KUBERNETES_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false)
+    }
+
     fn sync_to_k8s_deployment(workload_id: &str, replicas: u32) {
-        if std::env::var("KUBERNETES_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(true)
-        {
+        if Self::is_kubernetes_enabled() {
             let deployment_name = match workload_id {
                 "payment-processor" | "w_payment_01" | "payment-service" => "payment-processor",
                 "fraud-detector" | "w_fraud_01" | "fraud-service" => "fraud-detector",
@@ -733,5 +736,31 @@ impl ActionGateway {
                 ),
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kubernetes_enabled_default_is_false() {
+        std::env::remove_var("KUBERNETES_ENABLED");
+        assert!(!ActionGateway::is_kubernetes_enabled());
+
+        std::env::set_var("KUBERNETES_ENABLED", "false");
+        assert!(!ActionGateway::is_kubernetes_enabled());
+
+        std::env::set_var("KUBERNETES_ENABLED", "0");
+        assert!(!ActionGateway::is_kubernetes_enabled());
+
+        std::env::set_var("KUBERNETES_ENABLED", "true");
+        assert!(ActionGateway::is_kubernetes_enabled());
+
+        std::env::set_var("KUBERNETES_ENABLED", "1");
+        assert!(ActionGateway::is_kubernetes_enabled());
+
+        // Clean up
+        std::env::remove_var("KUBERNETES_ENABLED");
     }
 }

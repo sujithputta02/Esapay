@@ -3228,7 +3228,7 @@ console.log(\`Session URL: \${decision.checkout_url}\`);`}</pre>
 
 esa = EsaGateway(
     api_url="http://localhost:8080",
-    api_key="esa_live_secret_key",
+    api_key="esa_test_demo_key",
     auto_failover=True
 )
 

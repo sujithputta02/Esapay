@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TelemetryMessage } from '@/types';
-import { getApiBaseUrl } from '@/lib/api';
+import { getApiBaseUrl, getApiKey } from '@/lib/api';
 
 function getWebSocketBaseUrl(): string {
   const apiBase = getApiBaseUrl();
@@ -31,7 +31,9 @@ export function useWebSocket(onMessage: (message: TelemetryMessage) => void) {
     function connect() {
       if (isUnmounting) return;
 
-      const ws = new WebSocket(`${getWebSocketBaseUrl()}/ws/telemetry`);
+      const apiKey = getApiKey();
+      const url = `${getWebSocketBaseUrl()}/ws/telemetry`;
+      const ws = new WebSocket(url);
       
       ws.onopen = () => {
         if (isUnmounting) {
@@ -39,12 +41,19 @@ export function useWebSocket(onMessage: (message: TelemetryMessage) => void) {
           return;
         }
         console.log('WebSocket connected');
+        // Authenticate in-band without exposing credentials in URL query parameters / access logs
+        if (apiKey) {
+          ws.send(JSON.stringify({ type: 'auth', token: apiKey }));
+        }
         setIsConnected(true);
       };
 
       ws.onmessage = (event) => {
         try {
           const message: TelemetryMessage = JSON.parse(event.data);
+          if ((message as any).type === 'auth_ack') {
+            return;
+          }
           onMessageRef.current(message);
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);
