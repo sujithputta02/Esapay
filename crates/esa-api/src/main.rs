@@ -33,13 +33,183 @@ use live_data::{
 use vitals::VitalsStore;
 use websocket::{websocket_handler_with_auth, TelemetryBroadcaster, TelemetryMessage};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaymentCheckoutMode {
+    /// Explicit opt-in simulation for local/demo usage.
+    Simulated,
+    /// Live/production payment mode. Any live gateway or live environment triggers this.
+    /// Live checkout must return 501 NOT IMPLEMENTED until real upstream order creation is implemented.
+    Live { reason: String },
+    /// No payment mode or simulation opt-in configured.
+    /// Fails safely with 503 SERVICE UNAVAILABLE to prevent accidental simulation or unconfigured processing.
+    Unconfigured,
+    /// Invalid or unrecognized payment mode configuration value.
+    /// Fails safely with 400 BAD REQUEST.
+    Misconfigured(String),
+}
+
+/// Detects the active payment processing mode from environment variables.
+/// Safe by default: live mode takes absolute precedence over simulation opt-ins,
+/// and unconfigured or invalid values fail safely without defaulting to live or simulation.
+pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
+    let check_env_var = |name: &str| -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(val) => {
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(e) => Err(format!("Environment variable '{}' error: {}", name, e)),
+        }
+    };
+
+    let sim_flag = match check_env_var("ESA_ENABLE_SIMULATED_CHECKOUT") {
+        Ok(v) => v,
+        Err(e) => return PaymentCheckoutMode::Misconfigured(e),
+    };
+    let esa_mode = match check_env_var("ESA_PAYMENT_MODE") {
+        Ok(v) => v,
+        Err(e) => return PaymentCheckoutMode::Misconfigured(e),
+    };
+    let env_mode = match check_env_var("ENVIRONMENT") {
+        Ok(v) => v,
+        Err(e) => return PaymentCheckoutMode::Misconfigured(e),
+    };
+
+    // Supported provider gateways: razorpay, stripe, phonepe, cashfree, paytm, adyen
+    let provider_vars = [
+        "RAZORPAY_MODE",
+        "STRIPE_MODE",
+        "PHONEPE_MODE",
+        "CASHFREE_MODE",
+        "PAYTM_MODE",
+        "ADYEN_MODE",
+    ];
+
+    let mut provider_modes = Vec::new();
+    for var in &provider_vars {
+        match check_env_var(var) {
+            Ok(Some(v)) => provider_modes.push((*var, v)),
+            Ok(None) => {}
+            Err(e) => return PaymentCheckoutMode::Misconfigured(e),
+        }
+    }
+
+    // 1. Syntax / validity check for ESA_ENABLE_SIMULATED_CHECKOUT
+    let mut explicit_sim_opt_in = false;
+    if let Some(ref val) = sim_flag {
+        let v = val.to_ascii_lowercase();
+        if v == "true" || v == "1" || v == "yes" || v == "on" {
+            explicit_sim_opt_in = true;
+        } else if v == "false" || v == "0" || v == "no" || v == "off" {
+            explicit_sim_opt_in = false;
+        } else {
+            return PaymentCheckoutMode::Misconfigured(format!(
+                "Invalid ESA_ENABLE_SIMULATED_CHECKOUT value '{}'. Expected 'true' or 'false'.",
+                val
+            ));
+        }
+    }
+
+    // 2. Syntax / validity check for ESA_PAYMENT_MODE
+    let mut esa_mode_live = false;
+    let mut esa_mode_sim = false;
+    if let Some(ref val) = esa_mode {
+        let v = val.to_ascii_lowercase();
+        if v == "live" || v == "production" || v == "prod" {
+            esa_mode_live = true;
+        } else if v == "sandbox" || v == "test" || v == "simulation" || v == "simulated" {
+            esa_mode_sim = true;
+        } else {
+            return PaymentCheckoutMode::Misconfigured(format!(
+                "Invalid ESA_PAYMENT_MODE value '{}'. Expected 'live', 'production', 'sandbox', or 'test'.",
+                val
+            ));
+        }
+    }
+
+    // 3. Syntax / validity check for ENVIRONMENT
+    let mut env_live = false;
+    let mut env_sim = false;
+    if let Some(ref val) = env_mode {
+        let v = val.to_ascii_lowercase();
+        if v == "production" || v == "prod" || v == "live" {
+            env_live = true;
+        } else if v == "sandbox" || v == "test" || v == "testing" {
+            env_sim = true;
+        } else if v == "development" || v == "dev" || v == "local" || v == "staging" {
+            // Recognized non-live environment, but does not implicitly opt in to simulation
+        } else {
+            return PaymentCheckoutMode::Misconfigured(format!(
+                "Invalid ENVIRONMENT value '{}'. Expected 'production', 'sandbox', 'test', 'development', or 'local'.",
+                val
+            ));
+        }
+    }
+
+    // 4. Syntax / validity check for provider modes
+    let mut live_providers = Vec::new();
+    for (var, val) in provider_modes {
+        let v = val.to_ascii_lowercase();
+        if v == "live" || v == "production" || v == "prod" {
+            live_providers.push(format!("{var}={val}"));
+        } else if v == "test"
+            || v == "sandbox"
+            || v == "uat"
+            || v == "staging"
+            || v == "dev"
+            || v == "development"
+        {
+            // Recognized non-live provider mode
+        } else {
+            return PaymentCheckoutMode::Misconfigured(format!(
+                "Invalid {} value '{}'. Expected 'live', 'test', or 'sandbox'.",
+                var, val
+            ));
+        }
+    }
+
+    // 5. LIVE CHECK (Highest priority: live mode for ANY provider or environment cannot be bypassed by simulation flag)
+    if env_live {
+        return PaymentCheckoutMode::Live {
+            reason: format!(
+                "ENVIRONMENT is set to live/production ('{}')",
+                env_mode.unwrap_or_default()
+            ),
+        };
+    }
+    if esa_mode_live {
+        return PaymentCheckoutMode::Live {
+            reason: format!(
+                "ESA_PAYMENT_MODE is set to live/production ('{}')",
+                esa_mode.unwrap_or_default()
+            ),
+        };
+    }
+    if !live_providers.is_empty() {
+        return PaymentCheckoutMode::Live {
+            reason: format!(
+                "Live provider gateway mode configured: {}",
+                live_providers.join(", ")
+            ),
+        };
+    }
+
+    // 6. SIMULATION OPT-IN CHECK
+    if explicit_sim_opt_in || esa_mode_sim || env_sim {
+        return PaymentCheckoutMode::Simulated;
+    }
+
+    // 7. Missing/Unconfigured mode -> Fail safely
+    PaymentCheckoutMode::Unconfigured
+}
+
 pub(crate) fn is_production_mode() -> bool {
-    std::env::var("ENVIRONMENT")
-        .map(|v| v.eq_ignore_ascii_case("production"))
-        .unwrap_or(false)
-        || std::env::var("RAZORPAY_MODE")
-            .map(|v| v.eq_ignore_ascii_case("live"))
-            .unwrap_or(false)
+    matches!(detect_checkout_mode(), PaymentCheckoutMode::Live { .. })
 }
 
 fn configure_cors() -> CorsLayer {
@@ -2337,19 +2507,44 @@ async fn universal_checkout(
         }
     };
 
-    let is_prod = is_production_mode();
-
-    // In production/live mode, fail explicitly until real upstream payment gateway order creation is implemented.
-    // Do NOT return a successful fake-checkout response or falsely imply payment authorization!
-    if is_prod {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({
-                "error": "live_checkout_not_implemented",
-                "message": "Live gateway order creation is not yet connected to upstream payment networks. Real transactions are disabled in production mode until gateway order integration is deployed.",
-                "is_simulated": false
-            })),
-        ));
+    // 5. Hardened payment mode detection & gating
+    match detect_checkout_mode() {
+        PaymentCheckoutMode::Live { reason } => {
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({
+                    "error": "live_checkout_not_implemented",
+                    "message": format!(
+                        "Live gateway order creation is not yet connected to upstream payment networks ({}). Real transactions are disabled in production mode until gateway order integration is deployed.",
+                        reason
+                    ),
+                    "is_simulated": false
+                })),
+            ));
+        }
+        PaymentCheckoutMode::Misconfigured(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "payment_mode_misconfigured",
+                    "message": format!("Invalid payment mode configuration: {}", err),
+                    "is_simulated": false
+                })),
+            ));
+        }
+        PaymentCheckoutMode::Unconfigured => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "payment_mode_unconfigured",
+                    "message": "Payment mode is not configured. Simulation is an explicit opt-in suitable for local/demo use: set ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox.",
+                    "is_simulated": false
+                })),
+            ));
+        }
+        PaymentCheckoutMode::Simulated => {
+            // Permitted explicit simulation
+        }
     }
 
     let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
@@ -2442,6 +2637,41 @@ mod integration_tests {
         }
     }
 
+    fn clear_mode_env_vars() {
+        std::env::remove_var("ENVIRONMENT");
+        std::env::remove_var("ESA_PAYMENT_MODE");
+        std::env::remove_var("ESA_ENABLE_SIMULATED_CHECKOUT");
+        std::env::remove_var("RAZORPAY_MODE");
+        std::env::remove_var("STRIPE_MODE");
+        std::env::remove_var("PHONEPE_MODE");
+        std::env::remove_var("CASHFREE_MODE");
+        std::env::remove_var("PAYTM_MODE");
+        std::env::remove_var("ADYEN_MODE");
+    }
+
+    struct ScopedSimulatedCheckoutGuard {
+        _mutex_guard: parking_lot::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedSimulatedCheckoutGuard {
+        fn new(api_key: &str) -> Self {
+            let guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            std::env::set_var("ESA_TEST_API_KEY", api_key);
+            Self {
+                _mutex_guard: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedSimulatedCheckoutGuard {
+        fn drop(&mut self) {
+            clear_mode_env_vars();
+            std::env::remove_var("ESA_TEST_API_KEY");
+        }
+    }
+
     #[tokio::test]
     async fn test_anonymous_checkout_rejected() {
         let state = create_test_state();
@@ -2491,8 +2721,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_checkout_with_valid_key_succeeds() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-checkout-valid-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-checkout-valid-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2514,8 +2743,6 @@ mod integration_tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
@@ -2644,8 +2871,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_checkout_compatibility_preserves_response_fields() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-compat-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-compat-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2684,14 +2910,11 @@ mod integration_tests {
             resp_json.get("currency").and_then(|v| v.as_str()),
             Some("INR")
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_canonical_amount_minor_input() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-minor-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-minor-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2729,14 +2952,11 @@ mod integration_tests {
             resp_json.get("currency").and_then(|v| v.as_str()),
             Some("USD")
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_conflicting_amounts_rejected() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-conflict-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-conflict-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2769,14 +2989,11 @@ mod integration_tests {
             resp_json.get("error").and_then(|v| v.as_str()),
             Some("conflicting_amounts")
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_amount_below_minimum_rejected() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-min-amount-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-min-amount-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2808,14 +3025,11 @@ mod integration_tests {
             resp_json.get("error").and_then(|v| v.as_str()),
             Some("amount_below_minimum")
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_legacy_amount_cents_input() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-cents-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-cents-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2849,14 +3063,11 @@ mod integration_tests {
             resp_json.get("amount_minor").and_then(|v| v.as_u64()),
             Some(9000)
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_invalid_currency_rejected() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-curr-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-curr-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2888,14 +3099,11 @@ mod integration_tests {
             resp_json.get("error").and_then(|v| v.as_str()),
             Some("invalid_currency")
         );
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_real_api_handler_for_all_supported_provider_policies_boundary_cases() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-provider-policies-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-provider-policies-key");
 
         struct PolicyCase {
             gateway: &'static str,
@@ -2919,12 +3127,6 @@ mod integration_tests {
             },
             PolicyCase {
                 gateway: "cashfree",
-                currency: "INR",
-                method: "upi",
-                minimum: 100,
-            },
-            PolicyCase {
-                gateway: "paytm",
                 currency: "INR",
                 method: "upi",
                 minimum: 100,
@@ -2994,18 +3196,6 @@ mod integration_tests {
                 currency: "HKD",
                 method: "card",
                 minimum: 400,
-            },
-            PolicyCase {
-                gateway: "adyen",
-                currency: "USD",
-                method: "card",
-                minimum: 50,
-            },
-            PolicyCase {
-                gateway: "adyen",
-                currency: "EUR",
-                method: "card",
-                minimum: 50,
             },
         ];
 
@@ -3109,14 +3299,11 @@ mod integration_tests {
                 );
             }
         }
-
-        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
     async fn test_checkout_unsupported_provider_currency_method_rejected() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-unsupp-key");
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-unsupp-key");
 
         let state = create_test_state();
 
@@ -3182,21 +3369,75 @@ mod integration_tests {
             );
         }
 
-        std::env::remove_var("ESA_TEST_API_KEY");
+        // 3. Paytm unverified policy fails closed as unsupported provider currency/method
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "paytm",
+                "method": "upi",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-unsupp-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 4. Adyen unverified policy fails closed as unsupported provider currency/method
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "USD",
+                "gateway": "adyen",
+                "method": "card",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-unsupp-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_checkout_simulation_vs_production_mode() {
+    async fn test_checkout_mode_detection_and_gating() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "test-sim-prod-key");
+        std::env::set_var("ESA_TEST_API_KEY", "test-mode-gating-key");
 
-        // 1. Sandbox / Demo mode: response indicates is_simulated: true, status 200 OK
-        {
-            std::env::remove_var("ENVIRONMENT");
-            std::env::remove_var("RAZORPAY_MODE");
-            let state = create_test_state();
-            let app = build_app(state);
-
+        let make_checkout_req = || {
             let req_body = serde_json::to_string(&serde_json::json!({
                 "amount_minor": 5000,
                 "currency": "INR",
@@ -3205,51 +3446,191 @@ mod integration_tests {
             }))
             .unwrap();
 
-            let req = Request::builder()
+            Request::builder()
                 .method("POST")
                 .uri("/api/payments/checkout")
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer test-sim-prod-key")
+                .header("authorization", "Bearer test-mode-gating-key")
                 .body(axum::body::Body::from(req_body))
-                .unwrap();
+                .unwrap()
+        };
 
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+        // 1. Default / Unset configuration fails safely with 503 SERVICE UNAVAILABLE
+        {
+            clear_mode_env_vars();
+            let state = create_test_state();
+            let app = build_app(state);
+
+            let resp = app.oneshot(make_checkout_req()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
             let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
                 .await
                 .unwrap();
             let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             assert_eq!(
+                resp_json.get("error").and_then(|v| v.as_str()),
+                Some("payment_mode_unconfigured")
+            );
+            assert_eq!(
                 resp_json.get("is_simulated").and_then(|v| v.as_bool()),
-                Some(true)
+                Some(false)
             );
         }
 
-        // 2. Production mode via ENVIRONMENT=production: fails explicitly with 501 NOT IMPLEMENTED, is_simulated: false
+        // 2. Invalid configuration fails safely with 400 BAD REQUEST
         {
-            std::env::set_var("ENVIRONMENT", "production");
-            std::env::remove_var("RAZORPAY_MODE");
+            let invalid_cases = [
+                ("ENVIRONMENT", "invalid_env"),
+                ("RAZORPAY_MODE", "bogus_mode"),
+                ("ESA_ENABLE_SIMULATED_CHECKOUT", "maybe"),
+                ("ESA_PAYMENT_MODE", "weird_mode"),
+            ];
+
+            for (var, val) in invalid_cases {
+                clear_mode_env_vars();
+                std::env::set_var(var, val);
+
+                let state = create_test_state();
+                let app = build_app(state);
+
+                let resp = app.oneshot(make_checkout_req()).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "Variable {var}={val} must cause 400 Bad Request"
+                );
+                let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                    .await
+                    .unwrap();
+                let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(
+                    resp_json.get("error").and_then(|v| v.as_str()),
+                    Some("payment_mode_misconfigured")
+                );
+                assert_eq!(
+                    resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                    Some(false)
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 3. Production mode via ENVIRONMENT=production & ESA_PAYMENT_MODE=live fails with 501 NOT IMPLEMENTED
+        {
+            for (var, val) in [("ENVIRONMENT", "production"), ("ESA_PAYMENT_MODE", "live")] {
+                clear_mode_env_vars();
+                std::env::set_var(var, val);
+
+                let state = create_test_state();
+                let app = build_app(state);
+
+                let resp = app.oneshot(make_checkout_req()).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::NOT_IMPLEMENTED,
+                    "{var}={val} must trigger 501 NOT IMPLEMENTED"
+                );
+                let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                    .await
+                    .unwrap();
+                let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(
+                    resp_json.get("error").and_then(|v| v.as_str()),
+                    Some("live_checkout_not_implemented")
+                );
+                assert_eq!(
+                    resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                    Some(false)
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 4. Every supported provider's live-mode configuration fails with 501 NOT IMPLEMENTED
+        {
+            let provider_vars = [
+                "RAZORPAY_MODE",
+                "STRIPE_MODE",
+                "PHONEPE_MODE",
+                "CASHFREE_MODE",
+                "PAYTM_MODE",
+                "ADYEN_MODE",
+            ];
+
+            for var in provider_vars {
+                clear_mode_env_vars();
+                std::env::set_var(var, "live");
+
+                let state = create_test_state();
+                let app = build_app(state);
+
+                let resp = app.oneshot(make_checkout_req()).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::NOT_IMPLEMENTED,
+                    "Live mode for provider var {var}=live must trigger 501 NOT IMPLEMENTED"
+                );
+                let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                    .await
+                    .unwrap();
+                let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(
+                    resp_json.get("error").and_then(|v| v.as_str()),
+                    Some("live_checkout_not_implemented")
+                );
+                assert_eq!(
+                    resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                    Some(false)
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 5. Sandbox opt-in returns 200 OK with is_simulated: true
+        {
+            for (var, val) in [
+                ("ESA_ENABLE_SIMULATED_CHECKOUT", "true"),
+                ("ESA_PAYMENT_MODE", "sandbox"),
+            ] {
+                clear_mode_env_vars();
+                std::env::set_var(var, val);
+
+                let state = create_test_state();
+                let app = build_app(state);
+
+                let resp = app.oneshot(make_checkout_req()).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "Sandbox opt-in via {var}={val} must succeed with 200 OK"
+                );
+                let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                    .await
+                    .unwrap();
+                let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                assert_eq!(
+                    resp_json.get("is_simulated").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 6. Live mode cannot be bypassed by simulation opt-in
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            std::env::set_var("STRIPE_MODE", "live");
+
             let state = create_test_state();
             let app = build_app(state);
 
-            let req_body = serde_json::to_string(&serde_json::json!({
-                "amount_minor": 5000,
-                "currency": "INR",
-                "gateway": "razorpay",
-                "method": "upi",
-            }))
-            .unwrap();
-
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/payments/checkout")
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer test-sim-prod-key")
-                .body(axum::body::Body::from(req_body))
-                .unwrap();
-
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+            let resp = app.oneshot(make_checkout_req()).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "Live mode must take precedence over simulation opt-in"
+            );
             let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
                 .await
                 .unwrap();
@@ -3262,49 +3643,86 @@ mod integration_tests {
                 resp_json.get("is_simulated").and_then(|v| v.as_bool()),
                 Some(false)
             );
-            std::env::remove_var("ENVIRONMENT");
+
+            clear_mode_env_vars();
         }
 
-        // 3. Live mode via RAZORPAY_MODE=live: fails explicitly with 501 NOT IMPLEMENTED, is_simulated: false
-        {
-            std::env::remove_var("ENVIRONMENT");
-            std::env::set_var("RAZORPAY_MODE", "live");
-            let state = create_test_state();
-            let app = build_app(state);
-
-            let req_body = serde_json::to_string(&serde_json::json!({
-                "amount_minor": 5000,
-                "currency": "INR",
-                "gateway": "razorpay",
-                "method": "upi",
-            }))
-            .unwrap();
-
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/payments/checkout")
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer test-sim-prod-key")
-                .body(axum::body::Body::from(req_body))
-                .unwrap();
-
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
-                .await
-                .unwrap();
-            let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-            assert_eq!(
-                resp_json.get("error").and_then(|v| v.as_str()),
-                Some("live_checkout_not_implemented")
-            );
-            assert_eq!(
-                resp_json.get("is_simulated").and_then(|v| v.as_bool()),
-                Some(false)
-            );
-            std::env::remove_var("RAZORPAY_MODE");
-        }
-
+        clear_mode_env_vars();
         std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[test]
+    fn test_detect_checkout_mode_unit_logic() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+
+        // Default unset
+        clear_mode_env_vars();
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Unconfigured);
+        assert!(!is_production_mode());
+
+        // Simulation opt-in
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Simulated);
+        assert!(!is_production_mode());
+
+        clear_mode_env_vars();
+        std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Simulated);
+        assert!(!is_production_mode());
+
+        // Live environment
+        clear_mode_env_vars();
+        std::env::set_var("ENVIRONMENT", "production");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Live { .. }
+        ));
+        assert!(is_production_mode());
+
+        // Each live provider
+        for var in [
+            "RAZORPAY_MODE",
+            "STRIPE_MODE",
+            "PHONEPE_MODE",
+            "CASHFREE_MODE",
+            "PAYTM_MODE",
+            "ADYEN_MODE",
+        ] {
+            clear_mode_env_vars();
+            std::env::set_var(var, "live");
+            assert!(matches!(
+                detect_checkout_mode(),
+                PaymentCheckoutMode::Live { .. }
+            ));
+            assert!(is_production_mode());
+        }
+
+        // Live overrides simulation opt-in
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        std::env::set_var("STRIPE_MODE", "live");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Live { .. }
+        ));
+        assert!(is_production_mode());
+
+        // Misconfigured values
+        clear_mode_env_vars();
+        std::env::set_var("ENVIRONMENT", "unknown_production");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Misconfigured(_)
+        ));
+
+        clear_mode_env_vars();
+        std::env::set_var("RAZORPAY_MODE", "unknown_mode");
+        assert!(matches!(
+            detect_checkout_mode(),
+            PaymentCheckoutMode::Misconfigured(_)
+        ));
+
+        clear_mode_env_vars();
     }
 }

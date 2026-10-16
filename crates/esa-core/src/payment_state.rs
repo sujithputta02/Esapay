@@ -163,10 +163,12 @@ pub struct ProviderMinimumPolicy {
     pub minimum_amount_minor: u64,
     pub source: &'static str,
     pub policy_justification: &'static str,
+    pub regional_settlement_assumption: &'static str,
 }
 
 /// Documented minimum transaction policies by provider and payment method.
 /// Derived strictly from official payment gateway API specifications and scheme rules.
+/// Unverified gateways or generic guesses are strictly excluded to fail closed.
 pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
     ProviderMinimumPolicy {
         provider: "razorpay",
@@ -174,7 +176,8 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         payment_method: "all",
         minimum_amount_minor: 100, // 100 paise (₹1.00)
         source: "Razorpay Orders API Docs (https://razorpay.com/docs/api/orders/#create-an-order)",
-        policy_justification: "Razorpay enforces a minimum order value of 100 paise (₹1.00) across all domestic payment methods.",
+        policy_justification: "Razorpay Orders API enforces a mandatory minimum order value of 100 paise (₹1.00) across all domestic payment methods.",
+        regional_settlement_assumption: "Indian domestic entity with standard INR merchant account settlement.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -183,6 +186,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 cents ($0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of $0.50 USD to cover interchange fixed costs and per-transaction fees.",
+        regional_settlement_assumption: "US or international Stripe account settling in USD.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -191,6 +195,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 euro cents (€0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of €0.50 EUR to cover card network processing minimums.",
+        regional_settlement_assumption: "Eurozone or international Stripe account settling in EUR via SEPA rails.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -199,6 +204,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 30, // 30 pence (£0.30)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of £0.30 GBP to offset domestic UK debit/credit clearing fees.",
+        regional_settlement_assumption: "UK Stripe account settling in GBP via domestic UK clearing.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -207,6 +213,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 yen (¥50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of ¥50 JPY for zero-decimal Japanese yen transactions.",
+        regional_settlement_assumption: "Japan Stripe account settling in JPY.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -215,6 +222,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 cents (S$0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of S$0.50 SGD to cover regional gateway clearing costs.",
+        regional_settlement_assumption: "Singapore Stripe account settling in SGD.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -223,6 +231,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 200, // 200 fils (2.00 AED)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires a minimum charge of 2.00 AED to ensure processing costs do not exceed total ticket value.",
+        regional_settlement_assumption: "UAE Stripe account settling in AED.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -231,6 +240,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 cents (C$0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires C$0.50 CAD minimum charge to cover interchange and Interac processing thresholds.",
+        regional_settlement_assumption: "Canada Stripe account settling in CAD.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -239,6 +249,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 cents (A$0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires A$0.50 AUD minimum charge to satisfy Australian debit scheme rules.",
+        regional_settlement_assumption: "Australia Stripe account settling in AUD.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -247,6 +258,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 50, // 50 centimes (0.50 CHF)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires 0.50 CHF minimum charge to cover Swiss clearing fees.",
+        regional_settlement_assumption: "Switzerland Stripe account settling in CHF.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -255,6 +267,7 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         minimum_amount_minor: 400, // 400 cents (HK$4.00)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
         policy_justification: "Stripe requires HK$4.00 HKD minimum charge due to higher fixed processing fee floor in Hong Kong.",
+        regional_settlement_assumption: "Hong Kong Stripe account settling in HKD.",
     },
     ProviderMinimumPolicy {
         provider: "stripe",
@@ -262,7 +275,8 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         payment_method: "card",
         minimum_amount_minor: 50, // 50 paise (₹0.50)
         source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
-        policy_justification: "Stripe requires a minimum charge of ₹0.50 INR (50 paise) for card and cross-border processing.",
+        policy_justification: "Stripe requires a minimum charge of ₹0.50 INR (50 paise) for card and export transaction processing.",
+        regional_settlement_assumption: "India Stripe account settling in INR or cross-border export transaction with INR charge currency.",
     },
     ProviderMinimumPolicy {
         provider: "phonepe",
@@ -270,7 +284,8 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         payment_method: "all",
         minimum_amount_minor: 100, // 100 paise (₹1.00)
         source: "PhonePe PG Developer Documentation (https://developer.phonepe.com/v1/reference/standard-pay-api)",
-        policy_justification: "PhonePe enforces a minimum transaction amount of 100 paise (₹1.00) for UPI and card checkouts.",
+        policy_justification: "PhonePe Standard Pay API mandates integer `amount` parameter with minimum value 100 paise (₹1.00).",
+        regional_settlement_assumption: "Indian domestic merchant account with standard INR settlement via PhonePe PG.",
     },
     ProviderMinimumPolicy {
         provider: "cashfree",
@@ -278,31 +293,8 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         payment_method: "all",
         minimum_amount_minor: 100, // 100 paise (₹1.00)
         source: "Cashfree Payment Gateway API Documentation (https://docs.cashfree.com/reference/createorder)",
-        policy_justification: "Cashfree requires a minimum order value of 100 paise (₹1.00) for domestic transaction routing.",
-    },
-    ProviderMinimumPolicy {
-        provider: "paytm",
-        currency: "INR",
-        payment_method: "all",
-        minimum_amount_minor: 100, // 100 paise (₹1.00)
-        source: "Paytm Payment Gateway Documentation (https://developer.paytm.com/docs/v1/api/initiate-transaction-api/)",
-        policy_justification: "Paytm requires a minimum transaction amount of 100 paise (₹1.00) for UPI and wallet processing.",
-    },
-    ProviderMinimumPolicy {
-        provider: "adyen",
-        currency: "USD",
-        payment_method: "card",
-        minimum_amount_minor: 50, // 50 cents ($0.50)
-        source: "Adyen Payments Documentation (https://docs.adyen.com/online-payments/build-your-integration/)",
-        policy_justification: "Adyen enforces a minimum ticket size of $0.50 USD to cover acquirer scheme processing minimums.",
-    },
-    ProviderMinimumPolicy {
-        provider: "adyen",
-        currency: "EUR",
-        payment_method: "card",
-        minimum_amount_minor: 50, // 50 euro cents (€0.50)
-        source: "Adyen Payments Documentation (https://docs.adyen.com/online-payments/build-your-integration/)",
-        policy_justification: "Adyen enforces a minimum ticket size of €0.50 EUR across SEPA card and domestic rails.",
+        policy_justification: "Cashfree Orders API mandates `order_amount` >= 1.00 INR (100 paise) for order creation.",
+        regional_settlement_assumption: "Indian domestic merchant account with standard INR settlement via Cashfree PG.",
     },
 ];
 
@@ -1569,6 +1561,12 @@ mod tests {
             assert!(
                 !policy.policy_justification.is_empty(),
                 "Policy for {} {} must have a policy justification",
+                policy.provider,
+                policy.currency
+            );
+            assert!(
+                !policy.regional_settlement_assumption.is_empty(),
+                "Policy for {} {} must have a regional settlement assumption",
                 policy.provider,
                 policy.currency
             );
