@@ -179,47 +179,45 @@ impl std::fmt::Debug for CachedVerificationKey {
     }
 }
 
-/// Thread-safe bounded cache for Supabase JWKS keys with TTL and cooldown
+/// Thread-safe bounded cache for Supabase JWKS keys with TTL, cooldown, and concurrent request coalescing
 #[derive(Clone)]
 pub struct JwksKeyCache {
     keys: Arc<RwLock<HashMap<String, CachedVerificationKey>>>,
     last_fetched: Arc<RwLock<Option<Instant>>>,
     last_attempt: Arc<RwLock<Option<Instant>>>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
     ttl: Duration,
     cooldown: Duration,
     jwks_url: Option<String>,
 }
 
-fn fetch_jwks_endpoint(endpoint: &str, timeout: Duration) -> Result<String, AuthError> {
-    let endpoint = endpoint.to_string();
-    let runner = move || {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| {
-                AuthError::KeyDiscoveryFailed(format!("HTTP client build failed: {}", e))
-            })?;
-        let resp = client.get(&endpoint).send().map_err(|e| {
-            AuthError::KeyDiscoveryFailed(format!("Failed to fetch JWKS from endpoint: {}", e))
-        })?;
-        if !resp.status().is_success() {
-            return Err(AuthError::KeyDiscoveryFailed(format!(
-                "JWKS endpoint returned HTTP status {}",
-                resp.status()
-            )));
-        }
-        resp.text().map_err(|e| {
-            AuthError::KeyDiscoveryFailed(format!("Failed to read JWKS response body: {}", e))
-        })
-    };
-
-    if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::spawn(runner)
-            .join()
-            .map_err(|_| AuthError::KeyDiscoveryFailed("JWKS fetch thread panicked".to_string()))?
-    } else {
-        runner()
+async fn fetch_jwks_endpoint_async(endpoint: &str, timeout: Duration) -> Result<String, AuthError> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| AuthError::KeyDiscoveryFailed(format!("HTTP client build failed: {}", e)))?;
+    let resp = client.get(endpoint).send().await.map_err(|e| {
+        AuthError::KeyDiscoveryFailed(format!("Failed to fetch JWKS from endpoint: {}", e))
+    })?;
+    if !resp.status().is_success() {
+        return Err(AuthError::KeyDiscoveryFailed(format!(
+            "JWKS endpoint returned HTTP status {}",
+            resp.status()
+        )));
     }
+    const MAX_JWKS_BYTES: usize = 1024 * 1024; // 1 MB bound to prevent memory exhaustion
+    let bytes = resp.bytes().await.map_err(|e| {
+        AuthError::KeyDiscoveryFailed(format!("Failed to read JWKS response body: {}", e))
+    })?;
+    if bytes.len() > MAX_JWKS_BYTES {
+        return Err(AuthError::KeyDiscoveryFailed(format!(
+            "JWKS response exceeded maximum allowable size of {} bytes",
+            MAX_JWKS_BYTES
+        )));
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|e| {
+        AuthError::KeyDiscoveryFailed(format!("JWKS response was not valid UTF-8: {}", e))
+    })
 }
 
 impl Default for JwksKeyCache {
@@ -243,6 +241,7 @@ impl JwksKeyCache {
             keys: Arc::new(RwLock::new(HashMap::new())),
             last_fetched: Arc::new(RwLock::new(None)),
             last_attempt: Arc::new(RwLock::new(None)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             ttl: Duration::from_secs(ttl_secs),
             cooldown: Duration::from_secs(cooldown_secs),
             jwks_url: None,
@@ -334,7 +333,42 @@ impl JwksKeyCache {
         *self.last_fetched.write() = Some(Instant::now());
     }
 
-    pub fn resolve_key(
+    fn match_candidate(
+        keys: &HashMap<String, CachedVerificationKey>,
+        target_kid: &str,
+        target_alg: Algorithm,
+    ) -> Result<Option<CachedVerificationKey>, AuthError> {
+        if !target_kid.is_empty() {
+            if let Some(key) = keys.get(target_kid) {
+                if key.algorithm == target_alg {
+                    return Ok(Some(key.clone()));
+                } else {
+                    return Err(AuthError::UnsupportedAlgorithm(format!(
+                        "Key ID '{}' configured with algorithm {:?}, but token requires {:?}",
+                        target_kid, key.algorithm, target_alg
+                    )));
+                }
+            }
+            Ok(None)
+        } else {
+            let matching: Vec<_> = keys
+                .values()
+                .filter(|k| k.algorithm == target_alg)
+                .collect();
+            if matching.len() == 1 {
+                Ok(Some(matching[0].clone()))
+            } else if matching.len() > 1 {
+                Err(AuthError::UnknownKeyId(format!(
+                    "Multiple keys found with algorithm {:?}; kid is required",
+                    target_alg
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    pub async fn resolve_key(
         &self,
         kid: Option<&str>,
         target_alg: Algorithm,
@@ -352,36 +386,30 @@ impl JwksKeyCache {
 
         if is_fresh {
             let keys = self.keys.read();
-            if !target_kid.is_empty() {
-                if let Some(key) = keys.get(target_kid) {
-                    if key.algorithm == target_alg {
-                        return Ok(key.clone());
-                    } else {
-                        return Err(AuthError::UnsupportedAlgorithm(format!(
-                            "Key ID '{}' configured with algorithm {:?}, but token requires {:?}",
-                            target_kid, key.algorithm, target_alg
-                        )));
-                    }
-                }
-                // target_kid not found in fresh cache: key might have rotated remotely, proceed to refresh
-            } else {
-                let matching: Vec<_> = keys
-                    .values()
-                    .filter(|k| k.algorithm == target_alg)
-                    .collect();
-                if matching.len() == 1 {
-                    return Ok(matching[0].clone());
-                } else if matching.len() > 1 {
-                    return Err(AuthError::UnknownKeyId(format!(
-                        "Multiple keys found with algorithm {:?}; kid is required",
-                        target_alg
-                    )));
-                }
-                // 0 matching keys: proceed to refresh
+            if let Some(key) = Self::match_candidate(&keys, target_kid, target_alg)? {
+                return Ok(key);
             }
         }
 
-        // 2. Refresh needed: resolve URL and verify cooldown
+        // 2. Refresh needed: acquire refresh_lock to coalesce concurrent attempts without worker blocking
+        let _guard = self.refresh_lock.lock().await;
+
+        // Re-check cache after acquiring lock in case another concurrent task refreshed it
+        let now_after = Instant::now();
+        let is_fresh_after = self
+            .last_fetched
+            .read()
+            .map(|t| now_after.duration_since(t) < self.ttl)
+            .unwrap_or(false);
+
+        if is_fresh_after {
+            let keys = self.keys.read();
+            if let Some(key) = Self::match_candidate(&keys, target_kid, target_alg)? {
+                return Ok(key);
+            }
+        }
+
+        // Resolve JWKS URL
         let url = custom_jwks_url
             .map(|s| s.to_string())
             .or_else(|| self.jwks_url.clone())
@@ -398,7 +426,7 @@ impl JwksKeyCache {
         let endpoint = match url {
             Some(u) => u,
             None => {
-                if !is_fresh {
+                if !is_fresh_after {
                     return Err(AuthError::KeyDiscoveryFailed(
                         "JWKS cache expired and no JWKS URL configured to refresh".to_string(),
                     ));
@@ -408,19 +436,20 @@ impl JwksKeyCache {
             }
         };
 
+        // Check cooldown against last attempt
         let allow_fetch = {
             let mut last = self.last_attempt.write();
             match *last {
-                Some(prev) if now.duration_since(prev) < self.cooldown => false,
+                Some(prev) if now_after.duration_since(prev) < self.cooldown => false,
                 _ => {
-                    *last = Some(now);
+                    *last = Some(now_after);
                     true
                 }
             }
         };
 
         if !allow_fetch {
-            if !is_fresh {
+            if !is_fresh_after {
                 return Err(AuthError::KeyDiscoveryFailed(
                     "JWKS cache expired; refresh currently on cooldown following recent attempt"
                         .to_string(),
@@ -430,11 +459,11 @@ impl JwksKeyCache {
             }
         }
 
-        // Execute fetch without holding locks across network I/O
-        let body = match fetch_jwks_endpoint(&endpoint, Duration::from_secs(4)) {
+        // Perform asynchronous network fetch without holding any RwLock
+        let body = match fetch_jwks_endpoint_async(&endpoint, Duration::from_secs(4)).await {
             Ok(b) => b,
             Err(e) => {
-                if !is_fresh {
+                if !is_fresh_after {
                     return Err(AuthError::KeyDiscoveryFailed(format!(
                         "Failed to refresh expired JWKS cache: {}",
                         e
@@ -448,8 +477,9 @@ impl JwksKeyCache {
             }
         };
 
+        // Parse and atomically replace the active key set
         if let Err(e) = self.load_jwks_json(&body) {
-            if !is_fresh {
+            if !is_fresh_after {
                 return Err(AuthError::KeyDiscoveryFailed(format!(
                     "Failed to parse refreshed JWKS response: {}",
                     e
@@ -462,38 +492,36 @@ impl JwksKeyCache {
             }
         }
 
-        // 3. Cache is now freshly populated after authoritative refresh
+        // Lookup in freshly replaced key map
         let keys = self.keys.read();
-        if !target_kid.is_empty() {
-            if let Some(key) = keys.get(target_kid) {
-                if key.algorithm == target_alg {
-                    return Ok(key.clone());
-                } else {
-                    return Err(AuthError::UnsupportedAlgorithm(format!(
-                        "Key ID '{}' has algorithm {:?} but token requires {:?}",
-                        target_kid, key.algorithm, target_alg
-                    )));
-                }
+        Self::match_candidate(&keys, target_kid, target_alg)?.ok_or_else(|| {
+            if !target_kid.is_empty() {
+                AuthError::UnknownKeyId(target_kid.to_string())
+            } else {
+                AuthError::UnknownKeyId(format!("No key found matching algorithm {:?}", target_alg))
             }
-            return Err(AuthError::UnknownKeyId(target_kid.to_string()));
-        }
+        })
+    }
 
-        let matching: Vec<_> = keys
-            .values()
-            .filter(|k| k.algorithm == target_alg)
-            .collect();
-        if matching.len() == 1 {
-            Ok(matching[0].clone())
-        } else if matching.is_empty() {
-            Err(AuthError::UnknownKeyId(format!(
-                "No key found matching algorithm {:?}",
-                target_alg
-            )))
+    #[allow(dead_code)]
+    pub fn resolve_key_blocking(
+        &self,
+        kid: Option<&str>,
+        target_alg: Algorithm,
+        custom_jwks_url: Option<&str>,
+    ) -> Result<CachedVerificationKey, AuthError> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.resolve_key(kid, target_alg, custom_jwks_url))
+            })
         } else {
-            Err(AuthError::UnknownKeyId(format!(
-                "Multiple keys found matching algorithm {:?}; kid is required",
-                target_alg
-            )))
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    AuthError::KeyDiscoveryFailed(format!("Failed to build runtime: {}", e))
+                })?;
+            rt.block_on(self.resolve_key(kid, target_alg, custom_jwks_url))
         }
     }
 }
@@ -613,10 +641,10 @@ fn validate_claims_payload(
     Ok(())
 }
 
-/// Verify cryptographic signature and claims of a Supabase JWT (HS256, RS256, or ES256)
-pub fn verify_supabase_jwt_with_key(
+/// Verify cryptographic signature and claims of a Supabase JWT (HS256, RS256, or ES256) asynchronously without worker blocking
+pub async fn verify_supabase_jwt_with_key(
     token: &str,
-    key_spec: SupabaseVerificationKey,
+    key_spec: SupabaseVerificationKey<'_>,
     expected_issuer: Option<&str>,
 ) -> Result<SupabaseJwtClaims, AuthError> {
     let clean_token = token.trim();
@@ -689,10 +717,16 @@ pub fn verify_supabase_jwt_with_key(
                 SupabaseVerificationKey::JwkSet(set) => {
                     let cache = JwksKeyCache::new();
                     let _ = cache.load_jwk_set(set);
-                    cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                    cache
+                        .resolve_key(kid, Algorithm::RS256, None)
+                        .await?
+                        .decoding_key
                 }
                 SupabaseVerificationKey::JwksCache(cache) => {
-                    cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                    cache
+                        .resolve_key(kid, Algorithm::RS256, None)
+                        .await?
+                        .decoding_key
                 }
                 SupabaseVerificationKey::FromEnvironment => {
                     if let Ok(pem) = std::env::var("SUPABASE_JWT_PUBLIC_KEY") {
@@ -702,11 +736,17 @@ pub fn verify_supabase_jwt_with_key(
                                 .map_err(|_| AuthError::InvalidSignature)?
                         } else {
                             let cache = get_global_jwks_cache();
-                            cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                            cache
+                                .resolve_key(kid, Algorithm::RS256, None)
+                                .await?
+                                .decoding_key
                         }
                     } else {
                         let cache = get_global_jwks_cache();
-                        cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                        cache
+                            .resolve_key(kid, Algorithm::RS256, None)
+                            .await?
+                            .decoding_key
                     }
                 }
                 SupabaseVerificationKey::Secret(_) | SupabaseVerificationKey::EcPem(_) => {
@@ -730,10 +770,16 @@ pub fn verify_supabase_jwt_with_key(
                 SupabaseVerificationKey::JwkSet(set) => {
                     let cache = JwksKeyCache::new();
                     let _ = cache.load_jwk_set(set);
-                    cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                    cache
+                        .resolve_key(kid, Algorithm::ES256, None)
+                        .await?
+                        .decoding_key
                 }
                 SupabaseVerificationKey::JwksCache(cache) => {
-                    cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                    cache
+                        .resolve_key(kid, Algorithm::ES256, None)
+                        .await?
+                        .decoding_key
                 }
                 SupabaseVerificationKey::FromEnvironment => {
                     if let Ok(pem) = std::env::var("SUPABASE_JWT_EC_PUBLIC_KEY") {
@@ -743,11 +789,17 @@ pub fn verify_supabase_jwt_with_key(
                                 .map_err(|_| AuthError::InvalidSignature)?
                         } else {
                             let cache = get_global_jwks_cache();
-                            cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                            cache
+                                .resolve_key(kid, Algorithm::ES256, None)
+                                .await?
+                                .decoding_key
                         }
                     } else {
                         let cache = get_global_jwks_cache();
-                        cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                        cache
+                            .resolve_key(kid, Algorithm::ES256, None)
+                            .await?
+                            .decoding_key
                     }
                 }
                 SupabaseVerificationKey::Secret(_) | SupabaseVerificationKey::RsaPem(_) => {
@@ -777,9 +829,38 @@ pub fn verify_supabase_jwt_with_key(
     Ok(token_data.claims)
 }
 
-/// Verify cryptographic signature and claims of a Supabase HS256 JWT
+/// Synchronous blocking wrapper for Supabase JWT verification
+pub fn verify_supabase_jwt_with_key_blocking(
+    token: &str,
+    key_spec: SupabaseVerificationKey<'_>,
+    expected_issuer: Option<&str>,
+) -> Result<SupabaseJwtClaims, AuthError> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            handle.block_on(verify_supabase_jwt_with_key(
+                token,
+                key_spec,
+                expected_issuer,
+            ))
+        })
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                AuthError::KeyDiscoveryFailed(format!("Failed to build runtime: {}", e))
+            })?;
+        rt.block_on(verify_supabase_jwt_with_key(
+            token,
+            key_spec,
+            expected_issuer,
+        ))
+    }
+}
+
+/// Verify cryptographic signature and claims of a Supabase HS256 JWT asynchronously
 #[allow(dead_code)]
-pub fn verify_supabase_jwt(
+pub async fn verify_supabase_jwt(
     token: &str,
     secret: &str,
     expected_issuer: Option<&str>,
@@ -789,12 +870,28 @@ pub fn verify_supabase_jwt(
         SupabaseVerificationKey::Secret(secret),
         expected_issuer,
     )
+    .await
+}
+
+/// Verify cryptographic signature and claims of a Supabase HS256 JWT synchronously
+#[allow(dead_code)]
+pub fn verify_supabase_jwt_blocking(
+    token: &str,
+    secret: &str,
+    expected_issuer: Option<&str>,
+) -> Result<SupabaseJwtClaims, AuthError> {
+    verify_supabase_jwt_with_key_blocking(
+        token,
+        SupabaseVerificationKey::Secret(secret),
+        expected_issuer,
+    )
 }
 
 /// Fallback for read-only backwards compatibility
+#[allow(dead_code)]
 pub fn parse_supabase_jwt(token: &str) -> Option<SupabaseJwtClaims> {
     let expected_iss = resolve_supabase_expected_issuer(None);
-    verify_supabase_jwt_with_key(
+    verify_supabase_jwt_with_key_blocking(
         token,
         SupabaseVerificationKey::FromEnvironment,
         expected_iss.as_deref(),
@@ -889,8 +986,8 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
 }
 
 /// Unified authentication: verifies either a cryptographically signed Supabase JWT
-/// or a verified API key. Fails closed.
-pub fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
+/// or a verified API key. Fails closed without worker blocking.
+pub async fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
     let token = extract_token(headers).ok_or(AuthError::MissingToken)?;
     let clean = token.trim();
 
@@ -901,7 +998,8 @@ pub fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthEr
     // Check if token is a JWT (starts with "eyJ" and has 3 parts)
     if clean.starts_with("eyJ") && clean.split('.').count() == 3 {
         let claims =
-            verify_supabase_jwt_with_key(clean, SupabaseVerificationKey::FromEnvironment, None)?;
+            verify_supabase_jwt_with_key(clean, SupabaseVerificationKey::FromEnvironment, None)
+                .await?;
         let user_id = claims.sub.unwrap_or_default();
         let role = claims.role.unwrap_or_else(|| "authenticated".to_string());
         let short_id = if user_id.len() >= 12 {
@@ -941,7 +1039,40 @@ pub fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthEr
     Err(AuthError::InvalidApiKey)
 }
 
+/// Synchronous blocking wrapper for authenticate_caller
+#[allow(dead_code)]
+pub fn authenticate_caller_blocking(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(authenticate_caller(headers)))
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                AuthError::KeyDiscoveryFailed(format!("Failed to build runtime: {}", e))
+            })?;
+        rt.block_on(authenticate_caller(headers))
+    }
+}
+
+/// Check if an API key or Supabase JWT is valid asynchronously
+pub async fn is_key_authorized_async(key: &str) -> bool {
+    let clean = key.trim();
+    if clean.is_empty() {
+        return false;
+    }
+
+    if clean.starts_with("eyJ") && clean.split('.').count() == 3 {
+        return verify_supabase_jwt_with_key(clean, SupabaseVerificationKey::FromEnvironment, None)
+            .await
+            .is_ok();
+    }
+
+    verify_configured_api_key(clean).is_some()
+}
+
 /// Check if an API key or Supabase JWT is valid (fail-closed, no prefix-only bypasses)
+#[allow(dead_code)]
 pub fn is_key_authorized(key: &str) -> bool {
     let clean = key.trim();
     if clean.is_empty() {
@@ -980,7 +1111,7 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
     // Check if token is Supabase JWT
     if key.starts_with("eyJ") && key.split('.').count() == 3 {
         if let Ok(claims) =
-            verify_supabase_jwt_with_key(key, SupabaseVerificationKey::FromEnvironment, None)
+            verify_supabase_jwt_with_key(key, SupabaseVerificationKey::FromEnvironment, None).await
         {
             let user_id = claims.sub.unwrap_or_else(|| "user_unknown".to_string());
             let email = claims
@@ -1030,7 +1161,7 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
 
 /// GET /api/v1/auth/me
 pub async fn auth_me_handler(headers: HeaderMap) -> impl IntoResponse {
-    match authenticate_caller(&headers) {
+    match authenticate_caller(&headers).await {
         Ok(identity) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1210,8 +1341,8 @@ pub(crate) mod tests {
         encode(&header, claims, &key).expect("Failed to encode test ES256 JWT")
     }
 
-    #[test]
-    fn test_valid_supabase_jwt_verification_hs256() {
+    #[tokio::test]
+    async fn test_valid_supabase_jwt_verification_hs256() {
         let secret = "test_mock_jwt_secret_for_tests_only";
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1225,7 +1356,7 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co")).await;
         assert!(
             res.is_ok(),
             "Valid HS256 JWT must pass verification: {:?}",
@@ -1239,8 +1370,8 @@ pub(crate) mod tests {
         assert_eq!(verified.email, Some("merchant@example.com".to_string()));
     }
 
-    #[test]
-    fn test_valid_supabase_jwt_verification_rs256() {
+    #[tokio::test]
+    async fn test_valid_supabase_jwt_verification_rs256() {
         let (priv_pem, pub_pem) = match generate_ephemeral_test_rsa_keys() {
             Some(keys) => keys,
             None => {
@@ -1265,7 +1396,8 @@ pub(crate) mod tests {
             &token,
             SupabaseVerificationKey::RsaPem(&pub_pem),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(
             res.is_ok(),
             "Valid RS256 JWT must pass verification: {:?}",
@@ -1275,8 +1407,8 @@ pub(crate) mod tests {
         assert_eq!(verified.sub, Some("user_rsa_123456789".to_string()));
     }
 
-    #[test]
-    fn test_forged_rs256_jwt_rejected() {
+    #[tokio::test]
+    async fn test_forged_rs256_jwt_rejected() {
         let (priv_pem1, _) = match generate_ephemeral_test_rsa_keys() {
             Some(keys) => keys,
             None => return,
@@ -1301,12 +1433,13 @@ pub(crate) mod tests {
             &token,
             SupabaseVerificationKey::RsaPem(&pub_pem2),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert_eq!(res, Err(AuthError::InvalidSignature));
     }
 
-    #[test]
-    fn test_valid_supabase_jwt_verification_es256() {
+    #[tokio::test]
+    async fn test_valid_supabase_jwt_verification_es256() {
         let (priv_pem, pub_pem) = match generate_ephemeral_test_ec_keys() {
             Some(keys) => keys,
             None => {
@@ -1331,7 +1464,8 @@ pub(crate) mod tests {
             &token,
             SupabaseVerificationKey::EcPem(&pub_pem),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(
             res.is_ok(),
             "Valid ES256 JWT must pass verification: {:?}",
@@ -1341,8 +1475,8 @@ pub(crate) mod tests {
         assert_eq!(verified.sub, Some("user_es256_987654321".to_string()));
     }
 
-    #[test]
-    fn test_forged_es256_jwt_rejected() {
+    #[tokio::test]
+    async fn test_forged_es256_jwt_rejected() {
         let (priv_pem1, _) = match generate_ephemeral_test_ec_keys() {
             Some(keys) => keys,
             None => return,
@@ -1366,12 +1500,13 @@ pub(crate) mod tests {
             &token,
             SupabaseVerificationKey::EcPem(&pub_pem2),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert_eq!(res, Err(AuthError::InvalidSignature));
     }
 
-    #[test]
-    fn test_jwks_cache_resolution_and_key_rotation() {
+    #[tokio::test]
+    async fn test_jwks_cache_resolution_and_key_rotation() {
         let (priv_pem_v1, pub_pem_v1) = match generate_ephemeral_test_ec_keys() {
             Some(keys) => keys,
             None => return,
@@ -1401,7 +1536,8 @@ pub(crate) mod tests {
             &token_v1,
             SupabaseVerificationKey::JwksCache(cache.clone()),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(res_v1.is_ok(), "Token with kid-v1 must pass verification");
 
         // 2. Token arrives with rotated key kid-v2 before cache has it -> fails with UnknownKeyId
@@ -1417,7 +1553,8 @@ pub(crate) mod tests {
             &token_v2,
             SupabaseVerificationKey::JwksCache(cache.clone()),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert_eq!(
             res_v2_before,
             Err(AuthError::UnknownKeyId("kid-v2".to_string()))
@@ -1431,7 +1568,8 @@ pub(crate) mod tests {
             &token_v2,
             SupabaseVerificationKey::JwksCache(cache.clone()),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(
             res_v2_after.is_ok(),
             "Rotated token with kid-v2 must pass verification after rotation"
@@ -1442,7 +1580,8 @@ pub(crate) mod tests {
             &token_v1,
             SupabaseVerificationKey::JwksCache(cache.clone()),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(
             res_v1_overlap.is_ok(),
             "Existing key v1 remains valid during key rotation overlap"
@@ -1454,7 +1593,8 @@ pub(crate) mod tests {
             &token_v1,
             SupabaseVerificationKey::JwksCache(cache.clone()),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(
             matches!(res_v1_expired, Err(AuthError::KeyDiscoveryFailed(_))),
             "Expired cache without refresh endpoint must fail closed: {:?}",
@@ -1480,11 +1620,15 @@ pub(crate) mod tests {
         assert_eq!(count, 1);
 
         // Kid-v2 is present in refreshed set
-        let res_v2_resolved = cache.resolve_key(Some("kid-v2"), Algorithm::ES256, None);
+        let res_v2_resolved = cache
+            .resolve_key(Some("kid-v2"), Algorithm::ES256, None)
+            .await;
         assert!(res_v2_resolved.is_ok(), "Rotated kid-v2 must be resolved");
 
         // Old key kid-v1 was removed during refresh and is now strictly rejected!
-        let res_v1_after_refresh = cache.resolve_key(Some("kid-v1"), Algorithm::ES256, None);
+        let res_v1_after_refresh = cache
+            .resolve_key(Some("kid-v1"), Algorithm::ES256, None)
+            .await;
         assert_eq!(
             res_v1_after_refresh.err(),
             Some(AuthError::UnknownKeyId("kid-v1".to_string())),
@@ -1492,8 +1636,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn test_jwks_network_refresh_rotation_and_failed_refresh_safety() {
+    #[tokio::test]
+    async fn test_jwks_network_refresh_rotation_and_failed_refresh_safety() {
         let (server_url, body_holder, return_500, request_count) = start_mock_jwks_server();
 
         let jwks_v1 = r#"{
@@ -1513,7 +1657,9 @@ pub(crate) mod tests {
         let cache = Arc::new(JwksKeyCache::new().with_jwks_url(server_url));
 
         // 1. First resolution: cache is cold, triggers initial network fetch
-        let key1 = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        let key1 = cache
+            .resolve_key(Some("server-kid-1"), Algorithm::ES256, None)
+            .await;
         assert!(
             key1.is_ok(),
             "Initial JWKS fetch must resolve key: {:?}",
@@ -1522,7 +1668,9 @@ pub(crate) mod tests {
         assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // 2. Fresh cached key works without contacting the network
-        let key1_cached = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        let key1_cached = cache
+            .resolve_key(Some("server-kid-1"), Algorithm::ES256, None)
+            .await;
         assert!(key1_cached.is_ok(), "Fresh cached key must succeed");
         assert_eq!(
             request_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -1550,7 +1698,9 @@ pub(crate) mod tests {
         cache.clear_cooldown_for_test();
 
         // Requesting old key server-kid-1 triggers refresh, but server no longer advertises it
-        let old_key_res = cache.resolve_key(Some("server-kid-1"), Algorithm::ES256, None);
+        let old_key_res = cache
+            .resolve_key(Some("server-kid-1"), Algorithm::ES256, None)
+            .await;
         assert_eq!(
             old_key_res.err(),
             Some(AuthError::UnknownKeyId("server-kid-1".to_string())),
@@ -1559,7 +1709,9 @@ pub(crate) mod tests {
         assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 2);
 
         // Requesting new key server-kid-2 succeeds from the freshly populated cache
-        let new_key_res = cache.resolve_key(Some("server-kid-2"), Algorithm::ES256, None);
+        let new_key_res = cache
+            .resolve_key(Some("server-kid-2"), Algorithm::ES256, None)
+            .await;
         assert!(
             new_key_res.is_ok(),
             "New key server-kid-2 must be available"
@@ -1570,7 +1722,9 @@ pub(crate) mod tests {
         cache.clear_cooldown_for_test();
         return_500.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let failed_refresh_res = cache.resolve_key(Some("server-kid-2"), Algorithm::ES256, None);
+        let failed_refresh_res = cache
+            .resolve_key(Some("server-kid-2"), Algorithm::ES256, None)
+            .await;
         assert!(
             matches!(failed_refresh_res, Err(AuthError::KeyDiscoveryFailed(_))),
             "Failed refresh must return KeyDiscoveryFailed and never trust expired key: {:?}",
@@ -1580,14 +1734,18 @@ pub(crate) mod tests {
         // 6. Unknown kid fails safely
         cache.clear_cooldown_for_test();
         return_500.store(false, std::sync::atomic::Ordering::SeqCst);
-        let unknown_res = cache.resolve_key(Some("non_existent_kid"), Algorithm::ES256, None);
+        let unknown_res = cache
+            .resolve_key(Some("non_existent_kid"), Algorithm::ES256, None)
+            .await;
         assert_eq!(
             unknown_res.err(),
             Some(AuthError::UnknownKeyId("non_existent_kid".to_string()))
         );
 
         // 7. Unsupported algorithm mismatch fails safely
-        let alg_mismatch_res = cache.resolve_key(Some("server-kid-2"), Algorithm::RS256, None);
+        let alg_mismatch_res = cache
+            .resolve_key(Some("server-kid-2"), Algorithm::RS256, None)
+            .await;
         assert!(
             matches!(alg_mismatch_res, Err(AuthError::UnsupportedAlgorithm(_))),
             "Algorithm mismatch must return UnsupportedAlgorithm: {:?}",
@@ -1595,8 +1753,55 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn test_hs256_token_rejected_when_asymmetric_only() {
+    #[tokio::test]
+    async fn test_jwks_concurrent_refreshes_coalesced() {
+        let (server_url, body_holder, _return_500, request_count) = start_mock_jwks_server();
+
+        let jwks_data = r#"{
+            "keys": [
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "server-kid-concurrent",
+                    "alg": "ES256",
+                    "x": "f83OJ3D2xFmTNgTeib43uVrn8UWCazaEvbQDolZ_2QI",
+                    "y": "x_daQauBhQ0tZxFlGQM2Q_Gfiw02z9q0aEnW65GQ-hs"
+                }
+            ]
+        }"#;
+        *body_holder.write() = jwks_data.to_string();
+
+        let cache = Arc::new(JwksKeyCache::new().with_jwks_url(server_url));
+
+        // Spawn 10 concurrent resolution tasks simultaneously on cold/empty cache
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let c = Arc::clone(&cache);
+            handles.push(tokio::spawn(async move {
+                c.resolve_key(Some("server-kid-concurrent"), Algorithm::ES256, None)
+                    .await
+            }));
+        }
+
+        for h in handles {
+            let res = h.await.expect("Task must not panic");
+            assert!(
+                res.is_ok(),
+                "Concurrent resolution must succeed: {:?}",
+                res.err()
+            );
+        }
+
+        // All 10 tasks must coalesce on the single in-flight network request without stampedes or false cooldown errors
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "10 concurrent requests must coalesce into exactly 1 upstream JWKS network fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hs256_token_rejected_when_asymmetric_only() {
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
             "sub": "user_hs256_attack",
@@ -1615,15 +1820,16 @@ pub(crate) mod tests {
             &token,
             SupabaseVerificationKey::EcPem(&pub_pem),
             Some("https://test.supabase.co/auth/v1"),
-        );
+        )
+        .await;
         assert!(matches!(res, Err(AuthError::UnsupportedAlgorithm(_))));
     }
 
     const TEST_JWT_SECRET: &str = "test_mock_jwt_secret_for_tests_only";
     const ATTACKER_JWT_SECRET: &str = "test_mock_attacker_key_for_tests_only";
 
-    #[test]
-    fn test_forged_jwt_signature_rejected() {
+    #[tokio::test]
+    async fn test_forged_jwt_signature_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1636,7 +1842,8 @@ pub(crate) mod tests {
 
         // Signed with an attacker's key
         let forged_token = create_hs256_token(ATTACKER_JWT_SECRET, &claims);
-        let res = verify_supabase_jwt(&forged_token, secret, Some("https://test.supabase.co"));
+        let res =
+            verify_supabase_jwt(&forged_token, secret, Some("https://test.supabase.co")).await;
         assert_eq!(res, Err(AuthError::InvalidSignature));
 
         // Tampered payload
@@ -1654,12 +1861,12 @@ pub(crate) mod tests {
         );
         let tampered_token = format!("{}.{}.{}", parts[0], tampered_payload, parts[2]);
         let res_tampered =
-            verify_supabase_jwt(&tampered_token, secret, Some("https://test.supabase.co"));
+            verify_supabase_jwt(&tampered_token, secret, Some("https://test.supabase.co")).await;
         assert_eq!(res_tampered, Err(AuthError::InvalidSignature));
     }
 
-    #[test]
-    fn test_expired_jwt_rejected() {
+    #[tokio::test]
+    async fn test_expired_jwt_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1671,12 +1878,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co")).await;
         assert_eq!(res, Err(AuthError::TokenExpired));
     }
 
-    #[test]
-    fn test_not_yet_valid_nbf_rejected() {
+    #[tokio::test]
+    async fn test_not_yet_valid_nbf_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1689,12 +1896,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co")).await;
         assert_eq!(res, Err(AuthError::TokenNotYetValid));
     }
 
-    #[test]
-    fn test_wrong_audience_rejected() {
+    #[tokio::test]
+    async fn test_wrong_audience_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1706,12 +1913,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://test.supabase.co")).await;
         assert_eq!(res, Err(AuthError::InvalidAudience));
     }
 
-    #[test]
-    fn test_wrong_issuer_rejected() {
+    #[tokio::test]
+    async fn test_wrong_issuer_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1723,12 +1930,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co")).await;
         assert!(matches!(res, Err(AuthError::InvalidIssuer(_))));
     }
 
-    #[test]
-    fn test_missing_issuer_rejected() {
+    #[tokio::test]
+    async fn test_missing_issuer_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1739,12 +1946,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co")).await;
         assert!(matches!(res, Err(AuthError::InvalidIssuer(_))));
     }
 
-    #[test]
-    fn test_missing_subject_rejected() {
+    #[tokio::test]
+    async fn test_missing_subject_rejected() {
         let secret = TEST_JWT_SECRET;
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -1756,12 +1963,12 @@ pub(crate) mod tests {
         });
 
         let token = create_hs256_token(secret, &claims);
-        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co"));
+        let res = verify_supabase_jwt(&token, secret, Some("https://trusted.supabase.co")).await;
         assert_eq!(res, Err(AuthError::MissingSubject));
     }
 
-    #[test]
-    fn test_unsupported_none_algorithm_rejected() {
+    #[tokio::test]
+    async fn test_unsupported_none_algorithm_rejected() {
         let now = chrono::Utc::now().timestamp();
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\",\"typ\":\"JWT\"}");
         let payload = URL_SAFE_NO_PAD.encode(
@@ -1779,7 +1986,8 @@ pub(crate) mod tests {
             &none_token,
             TEST_JWT_SECRET,
             Some("https://trusted.supabase.co"),
-        );
+        )
+        .await;
         assert!(matches!(res, Err(AuthError::UnsupportedAlgorithm(_))));
     }
 

@@ -126,7 +126,7 @@ async fn handle_socket(
                             .and_then(|t| t.as_str())
                             .or_else(|| v.get("apiKey").and_then(|t| t.as_str()));
                         if let Some(t) = token {
-                            crate::api_keys::is_key_authorized(t)
+                            crate::api_keys::is_key_authorized_async(t).await
                         } else {
                             false
                         }

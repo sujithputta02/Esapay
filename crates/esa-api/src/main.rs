@@ -684,7 +684,7 @@ async fn create_workload(
     headers: HeaderMap,
     Json(workload): Json<WorkloadEntity>,
 ) -> Result<Json<WorkloadEntity>, AppError> {
-    let caller = api_keys::authenticate_caller(&headers).map_err(|e| {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to create workload: {}", e))
     })?;
 
@@ -707,7 +707,7 @@ async fn ingest_payment_event(
     headers: HeaderMap,
     Json(event): Json<PaymentEvent>,
 ) -> Result<impl IntoResponse, AppError> {
-    let _caller = api_keys::authenticate_caller(&headers).map_err(|e| {
+    let _caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!(
             "Authentication required to ingest payment events: {}",
             e
@@ -829,7 +829,7 @@ async fn razorpay_verify_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let _caller = api_keys::authenticate_caller(&headers).map_err(|e| {
+    let _caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to verify keys: {}", e))
     })?;
 
@@ -859,7 +859,7 @@ async fn razorpay_create_order(
     headers: HeaderMap,
     Json(req): Json<RazorpayCreateOrderRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let caller = api_keys::authenticate_caller(&headers).map_err(|e| {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to create order: {}", e))
     })?;
 
@@ -925,7 +925,7 @@ async fn razorpay_confirm_payment(
     headers: HeaderMap,
     Json(req): Json<RazorpayConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let caller = api_keys::authenticate_caller(&headers).map_err(|e| {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to confirm payment: {}", e))
     })?;
 
@@ -1322,7 +1322,7 @@ async fn ws_telemetry_handler(
         .cloned();
 
     let pre_auth = if let Some(t) = header_token {
-        if !api_keys::is_key_authorized(&t) {
+        if !api_keys::is_key_authorized_async(&t).await {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized: Invalid or expired credentials for WebSocket telemetry".to_string(),
@@ -1338,7 +1338,7 @@ async fn ws_telemetry_handler(
             ));
         }
         warn!("WebSocket credential passed via URL query parameter; this is deprecated due to log exposure risks");
-        if !api_keys::is_key_authorized(&t) {
+        if !api_keys::is_key_authorized_async(&t).await {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized: Invalid credentials for WebSocket telemetry".to_string(),
@@ -2114,7 +2114,7 @@ async fn toggle_gateway(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let caller = match api_keys::authenticate_caller(&headers) {
+    let caller = match api_keys::authenticate_caller(&headers).await {
         Ok(c) => c,
         Err(err) => {
             return Err((
@@ -2193,7 +2193,7 @@ async fn universal_checkout(
     }
 
     // 3. Mandatory Authorization check
-    let caller = match api_keys::authenticate_caller(&headers) {
+    let caller = match api_keys::authenticate_caller(&headers).await {
         Ok(c) => c,
         Err(err) => {
             return Err((
