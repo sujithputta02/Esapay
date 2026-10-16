@@ -24,7 +24,8 @@
 
 ## Kubernetes (optional)
 
-- When `KUBERNETES_ENABLED` is true (default unset = enabled in code), gateway may run `kubectl scale` for mapped deployments in `esa-workloads`.
+- Kubernetes infrastructure mutation is **disabled by default** (`KUBERNETES_ENABLED=false`).
+- When explicitly enabled (`KUBERNETES_ENABLED=true`), gateway may run `kubectl scale` for mapped deployments in `esa-workloads`.
 - Requires local cluster access; not used when kubectl/namespace is unavailable (in-memory state still updates).
 
 ## Docker

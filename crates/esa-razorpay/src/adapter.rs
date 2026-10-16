@@ -2,7 +2,7 @@ use crate::client::RazorpayClient;
 use crate::config::{RazorpayConfig, RazorpayConfigError};
 use crate::dedup::EventDeduper;
 use crate::rate_limit::RazorpayRateLimiter;
-use crate::webhook::{parse_webhook_payload, verify_signature, verify_signature_any, WebhookError};
+use crate::webhook::{parse_webhook_payload, verify_signature, WebhookError};
 use esa_core::PaymentEvent;
 use tracing::{info, warn};
 
@@ -56,16 +56,12 @@ impl RazorpayAdapter {
 
         let signature = signature_header.ok_or(WebhookError::MissingSignature)?;
 
-        let verified = if self.config.test_mode_only {
-            verify_signature_any(
-                raw_body,
-                signature,
-                &self.config.webhook_secret,
-                &self.config.key_secret,
-            )
-        } else {
-            verify_signature(raw_body, signature, &self.config.webhook_secret)
-        };
+        if self.config.webhook_secret.trim().is_empty() {
+            warn!("Razorpay webhook secret not configured");
+            return Err(WebhookError::MissingWebhookSecret);
+        }
+
+        let verified = verify_signature(raw_body, signature, &self.config.webhook_secret);
 
         if !verified {
             warn!("Razorpay webhook signature verification failed");

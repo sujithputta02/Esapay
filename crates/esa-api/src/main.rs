@@ -673,7 +673,11 @@ async fn razorpay_webhook(
             }))
             .into_response();
         }
-        Err(WebhookError::InvalidSignature | WebhookError::MissingSignature) => {
+        Err(
+            WebhookError::InvalidSignature
+            | WebhookError::MissingSignature
+            | WebhookError::MissingWebhookSecret,
+        ) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "invalid webhook signature" })),
@@ -687,10 +691,17 @@ async fn razorpay_webhook(
             )
                 .into_response();
         }
-        Err(WebhookError::MalformedPayload) => {
+        Err(WebhookError::MalformedPayload(msg)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "malformed webhook payload" })),
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::UnsupportedEvent(msg)) | Err(WebhookError::UnsupportedStatus(msg)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response();
         }
