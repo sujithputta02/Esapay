@@ -1,6 +1,26 @@
 # Contributing
 Short guide for contributors and reviewers.
 
+## Your first contribution
+
+You can contribute without understanding every subsystem. Choose one small, verifiable task:
+
+- [Check whether the setup instructions work from a clean checkout](https://github.com/sujithputta02/Esapay/issues/13)
+- [Add deterministic failure-injection coverage](https://github.com/sujithputta02/Esapay/issues/14)
+- [Document safe SDK timeout handling](https://github.com/sujithputta02/Esapay/issues/15)
+
+### Suggested workflow
+
+1. Read the issue and comment with your intended approach, especially before changing payment or safety behavior.
+2. Fork the repository and create a focused branch.
+3. Keep the change small; include a test or clear reproduction steps when practical.
+4. Run the relevant checks and state exactly what you ran in the pull request.
+5. Explain limitations and unverified behavior honestly. Do not include credentials or run tests against live payment systems.
+
+Found something unexpected? Open an issue with your OS, setup steps, expected behavior, actual behavior, and redacted logs. Feedback about usability, architecture, security boundaries, and benchmark reproducibility is welcome.
+
+---
+
 ## Development setup
 
 1. `cp .env.example .env`
