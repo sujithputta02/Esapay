@@ -395,19 +395,72 @@ impl Currency {
         let p_clean = provider.trim().to_lowercase();
         let m_clean = method.unwrap_or("").trim().to_lowercase();
 
-        // 1. Specific match: provider + currency + specific payment_method (or provider policy covering "all" methods)
-        if !m_clean.is_empty() && m_clean != "all" {
+        // 1. Caller-supplied wildcard "all" is strictly rejected to prevent policy bypasses
+        if m_clean == "all" {
+            return Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: provider.to_string(),
+                currency: self.0.clone(),
+                method: "all".to_string(),
+            });
+        }
+
+        // 2. Explicit concrete method requested
+        if !m_clean.is_empty() {
+            // Normalize recognized payment method alias
+            let canonical_method = match m_clean.as_str() {
+                "card" | "credit" | "debit" => "card",
+                "upi" => "upi",
+                "netbanking" | "nb" => "netbanking",
+                "wallet" => "wallet",
+                _ => {
+                    // Unsupported method string (e.g. "crypto", "direct_debit", etc.)
+                    return Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                        provider: provider.to_string(),
+                        currency: self.0.clone(),
+                        method: m_clean,
+                    });
+                }
+            };
+
+            // Provider method capability check: verify gateway genuinely supports the requested method
+            let provider_supports_method = match p_clean.as_str() {
+                "stripe" => canonical_method == "card",
+                "razorpay" | "phonepe" | "cashfree" => {
+                    canonical_method == "card"
+                        || canonical_method == "upi"
+                        || canonical_method == "netbanking"
+                        || canonical_method == "wallet"
+                }
+                _ => false,
+            };
+
+            if !provider_supports_method {
+                return Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                    provider: provider.to_string(),
+                    currency: self.0.clone(),
+                    method: m_clean,
+                });
+            }
+
+            // Match against documented provider policies
             if let Some(p) = PROVIDER_MINIMUM_POLICIES.iter().find(|p| {
                 p.currency == self.0
                     && p.provider.eq_ignore_ascii_case(&p_clean)
-                    && (p.payment_method.eq_ignore_ascii_case(&m_clean)
+                    && (p.payment_method.eq_ignore_ascii_case(canonical_method)
                         || p.payment_method == "all")
             }) {
                 return Ok(p.minimum_amount_minor);
             }
+
+            return Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: provider.to_string(),
+                currency: self.0.clone(),
+                method: m_clean,
+            });
         }
 
-        // 2. Provider universal match: provider + currency with payment_method == "all"
+        // 3. Unspecified method: ONLY matches providers with universal currency policies ("all").
+        // Method-specific policies (such as Stripe's card-only policy) MUST NOT match an unspecified method!
         if let Some(p) = PROVIDER_MINIMUM_POLICIES.iter().find(|p| {
             p.currency == self.0
                 && p.provider.eq_ignore_ascii_case(&p_clean)
@@ -416,26 +469,11 @@ impl Currency {
             return Ok(p.minimum_amount_minor);
         }
 
-        // 3. Provider primary match: if method is unspecified ("" or "all"), check if provider has a primary policy for that currency
-        if m_clean.is_empty() || m_clean == "all" {
-            if let Some(p) = PROVIDER_MINIMUM_POLICIES
-                .iter()
-                .find(|p| p.currency == self.0 && p.provider.eq_ignore_ascii_case(&p_clean))
-            {
-                return Ok(p.minimum_amount_minor);
-            }
-        }
-
-        // 4. Do not silently apply a generic fallback for unsupported provider/currency/method combinations!
-        // Explicitly distinguish supported combinations from unsupported ones.
+        // 4. Unsupported combination or missing method-specific policy -> fail closed
         Err(PaymentError::UnsupportedProviderCurrencyMethod {
             provider: provider.to_string(),
             currency: self.0.clone(),
-            method: if m_clean.is_empty() {
-                "all".to_string()
-            } else {
-                m_clean
-            },
+            method: "unspecified".to_string(),
         })
     }
 }
@@ -1546,9 +1584,77 @@ mod tests {
             Err(PaymentError::UnsupportedProviderCurrencyMethod {
                 provider: "unregistered_gateway".to_string(),
                 currency: "INR".to_string(),
+                method: "unspecified".to_string(),
+            })
+        );
+
+        // Method-specific policy bypass regression tests:
+        // 1. Stripe INR requires explicit "card"
+        let inr = Currency::new("INR").unwrap();
+        assert_eq!(
+            inr.minimum_amount_for_provider("stripe", Some("card")),
+            Ok(50)
+        );
+        // Omitted method on Stripe INR must NOT match card policy
+        assert_eq!(
+            inr.minimum_amount_for_provider("stripe", None),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "stripe".to_string(),
+                currency: "INR".to_string(),
+                method: "unspecified".to_string(),
+            })
+        );
+        // Caller-supplied "all" wildcard must NOT bypass validation
+        assert_eq!(
+            inr.minimum_amount_for_provider("stripe", Some("all")),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "stripe".to_string(),
+                currency: "INR".to_string(),
                 method: "all".to_string(),
             })
         );
+        // Explicitly unsupported method on Stripe (crypto, upi)
+        assert_eq!(
+            inr.minimum_amount_for_provider("stripe", Some("crypto")),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "stripe".to_string(),
+                currency: "INR".to_string(),
+                method: "crypto".to_string(),
+            })
+        );
+
+        // 2. Razorpay INR universal policy
+        assert_eq!(inr.minimum_amount_for_provider("razorpay", None), Ok(100));
+        assert_eq!(
+            inr.minimum_amount_for_provider("razorpay", Some("upi")),
+            Ok(100)
+        );
+        assert_eq!(
+            inr.minimum_amount_for_provider("razorpay", Some("card")),
+            Ok(100)
+        );
+        // Caller wildcard "all" rejected on Razorpay too
+        assert_eq!(
+            inr.minimum_amount_for_provider("razorpay", Some("all")),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "razorpay".to_string(),
+                currency: "INR".to_string(),
+                method: "all".to_string(),
+            })
+        );
+        // Explicit unsupported method on Razorpay
+        assert_eq!(
+            inr.minimum_amount_for_provider("razorpay", Some("crypto")),
+            Err(PaymentError::UnsupportedProviderCurrencyMethod {
+                provider: "razorpay".to_string(),
+                currency: "INR".to_string(),
+                method: "crypto".to_string(),
+            })
+        );
+
+        // 3. PhonePe and Cashfree INR universal policies
+        assert_eq!(inr.minimum_amount_for_provider("phonepe", None), Ok(100));
+        assert_eq!(inr.minimum_amount_for_provider("cashfree", None), Ok(100));
 
         // Every provider policy must have a non-empty source citation and policy justification
         for policy in PROVIDER_MINIMUM_POLICIES {
@@ -1705,7 +1811,7 @@ mod tests {
             Err(PaymentError::UnsupportedProviderCurrencyMethod {
                 provider: "custom_gateway".to_string(),
                 currency: "USD".to_string(),
-                method: "all".to_string(),
+                method: "unspecified".to_string(),
             })
         );
 

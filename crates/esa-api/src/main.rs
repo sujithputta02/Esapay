@@ -209,7 +209,26 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
 }
 
 pub(crate) fn is_production_mode() -> bool {
-    matches!(detect_checkout_mode(), PaymentCheckoutMode::Live { .. })
+    match detect_checkout_mode() {
+        PaymentCheckoutMode::Live { .. } => true,
+        // Fail-closed: invalid or misconfigured deployment preserves production protections
+        PaymentCheckoutMode::Misconfigured(_) => true,
+        PaymentCheckoutMode::Unconfigured => false,
+        PaymentCheckoutMode::Simulated => false,
+    }
+}
+
+/// Evaluates whether demonstration, benchmark, or chaos mutation endpoints are permitted.
+/// Conceptually distinct from checkout mode: mutation endpoints (spike injection,
+/// data reset, state seed, benchmark runs, simulated failover) are ONLY permitted in an
+/// explicitly configured simulation / demo environment.
+///
+/// Unconfigured, misconfigured, or live production environments strictly fail closed.
+pub(crate) fn is_demo_mutation_allowed() -> bool {
+    if is_production_mode() {
+        return false;
+    }
+    matches!(detect_checkout_mode(), PaymentCheckoutMode::Simulated)
 }
 
 fn configure_cors() -> CorsLayer {
@@ -1145,9 +1164,9 @@ struct TriggerSpikeRequest {
 }
 
 async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Demo seeding is disabled in production mode".to_string(),
+            "Demo seeding is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -1261,9 +1280,9 @@ async fn trigger_spike(
     State(state): State<AppState>,
     Json(req): Json<TriggerSpikeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Demo spike endpoints are disabled in production mode".to_string(),
+            "Demo spike endpoints are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -1616,9 +1635,9 @@ async fn verify_audit_chain(State(state): State<AppState>) -> impl IntoResponse 
 async fn run_benchmark_ablations(
     State(state): State<AppState>,
 ) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Benchmark ablations are disabled in production mode".to_string(),
+            "Benchmark ablations are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -1853,9 +1872,9 @@ async fn trigger_scenario(
     Path(scenario): Path<String>,
     Json(req): Json<ScenarioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Demo scenario triggers are disabled in production mode".to_string(),
+            "Demo scenario triggers are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -2041,9 +2060,9 @@ async fn run_benchmark(
     State(state): State<AppState>,
     Json(req): Json<BenchmarkRequest>,
 ) -> Result<Json<benchmark::BenchmarkComparison>, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Benchmark execution is disabled in production mode".to_string(),
+            "Benchmark execution is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -2093,9 +2112,9 @@ async fn run_benchmark_harness(
     State(state): State<AppState>,
     Json(req): Json<HarnessRequest>,
 ) -> Result<Json<benchmark_harness::HarnessResult>, AppError> {
-    if is_production_mode() {
+    if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
-            "Benchmark harness execution is disabled in production mode".to_string(),
+            "Benchmark harness execution is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
@@ -2369,7 +2388,30 @@ async fn universal_checkout(
         ));
     }
 
-    // 3. Corridor health evaluation and gateway selection
+    // 3. Currency Validation against Supported Currency Registry
+    let validated_currency = match esa_core::Currency::new(&req.currency) {
+        Ok(c) => c,
+        Err(esa_core::PaymentError::InvalidCurrency(msg)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_currency",
+                    "message": msg
+                })),
+            ));
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_currency",
+                    "message": format!("Invalid currency: {}", err)
+                })),
+            ));
+        }
+    };
+
+    // 4. Corridor health evaluation and gateway selection
     let requested = match req.gateway.to_lowercase().as_str() {
         "razorpay" => PaymentGateway::Razorpay,
         "stripe" => PaymentGateway::Stripe,
@@ -2396,7 +2438,7 @@ async fn universal_checkout(
 
     let (routed, failover, reason) = match requested {
         PaymentGateway::Auto => {
-            if req.currency.to_uppercase() == "USD" || req.currency.to_uppercase() == "EUR" {
+            if validated_currency.code() == "USD" || validated_currency.code() == "EUR" {
                 (
                     PaymentGateway::Stripe,
                     false,
@@ -2430,14 +2472,71 @@ async fn universal_checkout(
         ),
     };
 
-    // 4. Input Validation & Amount Resolution against the SELECTED gateway provider policy
+    // 4. Determine canonical payment method using documented provider defaults
+    let normalized_method: Result<String, (StatusCode, Json<serde_json::Value>)> = match req
+        .method
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => {
+            let lower = raw.to_lowercase();
+            if lower == "all" {
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "unsupported_provider_currency_method",
+                        "message": format!(
+                            "Gateway '{}' does not support wildcard payment method 'all'. Explicit payment method required.",
+                            routed.as_str()
+                        )
+                    })),
+                ))
+            } else {
+                Ok(lower)
+            }
+        }
+        None => {
+            // Apply documented provider defaults if method was omitted:
+            // 1. Global / foreign currency corridors on Stripe (USD, EUR, GBP, JPY, SGD, AED, CAD, AUD, CHF, HKD):
+            //    Stripe's documented default is "card".
+            if validated_currency.code() != "INR" && routed == PaymentGateway::Stripe {
+                Ok("card".to_string())
+            } else if validated_currency.code() == "INR"
+                && (routed == PaymentGateway::Razorpay
+                    || routed == PaymentGateway::PhonePe
+                    || routed == PaymentGateway::Cashfree)
+            {
+                // 2. Domestic INR gateways (Razorpay, PhonePe, Cashfree) default to "upi"
+                Ok("upi".to_string())
+            } else {
+                // 3. For Stripe INR (which only supports export/cards) or other gateways without universal policy,
+                //    an explicit payment method is required!
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "unsupported_provider_currency_method",
+                        "message": format!(
+                            "Gateway '{}' requires an explicit payment method for currency '{}' (e.g. 'card')",
+                            routed.as_str(),
+                            validated_currency.code()
+                        )
+                    })),
+                ))
+            }
+        }
+    };
+
+    let method_str = normalized_method?;
+
+    // 5. Input Validation & Amount Resolution against the SELECTED gateway provider policy
     let resolved_amount = match esa_core::PaymentAmount::resolve_from_all_inputs_with_provider(
         req.amount_minor,
         req.amount,
         req.amount_cents,
         Some(&req.currency),
         routed.as_str(),
-        req.method.as_deref(),
+        Some(&method_str),
     ) {
         Ok(amt) => amt,
         Err(esa_core::PaymentError::ConflictingAmountInputs {
@@ -2466,7 +2565,7 @@ async fn universal_checkout(
                     "error": "amount_below_minimum",
                     "message": format!(
                         "Amount {} is below minimum required {} minor units for provider '{}' currency {} (method: '{}')",
-                        amount_minor, minimum_required, routed.as_str(), currency, req.method.as_deref().unwrap_or("default")
+                        amount_minor, minimum_required, routed.as_str(), currency, method_str
                     )
                 })),
             ));
@@ -2507,7 +2606,7 @@ async fn universal_checkout(
         }
     };
 
-    // 5. Hardened payment mode detection & gating
+    // 6. Hardened payment mode detection & gating
     match detect_checkout_mode() {
         PaymentCheckoutMode::Live { reason } => {
             return Err((
@@ -2562,12 +2661,25 @@ async fn universal_checkout(
             PaymentGateway::Paytm => Region::IndiaNorth,
             _ => Region::IndiaWest,
         },
-        payment_method_class: match req.method.as_deref().unwrap_or("").to_lowercase().as_str() {
-            "card" => PaymentMethodClass::Card,
-            "netbanking" => PaymentMethodClass::NetBanking,
+        payment_method_class: match method_str.as_str() {
+            "card" | "credit" | "debit" => PaymentMethodClass::Card,
+            "netbanking" | "nb" => PaymentMethodClass::NetBanking,
             "wallet" => PaymentMethodClass::Wallet,
-            _ if !req.currency.eq_ignore_ascii_case("INR") => PaymentMethodClass::Card,
-            _ => PaymentMethodClass::Upi,
+            "upi" => PaymentMethodClass::Upi,
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "unsupported_provider_currency_method",
+                        "message": format!(
+                            "Gateway '{}' does not support currency '{}' with payment method '{}'",
+                            routed.as_str(),
+                            req.currency,
+                            method_str
+                        )
+                    })),
+                ));
+            }
         },
         pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
         amount_cents: Some(resolved_amount.amount_minor),
@@ -2799,27 +2911,63 @@ mod integration_tests {
     #[tokio::test]
     async fn test_demo_spike_disabled_in_production() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ENVIRONMENT", "production");
 
-        let state = create_test_state();
-        let app = build_app(state);
-
-        let req_body = serde_json::to_string(&serde_json::json!({
-            "multiplier": 3.0
-        }))
-        .unwrap();
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/demo/trigger-spike")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(req_body))
+        let make_spike_req = || {
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "multiplier": 3.0
+            }))
             .unwrap();
 
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            Request::builder()
+                .method("POST")
+                .uri("/api/demo/trigger-spike")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(req_body))
+                .unwrap()
+        };
 
-        std::env::remove_var("ENVIRONMENT");
+        // 1. Live mode -> Strictly FORBIDDEN
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ENVIRONMENT", "production");
+            let state = create_test_state();
+            let app = build_app(state);
+            let resp = app.oneshot(make_spike_req()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            clear_mode_env_vars();
+        }
+
+        // 2. Misconfigured mode -> Fail-closed: Strictly FORBIDDEN
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ENVIRONMENT", "invalid_prod_typo");
+            let state = create_test_state();
+            let app = build_app(state);
+            let resp = app.oneshot(make_spike_req()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            clear_mode_env_vars();
+        }
+
+        // 3. Unconfigured mode -> Fail-closed: Strictly FORBIDDEN
+        {
+            clear_mode_env_vars();
+            let state = create_test_state();
+            let app = build_app(state);
+            let resp = app.oneshot(make_spike_req()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            clear_mode_env_vars();
+        }
+
+        // 4. Explicit simulation mode -> PERMITTED (200 OK)
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            let state = create_test_state();
+            let app = build_app(state);
+            let resp = app.oneshot(make_spike_req()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            clear_mode_env_vars();
+        }
     }
 
     #[tokio::test]
@@ -3707,14 +3855,17 @@ mod integration_tests {
             PaymentCheckoutMode::Live { .. }
         ));
         assert!(is_production_mode());
+        assert!(!is_demo_mutation_allowed());
 
-        // Misconfigured values
+        // Misconfigured values -> fail-closed production guards active
         clear_mode_env_vars();
         std::env::set_var("ENVIRONMENT", "unknown_production");
         assert!(matches!(
             detect_checkout_mode(),
             PaymentCheckoutMode::Misconfigured(_)
         ));
+        assert!(is_production_mode());
+        assert!(!is_demo_mutation_allowed());
 
         clear_mode_env_vars();
         std::env::set_var("RAZORPAY_MODE", "unknown_mode");
@@ -3722,7 +3873,303 @@ mod integration_tests {
             detect_checkout_mode(),
             PaymentCheckoutMode::Misconfigured(_)
         ));
+        assert!(is_production_mode());
+        assert!(!is_demo_mutation_allowed());
 
         clear_mode_env_vars();
+    }
+
+    #[tokio::test]
+    async fn test_stripe_inr_and_payment_method_normalization_regression_tests() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-method-norm-key");
+        let state = create_test_state();
+
+        // 1. Stripe INR with explicit "card" method succeeds at minimum 50 paise
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 50,
+                "currency": "INR",
+                "gateway": "stripe",
+                "method": "card",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(json.get("amount_minor").and_then(|v| v.as_u64()), Some(50));
+            assert_eq!(json.get("currency").and_then(|v| v.as_str()), Some("INR"));
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("stripe")
+            );
+            let checkout_url = json.get("checkout_url").and_then(|v| v.as_str()).unwrap();
+            assert!(checkout_url.contains("gateway=stripe"));
+        }
+
+        // 2. Stripe INR with explicit "card" below minimum (49 paise) fails with amount_below_minimum
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 49,
+                "currency": "INR",
+                "gateway": "stripe",
+                "method": "card",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("amount_below_minimum")
+            );
+        }
+
+        // 3. Stripe INR with omitted method: strictly rejected with unsupported_provider_currency_method
+        // Must NOT match card policy or classify as UPI!
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "stripe",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 4. Stripe INR with method="all": strictly rejected with unsupported_provider_currency_method
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "stripe",
+                "method": "all",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 5. Razorpay INR with method="all": caller-supplied wildcard rejected
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "all",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 6. Explicitly unsupported method on Razorpay (crypto)
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "crypto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 7. Explicitly unsupported method on Stripe INR (crypto)
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 5000,
+                "currency": "INR",
+                "gateway": "stripe",
+                "method": "crypto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("unsupported_provider_currency_method")
+            );
+        }
+
+        // 8. Razorpay INR with explicit "card": succeeds with 200 OK
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 100,
+                "currency": "INR",
+                "gateway": "razorpay",
+                "method": "card",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 9. Razorpay INR with omitted method: succeeds with documented UPI default
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 100,
+                "currency": "INR",
+                "gateway": "razorpay",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 10. Stripe USD with omitted method: succeeds with documented "card" default (min 50 cents)
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 50,
+                "currency": "USD",
+                "gateway": "stripe",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-method-norm-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
     }
 }
