@@ -2412,14 +2412,27 @@ async fn universal_checkout(
     };
 
     // 4. Corridor health evaluation and gateway selection
-    let requested = match req.gateway.to_lowercase().as_str() {
+    let gw_cleaned = req.gateway.trim().to_lowercase();
+    let requested = match gw_cleaned.as_str() {
+        "auto" => PaymentGateway::Auto,
         "razorpay" => PaymentGateway::Razorpay,
         "stripe" => PaymentGateway::Stripe,
         "phonepe" => PaymentGateway::PhonePe,
         "cashfree" => PaymentGateway::Cashfree,
         "paytm" => PaymentGateway::Paytm,
         "adyen" => PaymentGateway::Adyen,
-        _ => PaymentGateway::Auto,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_gateway",
+                    "message": format!(
+                        "Invalid or unsupported gateway '{}'. Supported gateways: auto, razorpay, stripe, phonepe, cashfree, paytm, adyen",
+                        req.gateway
+                    )
+                })),
+            ));
+        }
     };
 
     let overrides = state
@@ -4170,6 +4183,273 @@ mod integration_tests {
 
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gateway_name_validation_and_auto_routing() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-gw-val-key");
+        let state = create_test_state();
+
+        // 1. Unknown gateway name rejected with 400 Bad Request
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "unknown_gw",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("invalid_gateway")
+            );
+        }
+
+        // 2. Unsupported gateway "crypto" rejected with 400 Bad Request
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "crypto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("invalid_gateway")
+            );
+        }
+
+        // 3. Empty string gateway rejected with 400 Bad Request
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("invalid_gateway")
+            );
+        }
+
+        // 4. Valid explicit "auto" with INR routes to healthy Razorpay
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "auto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("razorpay")
+            );
+            assert_eq!(
+                json.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+        }
+
+        // 5. Valid explicit "auto" with USD routes to Stripe
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "USD",
+                "gateway": "auto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("stripe")
+            );
+            assert_eq!(
+                json.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+        }
+
+        // 6. Valid omitted gateway defaults to auto (INR -> Razorpay)
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("razorpay")
+            );
+        }
+
+        // 7. Intentional health failover: degraded Razorpay routes "auto" to PhonePe
+        {
+            state
+                .gateway_overrides
+                .write()
+                .unwrap()
+                .insert("razorpay".to_string(), false);
+
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "auto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("phonepe")
+            );
+            assert_eq!(
+                json.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+
+        // 8. Intentional health failover: degraded Razorpay routes explicit "razorpay" to PhonePe
+        {
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "razorpay",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("phonepe")
+            );
+            assert_eq!(
+                json.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(true)
+            );
         }
     }
 }
