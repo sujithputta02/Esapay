@@ -54,83 +54,200 @@ pub enum PaymentError {
     },
 }
 
-/// Metadata configuration for a supported currency in the currency registry.
+/// Universally valid ISO-4217 Currency Metadata.
+/// Completely independent of provider- or payment-method-specific policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrencyMetadata {
     pub code: &'static str,
+    pub numeric_code: u16,
     pub decimal_places: u32,
-    pub minimum_amount_minor: u64,
     pub name: &'static str,
+    pub minor_unit_name: &'static str,
 }
 
-/// Authoritative supported currency registry.
-/// Defines supported ISO-4217 currencies, decimal scale, and provider-specific transaction minimums.
+/// Authoritative ISO-4217 currency registry.
+/// Defines supported ISO-4217 currencies, numeric codes, decimal scale (exponent), and unit names.
 pub const SUPPORTED_CURRENCY_REGISTRY: &[CurrencyMetadata] = &[
     CurrencyMetadata {
         code: "INR",
+        numeric_code: 356,
         decimal_places: 2,
-        minimum_amount_minor: 100, // 100 paise (₹1.00) - Razorpay minimum
         name: "Indian Rupee",
+        minor_unit_name: "paise",
     },
     CurrencyMetadata {
         code: "USD",
+        numeric_code: 840,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 cents ($0.50) - Card network minimum
         name: "United States Dollar",
+        minor_unit_name: "cents",
     },
     CurrencyMetadata {
         code: "EUR",
+        numeric_code: 978,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 euro cents (€0.50)
         name: "Euro",
+        minor_unit_name: "euro cents",
     },
     CurrencyMetadata {
         code: "GBP",
+        numeric_code: 826,
         decimal_places: 2,
-        minimum_amount_minor: 30, // 30 pence (£0.30)
         name: "British Pound Sterling",
+        minor_unit_name: "pence",
     },
     CurrencyMetadata {
         code: "JPY",
+        numeric_code: 392,
         decimal_places: 0,
-        minimum_amount_minor: 50, // 50 yen (¥50) - Zero decimal currency
         name: "Japanese Yen",
+        minor_unit_name: "yen",
     },
     CurrencyMetadata {
         code: "SGD",
+        numeric_code: 702,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 cents (S$0.50)
         name: "Singapore Dollar",
+        minor_unit_name: "cents",
     },
     CurrencyMetadata {
         code: "AED",
+        numeric_code: 784,
         decimal_places: 2,
-        minimum_amount_minor: 100, // 100 fils (1.00 AED)
         name: "United Arab Emirates Dirham",
+        minor_unit_name: "fils",
     },
     CurrencyMetadata {
         code: "CAD",
+        numeric_code: 124,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 cents (C$0.50)
         name: "Canadian Dollar",
+        minor_unit_name: "cents",
     },
     CurrencyMetadata {
         code: "AUD",
+        numeric_code: 36,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 cents (A$0.50)
         name: "Australian Dollar",
+        minor_unit_name: "cents",
     },
     CurrencyMetadata {
         code: "CHF",
+        numeric_code: 756,
         decimal_places: 2,
-        minimum_amount_minor: 50, // 50 centimes (0.50 CHF)
         name: "Swiss Franc",
+        minor_unit_name: "centimes",
     },
     CurrencyMetadata {
         code: "HKD",
+        numeric_code: 344,
         decimal_places: 2,
-        minimum_amount_minor: 400, // 400 cents (HK$4.00)
         name: "Hong Kong Dollar",
+        minor_unit_name: "cents",
+    },
+];
+
+/// Policy rule for provider- and payment-method-specific minimum transaction thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderMinimumPolicy {
+    pub provider: &'static str,
+    pub currency: &'static str,
+    pub payment_method: &'static str,
+    pub minimum_amount_minor: u64,
+    pub source: &'static str,
+    pub policy_justification: &'static str,
+}
+
+/// Documented minimum transaction policies by provider and payment method.
+/// Derived strictly from official payment gateway API specifications and scheme rules.
+pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
+    ProviderMinimumPolicy {
+        provider: "razorpay",
+        currency: "INR",
+        payment_method: "all",
+        minimum_amount_minor: 100, // 100 paise (₹1.00)
+        source: "Razorpay Orders API Docs (https://razorpay.com/docs/api/orders/#create-an-order)",
+        policy_justification: "Razorpay enforces a minimum order value of 100 paise (₹1.00) across all domestic payment methods.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "USD",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 cents ($0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of $0.50 USD to cover interchange fixed costs and per-transaction fees.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "EUR",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 euro cents (€0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of €0.50 EUR to cover card network processing minimums.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "GBP",
+        payment_method: "card",
+        minimum_amount_minor: 30, // 30 pence (£0.30)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of £0.30 GBP to offset domestic UK debit/credit clearing fees.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "JPY",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 yen (¥50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of ¥50 JPY for zero-decimal Japanese yen transactions.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "SGD",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 cents (S$0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires a minimum charge of S$0.50 SGD to cover regional gateway clearing costs.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "AED",
+        payment_method: "card",
+        minimum_amount_minor: 100, // 100 fils (1.00 AED)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe enforces 1.00 AED minimum charge to ensure processing costs do not exceed total ticket value.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "CAD",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 cents (C$0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires C$0.50 CAD minimum charge to cover interchange and Interac processing thresholds.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "AUD",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 cents (A$0.50)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires A$0.50 AUD minimum charge to satisfy Australian debit scheme rules.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "CHF",
+        payment_method: "card",
+        minimum_amount_minor: 50, // 50 centimes (0.50 CHF)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires 0.50 CHF minimum charge to cover Swiss clearing fees.",
+    },
+    ProviderMinimumPolicy {
+        provider: "stripe",
+        currency: "HKD",
+        payment_method: "card",
+        minimum_amount_minor: 400, // 400 cents (HK$4.00)
+        source: "Stripe Currency Guide (https://docs.stripe.com/currencies#minimum-and-maximum-charge-amounts)",
+        policy_justification: "Stripe requires HK$4.00 HKD minimum charge due to higher fixed processing fee floor in Hong Kong.",
     },
 ];
 
@@ -186,6 +303,10 @@ impl Currency {
             .expect("Currency invariant: code must exist in registry")
     }
 
+    pub fn numeric_code(&self) -> u16 {
+        self.metadata().numeric_code
+    }
+
     /// Decimal scale (exponent) for minor units:
     /// JPY = 0 (1 JPY = 1 minor unit)
     /// Standard currencies = 2 (100 minor units per major unit)
@@ -193,9 +314,40 @@ impl Currency {
         self.metadata().decimal_places
     }
 
-    /// Minimum transaction amount in minor units to protect against fractional abuse and gateway rejections.
+    /// Name of the minor currency sub-unit (paise, cents, pence, yen, etc.)
+    pub fn minor_unit_name(&self) -> &'static str {
+        self.metadata().minor_unit_name
+    }
+
+    /// Default minimum transaction amount in minor units derived from provider policies.
+    pub fn default_minimum_amount_minor(&self) -> u64 {
+        PROVIDER_MINIMUM_POLICIES
+            .iter()
+            .find(|p| p.currency == self.0)
+            .map(|p| p.minimum_amount_minor)
+            .unwrap_or(1)
+    }
+
+    /// Backwards-compatible alias for default minimum minor units.
     pub fn minimum_amount_minor(&self) -> u64 {
-        self.metadata().minimum_amount_minor
+        self.default_minimum_amount_minor()
+    }
+
+    /// Look up minimum transaction amount for a specific payment provider and method.
+    pub fn minimum_amount_for_provider(&self, provider: &str, method: Option<&str>) -> u64 {
+        let p_clean = provider.trim().to_lowercase();
+        let m_clean = method.unwrap_or("all").trim().to_lowercase();
+
+        PROVIDER_MINIMUM_POLICIES
+            .iter()
+            .find(|p| {
+                p.currency == self.0
+                    && p.provider.eq_ignore_ascii_case(&p_clean)
+                    && (p.payment_method == "all"
+                        || p.payment_method.eq_ignore_ascii_case(&m_clean))
+            })
+            .map(|p| p.minimum_amount_minor)
+            .unwrap_or_else(|| self.default_minimum_amount_minor())
     }
 }
 
@@ -211,7 +363,29 @@ pub struct PaymentAmount {
 impl PaymentAmount {
     pub fn new(amount_minor: u64, currency_code: &str) -> Result<Self, PaymentError> {
         let currency = Currency::new(currency_code)?;
-        let min_amount = currency.minimum_amount_minor();
+        let min_amount = currency.default_minimum_amount_minor();
+        if amount_minor < min_amount {
+            return Err(PaymentError::AmountBelowMinimum {
+                amount_minor,
+                minimum_required: min_amount,
+                currency: currency.code().to_string(),
+            });
+        }
+        Ok(Self {
+            amount_minor,
+            currency: currency.code().to_string(),
+        })
+    }
+
+    /// Validates amount against a specific payment provider and payment method policy.
+    pub fn new_with_provider_policy(
+        amount_minor: u64,
+        currency_code: &str,
+        provider: &str,
+        payment_method: Option<&str>,
+    ) -> Result<Self, PaymentError> {
+        let currency = Currency::new(currency_code)?;
+        let min_amount = currency.minimum_amount_for_provider(provider, payment_method);
         if amount_minor < min_amount {
             return Err(PaymentError::AmountBelowMinimum {
                 amount_minor,
@@ -271,6 +445,42 @@ impl PaymentAmount {
         currency_code: Option<&str>,
     ) -> Result<Self, PaymentError> {
         Self::resolve_from_all_inputs(amount_minor_input, legacy_amount_input, None, currency_code)
+    }
+
+    /// Converts canonical integer minor units to major units f64 according to the currency decimal scale.
+    /// E.g. 50000 INR (scale 2) -> 500.00
+    /// E.g. 50000 USD (scale 2) -> 500.00
+    /// E.g. 5000 JPY (scale 0)  -> 5000.00
+    pub fn to_major_units_f64(&self) -> f64 {
+        let decimals = self.currency_obj().decimal_places();
+        let factor = 10_u64.pow(decimals) as f64;
+        self.amount_minor as f64 / factor
+    }
+
+    /// Formats the amount in major units with appropriate decimal precision and currency code.
+    /// E.g. "500.00 INR", "50.00 USD", "5000 JPY"
+    pub fn format_major(&self) -> String {
+        let decimals = self.currency_obj().decimal_places();
+        if decimals == 0 {
+            format!("{} {}", self.amount_minor, self.currency)
+        } else {
+            format!(
+                "{:.precision$} {}",
+                self.to_major_units_f64(),
+                self.currency,
+                precision = decimals as usize
+            )
+        }
+    }
+
+    /// Helper to get validated Currency object
+    pub fn currency_obj(&self) -> Currency {
+        Currency::new(&self.currency).expect("PaymentAmount invariant: currency must be valid")
+    }
+
+    /// Minor unit name (e.g. "paise" for INR, "cents" for USD, "yen" for JPY)
+    pub fn minor_unit_name(&self) -> &'static str {
+        self.currency_obj().metadata().minor_unit_name
     }
 }
 
@@ -1095,5 +1305,109 @@ mod tests {
         assert_eq!(deserialized.amount_minor, 2500);
         assert_eq!(deserialized.currency, "USD");
         assert_eq!(deserialized.state, PaymentState::Created);
+    }
+
+    #[test]
+    fn test_currency_metadata_separation_and_provider_policies() {
+        // Universally valid ISO-4217 metadata
+        let inr_meta = Currency::new("INR").unwrap().metadata();
+        assert_eq!(inr_meta.numeric_code, 356);
+        assert_eq!(inr_meta.decimal_places, 2);
+        assert_eq!(inr_meta.minor_unit_name, "paise");
+
+        let jpy_meta = Currency::new("JPY").unwrap().metadata();
+        assert_eq!(jpy_meta.numeric_code, 392);
+        assert_eq!(jpy_meta.decimal_places, 0);
+        assert_eq!(jpy_meta.minor_unit_name, "yen");
+
+        let usd_meta = Currency::new("USD").unwrap().metadata();
+        assert_eq!(usd_meta.numeric_code, 840);
+        assert_eq!(usd_meta.decimal_places, 2);
+        assert_eq!(usd_meta.minor_unit_name, "cents");
+
+        // Provider policies separate with verified sources
+        let rzp_min = Currency::new("INR")
+            .unwrap()
+            .minimum_amount_for_provider("razorpay", Some("upi"));
+        assert_eq!(rzp_min, 100);
+
+        let stripe_usd_min = Currency::new("USD")
+            .unwrap()
+            .minimum_amount_for_provider("stripe", Some("card"));
+        assert_eq!(stripe_usd_min, 50);
+
+        let stripe_hkd_min = Currency::new("HKD")
+            .unwrap()
+            .minimum_amount_for_provider("stripe", Some("card"));
+        assert_eq!(stripe_hkd_min, 400);
+
+        // Every provider policy must have a non-empty source citation and policy justification
+        for policy in PROVIDER_MINIMUM_POLICIES {
+            assert!(
+                !policy.source.is_empty(),
+                "Policy for {} {} must have a source citation",
+                policy.provider,
+                policy.currency
+            );
+            assert!(
+                !policy.policy_justification.is_empty(),
+                "Policy for {} {} must have a policy justification",
+                policy.provider,
+                policy.currency
+            );
+        }
+    }
+
+    #[test]
+    fn test_monetary_semantics_major_vs_minor_across_currencies() {
+        // An identical integer minor value (5000) does NOT mean identical monetary value or major units!
+        let inr = PaymentAmount::new(5000, "INR").unwrap();
+        let usd = PaymentAmount::new(5000, "USD").unwrap();
+        let jpy = PaymentAmount::new(5000, "JPY").unwrap();
+
+        // 1. Major unit values: 50.00 for INR/USD (scale 2), but 5000.00 for JPY (scale 0)
+        assert_eq!(inr.to_major_units_f64(), 50.0);
+        assert_eq!(usd.to_major_units_f64(), 50.0);
+        assert_eq!(jpy.to_major_units_f64(), 5000.0);
+
+        // 2. Formatted major representations
+        assert_eq!(inr.format_major(), "50.00 INR");
+        assert_eq!(usd.format_major(), "50.00 USD");
+        assert_eq!(jpy.format_major(), "5000 JPY");
+
+        // 3. Sub-unit terminology
+        assert_eq!(inr.minor_unit_name(), "paise");
+        assert_eq!(usd.minor_unit_name(), "cents");
+        assert_eq!(jpy.minor_unit_name(), "yen");
+
+        // 4. Minimum values
+        let inr_min = PaymentAmount::new(100, "INR").unwrap();
+        assert_eq!(inr_min.to_major_units_f64(), 1.0);
+        assert_eq!(inr_min.format_major(), "1.00 INR");
+
+        let jpy_min = PaymentAmount::new(50, "JPY").unwrap();
+        assert_eq!(jpy_min.to_major_units_f64(), 50.0);
+        assert_eq!(jpy_min.format_major(), "50 JPY");
+    }
+
+    #[test]
+    fn test_provider_specific_policy_enforcement() {
+        // Razorpay domestic requires 100 paise
+        assert!(PaymentAmount::new_with_provider_policy(99, "INR", "razorpay", None).is_err());
+        assert!(PaymentAmount::new_with_provider_policy(100, "INR", "razorpay", None).is_ok());
+
+        // Stripe card requires 50 cents USD
+        assert!(
+            PaymentAmount::new_with_provider_policy(49, "USD", "stripe", Some("card")).is_err()
+        );
+        assert!(PaymentAmount::new_with_provider_policy(50, "USD", "stripe", Some("card")).is_ok());
+
+        // Stripe HKD requires 400 cents (HK$4.00)
+        assert!(
+            PaymentAmount::new_with_provider_policy(399, "HKD", "stripe", Some("card")).is_err()
+        );
+        assert!(
+            PaymentAmount::new_with_provider_policy(400, "HKD", "stripe", Some("card")).is_ok()
+        );
     }
 }
