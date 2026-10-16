@@ -95,6 +95,8 @@ pub struct GatewayHealth {
 pub struct GatewayRouteDecision {
     pub transaction_id: String,
     pub amount: u64,
+    #[serde(default)]
+    pub amount_minor: u64,
     pub currency: String,
     pub requested_gateway: PaymentGateway,
     pub routed_gateway: PaymentGateway,

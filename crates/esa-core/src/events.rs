@@ -29,12 +29,28 @@ pub struct PaymentEvent {
     pub payment_method_class: PaymentMethodClass,
     /// Pseudonymous reference - never contains real card data
     pub pseudonymous_reference: String,
+    /// Backwards-compatible cents amount for legacy clients and event loggers
     pub amount_cents: Option<u64>,
+    /// Canonical internal minor units
+    #[serde(default)]
+    pub amount_minor: Option<u64>,
+    /// Explicit ISO-4217 currency
+    #[serde(default = "default_event_currency")]
+    pub currency: String,
     pub processing_latency_ms: Option<f64>,
     pub success: bool,
 }
 
+fn default_event_currency() -> String {
+    "INR".to_string()
+}
+
 impl PaymentEvent {
+    /// Return canonical minor unit amount, falling back to legacy amount_cents if unset
+    pub fn get_amount_minor(&self) -> u64 {
+        self.amount_minor.or(self.amount_cents).unwrap_or(0)
+    }
+
     pub fn new_synthetic(
         event_type: PaymentEventType,
         region: Region,
@@ -49,6 +65,8 @@ impl PaymentEvent {
             payment_method_class: method,
             pseudonymous_reference: format!("PSEUDO-{}", Uuid::new_v4()),
             amount_cents: Some(10000),
+            amount_minor: Some(10000),
+            currency: "INR".to_string(),
             processing_latency_ms: None,
             success,
         }

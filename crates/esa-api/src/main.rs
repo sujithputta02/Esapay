@@ -1979,7 +1979,10 @@ impl IntoResponse for AppError {
 
 #[derive(Deserialize)]
 struct UniversalCheckoutRequest {
-    amount: u64,
+    #[serde(default)]
+    amount: Option<u64>,
+    #[serde(default)]
+    amount_minor: Option<u64>,
     #[serde(default = "default_currency")]
     currency: String,
     #[serde(default = "default_gateway")]
@@ -2170,27 +2173,69 @@ async fn universal_checkout(
     // 1. Rate Limiting Check (Token Bucket protection against DDoS/scraping)
     state.rate_limiter.check_checkout()?;
 
-    // 2. Input Validation & Sanitization (Strict bounds check)
-    if req.amount == 0 || req.amount > 100_000_000_000 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_amount",
-                "message": "Amount must be greater than 0 and under 100,000,000,000 cents."
-            })),
-        ));
-    }
-
-    let clean_currency = req.currency.trim().to_uppercase();
-    if clean_currency.len() != 3 || !clean_currency.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_currency",
-                "message": "Currency must be a valid 3-letter alphabetic ISO code (e.g. INR, USD, EUR)."
-            })),
-        ));
-    }
+    // 2. Input Validation & Amount Resolution (Strict bounds & conflict check)
+    let resolved_amount = match esa_core::PaymentAmount::resolve_from_inputs(
+        req.amount_minor,
+        req.amount,
+        Some(&req.currency),
+    ) {
+        Ok(amt) => amt,
+        Err(esa_core::PaymentError::ConflictingAmountInputs {
+            amount_minor,
+            legacy_amount,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "conflicting_amounts",
+                    "message": format!(
+                        "Conflicting amount inputs: 'amount_minor' is {} but 'amount' is {}",
+                        amount_minor, legacy_amount
+                    )
+                })),
+            ));
+        }
+        Err(esa_core::PaymentError::AmountBelowMinimum {
+            amount_minor,
+            minimum_required,
+            currency,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "amount_below_minimum",
+                    "message": format!(
+                        "Amount {} is below minimum required {} minor units for currency {}",
+                        amount_minor, minimum_required, currency
+                    )
+                })),
+            ));
+        }
+        Err(esa_core::PaymentError::AmountAboveMaximum {
+            amount_minor,
+            maximum_allowed,
+        }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "amount_above_maximum",
+                    "message": format!(
+                        "Amount {} exceeds maximum allowable bounds of {} minor units.",
+                        amount_minor, maximum_allowed
+                    )
+                })),
+            ));
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_amount",
+                    "message": format!("Invalid amount: {}", err)
+                })),
+            ));
+        }
+    };
 
     // 3. Mandatory Authorization check
     let caller = match api_keys::authenticate_caller(&headers).await {
@@ -2302,7 +2347,9 @@ async fn universal_checkout(
             _ => PaymentMethodClass::Upi,
         },
         pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
-        amount_cents: Some(req.amount),
+        amount_cents: Some(resolved_amount.amount_minor),
+        amount_minor: Some(resolved_amount.amount_minor),
+        currency: resolved_amount.currency.clone(),
         processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
         success: true,
     };
@@ -2311,8 +2358,9 @@ async fn universal_checkout(
 
     Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
-        amount: req.amount,
-        currency: req.currency,
+        amount: resolved_amount.amount_minor,
+        amount_minor: resolved_amount.amount_minor,
+        currency: resolved_amount.currency,
         requested_gateway: requested,
         routed_gateway: routed,
         failover_triggered: failover,
@@ -2415,7 +2463,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_checkout_with_valid_key_succeeds() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_LIVE_API_KEY", "esa_live_test_secret_checkout_key_8888");
+        std::env::set_var("ESA_TEST_API_KEY", "test-checkout-valid-key");
 
         let state = create_test_state();
         let app = build_app(state);
@@ -2433,7 +2481,7 @@ mod integration_tests {
             .header("content-type", "application/json")
             .header(
                 "authorization",
-                "Bearer esa_live_test_secret_checkout_key_8888",
+                "Bearer test-checkout-valid-key",
             )
             .body(axum::body::Body::from(req_body))
             .unwrap();
@@ -2441,7 +2489,7 @@ mod integration_tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        std::env::remove_var("ESA_LIVE_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]
@@ -2566,5 +2614,175 @@ mod integration_tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_checkout_compatibility_preserves_response_fields() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-compat-key");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        // Client sends legacy field `amount`
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount": 7500,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-compat-key")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Verify existing client response fields are preserved!
+        assert_eq!(resp_json.get("amount").and_then(|v| v.as_u64()), Some(7500));
+        assert_eq!(
+            resp_json.get("amount_minor").and_then(|v| v.as_u64()),
+            Some(7500)
+        );
+        assert_eq!(
+            resp_json.get("currency").and_then(|v| v.as_str()),
+            Some("INR")
+        );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_canonical_amount_minor_input() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-minor-key");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        // Client sends canonical field `amount_minor` (no legacy `amount`)
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount_minor": 8500,
+            "currency": "USD",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-minor-key")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(resp_json.get("amount").and_then(|v| v.as_u64()), Some(8500));
+        assert_eq!(
+            resp_json.get("amount_minor").and_then(|v| v.as_u64()),
+            Some(8500)
+        );
+        assert_eq!(
+            resp_json.get("currency").and_then(|v| v.as_str()),
+            Some("USD")
+        );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_conflicting_amounts_rejected() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-conflict-key");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        // Conflicting inputs: amount = 5000, amount_minor = 6000
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "amount_minor": 6000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-conflict-key")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            resp_json.get("error").and_then(|v| v.as_str()),
+            Some("conflicting_amounts")
+        );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_amount_below_minimum_rejected() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "test-min-amount-key");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        // 50 paise is below minimum for INR (100 paise)
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount_minor": 50,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-min-amount-key")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            resp_json.get("error").and_then(|v| v.as_str()),
+            Some("amount_below_minimum")
+        );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
     }
 }
