@@ -17,6 +17,10 @@ pub enum AuthError {
     InvalidTokenFormat,
     #[error("unsupported JWT algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    #[error("unknown or unresolvable key identifier (kid): {0}")]
+    UnknownKeyId(String),
+    #[error("JWKS key discovery failed: {0}")]
+    KeyDiscoveryFailed(String),
     #[error("invalid cryptographic signature")]
     InvalidSignature,
     #[error("token has expired")]
@@ -150,17 +154,271 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     extract_token(headers)
 }
 
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{
+    decode, decode_header,
+    jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm},
+    Algorithm, DecodingKey, Validation,
+};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Cached decoded cryptographic public key with associated algorithm
+#[derive(Clone)]
+pub struct CachedVerificationKey {
+    pub decoding_key: DecodingKey,
+    pub algorithm: Algorithm,
+}
+
+/// Thread-safe bounded cache for Supabase JWKS keys with TTL and cooldown
+#[derive(Clone)]
+pub struct JwksKeyCache {
+    keys: Arc<RwLock<HashMap<String, CachedVerificationKey>>>,
+    last_fetched: Arc<RwLock<Option<Instant>>>,
+    last_attempt: Arc<RwLock<Option<Instant>>>,
+    ttl: Duration,
+    cooldown: Duration,
+    jwks_url: Option<String>,
+}
+
+impl Default for JwksKeyCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JwksKeyCache {
+    pub fn new() -> Self {
+        Self {
+            keys: Arc::new(RwLock::new(HashMap::new())),
+            last_fetched: Arc::new(RwLock::new(None)),
+            last_attempt: Arc::new(RwLock::new(None)),
+            ttl: Duration::from_secs(3600),   // 1 hour TTL
+            cooldown: Duration::from_secs(5), // 5 seconds between network refreshes
+            jwks_url: None,
+        }
+    }
+
+    pub fn with_jwks_url(mut self, url: String) -> Self {
+        self.jwks_url = Some(url);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
+        self.cooldown = cooldown;
+        self
+    }
+
+    pub fn load_jwk_set(&self, set: &JwkSet) -> Result<usize, AuthError> {
+        let mut count = 0;
+        let mut map = self.keys.write();
+        for jwk in &set.keys {
+            let alg = match jwk.common.key_algorithm {
+                Some(KeyAlgorithm::RS256) => Algorithm::RS256,
+                Some(KeyAlgorithm::ES256) => Algorithm::ES256,
+                _ => match &jwk.algorithm {
+                    AlgorithmParameters::RSA(_) => Algorithm::RS256,
+                    AlgorithmParameters::EllipticCurve(_) => Algorithm::ES256,
+                    _ => continue,
+                },
+            };
+            if let Ok(decoding_key) = DecodingKey::from_jwk(jwk) {
+                let kid = jwk.common.key_id.clone().unwrap_or_default();
+                map.insert(
+                    kid,
+                    CachedVerificationKey {
+                        decoding_key,
+                        algorithm: alg,
+                    },
+                );
+                count += 1;
+            }
+        }
+        *self.last_fetched.write() = Some(Instant::now());
+        Ok(count)
+    }
+
+    #[allow(dead_code)]
+    pub fn load_jwks_json(&self, json_str: &str) -> Result<usize, AuthError> {
+        let set: JwkSet = serde_json::from_str(json_str).map_err(|e| {
+            AuthError::KeyDiscoveryFailed(format!("Failed to parse JWKS JSON: {}", e))
+        })?;
+        self.load_jwk_set(&set)
+    }
+
+    #[allow(dead_code)]
+    pub fn insert_key(&self, kid: String, decoding_key: DecodingKey, alg: Algorithm) {
+        let mut map = self.keys.write();
+        map.insert(
+            kid,
+            CachedVerificationKey {
+                decoding_key,
+                algorithm: alg,
+            },
+        );
+        *self.last_fetched.write() = Some(Instant::now());
+    }
+
+    pub fn resolve_key(
+        &self,
+        kid: Option<&str>,
+        target_alg: Algorithm,
+        custom_jwks_url: Option<&str>,
+    ) -> Result<CachedVerificationKey, AuthError> {
+        let target_kid = kid.unwrap_or("").trim();
+        let now = Instant::now();
+
+        // 1. Check in-memory cache
+        {
+            let keys = self.keys.read();
+            let is_fresh = self
+                .last_fetched
+                .read()
+                .map(|t| now.duration_since(t) < self.ttl)
+                .unwrap_or(false);
+
+            if is_fresh || !keys.is_empty() {
+                if !target_kid.is_empty() {
+                    if let Some(key) = keys.get(target_kid) {
+                        if key.algorithm == target_alg {
+                            return Ok(key.clone());
+                        } else {
+                            return Err(AuthError::UnsupportedAlgorithm(format!(
+                                "Key ID '{}' configured with algorithm {:?}, but token requires {:?}",
+                                target_kid, key.algorithm, target_alg
+                            )));
+                        }
+                    }
+                } else {
+                    let matching: Vec<_> = keys
+                        .values()
+                        .filter(|k| k.algorithm == target_alg)
+                        .collect();
+                    if matching.len() == 1 {
+                        return Ok(matching[0].clone());
+                    }
+                }
+            }
+        }
+
+        // 2. Refresh needed: attempt fetch if URL configured and cooldown elapsed
+        let url = custom_jwks_url
+            .map(|s| s.to_string())
+            .or_else(|| self.jwks_url.clone())
+            .or_else(|| std::env::var("SUPABASE_JWKS_URL").ok())
+            .or_else(|| {
+                std::env::var("SUPABASE_URL").ok().map(|u| {
+                    format!(
+                        "{}/auth/v1/.well-known/jwks.json",
+                        u.trim().trim_end_matches('/')
+                    )
+                })
+            });
+
+        if let Some(endpoint) = url {
+            let allow_fetch = {
+                let mut last = self.last_attempt.write();
+                match *last {
+                    Some(prev) if now.duration_since(prev) < self.cooldown => false,
+                    _ => {
+                        *last = Some(now);
+                        true
+                    }
+                }
+            };
+
+            if allow_fetch {
+                if let Ok(client) = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(4))
+                    .build()
+                {
+                    if let Ok(resp) = client.get(&endpoint).send() {
+                        if let Ok(body) = resp.text() {
+                            let _ = self.load_jwks_json(&body);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Check cache after refresh
+        let keys = self.keys.read();
+        if !target_kid.is_empty() {
+            if let Some(key) = keys.get(target_kid) {
+                if key.algorithm == target_alg {
+                    return Ok(key.clone());
+                } else {
+                    return Err(AuthError::UnsupportedAlgorithm(format!(
+                        "Key ID '{}' has algorithm {:?} but token requires {:?}",
+                        target_kid, key.algorithm, target_alg
+                    )));
+                }
+            }
+            return Err(AuthError::UnknownKeyId(target_kid.to_string()));
+        }
+
+        let matching: Vec<_> = keys
+            .values()
+            .filter(|k| k.algorithm == target_alg)
+            .collect();
+        if matching.len() == 1 {
+            return Ok(matching[0].clone());
+        }
+
+        Err(AuthError::UnknownKeyId(
+            "Key identifier not found in JWKS".to_string(),
+        ))
+    }
+}
+
+static GLOBAL_JWKS_CACHE: parking_lot::Mutex<Option<Arc<JwksKeyCache>>> =
+    parking_lot::Mutex::new(None);
+
+pub fn get_global_jwks_cache() -> Arc<JwksKeyCache> {
+    let mut lock = GLOBAL_JWKS_CACHE.lock();
+    if let Some(cache) = lock.as_ref() {
+        return cache.clone();
+    }
+    let url = std::env::var("SUPABASE_JWKS_URL").ok().or_else(|| {
+        std::env::var("SUPABASE_URL").ok().map(|u| {
+            format!(
+                "{}/auth/v1/.well-known/jwks.json",
+                u.trim().trim_end_matches('/')
+            )
+        })
+    });
+    let mut cache = JwksKeyCache::new();
+    if let Some(u) = url {
+        cache = cache.with_jwks_url(u);
+    }
+    let arc = Arc::new(cache);
+    *lock = Some(arc.clone());
+    arc
+}
 
 /// Key specification for Supabase JWT verification
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub enum SupabaseVerificationKey<'a> {
-    /// Symmetric HMAC key (HS256) using SUPABASE_JWT_SECRET
+    /// Symmetric HMAC key (HS256) using explicit secret
     Secret(&'a str),
     /// Asymmetric RSA public key in PEM format (RS256)
     RsaPem(&'a str),
-    /// Auto-detect from environment (SUPABASE_JWT_SECRET for HS256, SUPABASE_JWT_PUBLIC_KEY for RS256)
+    /// Asymmetric EC public key in PEM format (ES256)
+    EcPem(&'a str),
+    /// Preloaded JWK Set
+    JwkSet(&'a JwkSet),
+    /// Preconfigured JWKS cache reference
+    JwksCache(Arc<JwksKeyCache>),
+    /// Auto-detect from environment (prefers asymmetric JWKS / public keys; allows HS256 secret only if explicitly set)
     FromEnvironment,
 }
 
@@ -236,7 +494,7 @@ fn validate_claims_payload(
     Ok(())
 }
 
-/// Verify cryptographic signature and claims of a Supabase JWT (HS256 or RS256)
+/// Verify cryptographic signature and claims of a Supabase JWT (HS256, RS256, or ES256)
 pub fn verify_supabase_jwt_with_key(
     token: &str,
     key_spec: SupabaseVerificationKey,
@@ -263,6 +521,7 @@ pub fn verify_supabase_jwt_with_key(
         _ => AuthError::InvalidTokenFormat,
     })?;
 
+    let kid = header.kid.as_deref();
     let expected_iss = resolve_supabase_expected_issuer(expected_issuer).ok_or_else(|| {
         AuthError::InvalidIssuer(
             "Expected issuer is required for verification (configure SUPABASE_URL or pass expected_issuer)"
@@ -270,86 +529,133 @@ pub fn verify_supabase_jwt_with_key(
         )
     })?;
 
-    match header.alg {
+    let (decoding_key, validation_alg) = match header.alg {
         Algorithm::HS256 => {
-            let secret_str = match key_spec {
+            let secret_str = match &key_spec {
                 SupabaseVerificationKey::Secret(s) => s.to_string(),
-                SupabaseVerificationKey::FromEnvironment => std::env::var("SUPABASE_JWT_SECRET")
-                    .map_err(|_| {
-                        warn!(
-                            "Supabase JWT verification failed: SUPABASE_JWT_SECRET not configured"
-                        );
-                        AuthError::InvalidSignature
-                    })?,
-                SupabaseVerificationKey::RsaPem(_) => {
+                SupabaseVerificationKey::FromEnvironment => {
+                    std::env::var("SUPABASE_JWT_SECRET").map_err(|_| {
+                        warn!("Supabase JWT verification failed: HS256 token received but SUPABASE_JWT_SECRET not configured");
+                        AuthError::UnsupportedAlgorithm(
+                            "HS256 symmetric signing is only allowed when SUPABASE_JWT_SECRET is explicitly configured".to_string()
+                        )
+                    })?
+                }
+                _ => {
                     return Err(AuthError::UnsupportedAlgorithm(
-                        "Token uses HS256 but an RSA PEM key was supplied".to_string(),
+                        "Token uses HS256 but key specification is configured for asymmetric verification".to_string()
                     ));
                 }
             };
-
             let clean_secret = secret_str.trim();
             if clean_secret.is_empty() {
                 warn!("Supabase JWT verification failed: secret is empty");
                 return Err(AuthError::InvalidSignature);
             }
-
-            let decoding_key = DecodingKey::from_secret(clean_secret.as_bytes());
-            let mut validation = Validation::new(Algorithm::HS256);
-            validation.validate_exp = true;
-            validation.validate_nbf = true;
-            validation.set_audience(&["authenticated"]);
-            validation.set_issuer(&[&expected_iss]);
-
-            let token_data = decode::<SupabaseJwtClaims>(clean_token, &decoding_key, &validation)
-                .map_err(map_jwt_error)?;
-
-            validate_claims_payload(&token_data.claims, &expected_iss)?;
-            Ok(token_data.claims)
+            (
+                DecodingKey::from_secret(clean_secret.as_bytes()),
+                Algorithm::HS256,
+            )
         }
         Algorithm::RS256 => {
-            let pem_str = match key_spec {
-                SupabaseVerificationKey::RsaPem(pem) => pem.to_string(),
-                SupabaseVerificationKey::FromEnvironment => {
-                    std::env::var("SUPABASE_JWT_PUBLIC_KEY").map_err(|_| {
-                        warn!(
-                        "Supabase JWT verification failed: SUPABASE_JWT_PUBLIC_KEY not configured"
-                    );
-                        AuthError::InvalidSignature
-                    })?
+            let key = match &key_spec {
+                SupabaseVerificationKey::RsaPem(pem) => {
+                    let clean = pem.trim();
+                    if clean.is_empty() {
+                        return Err(AuthError::InvalidSignature);
+                    }
+                    DecodingKey::from_rsa_pem(clean.as_bytes())
+                        .map_err(|_| AuthError::InvalidSignature)?
                 }
-                SupabaseVerificationKey::Secret(_) => {
+                SupabaseVerificationKey::JwkSet(set) => {
+                    let cache = JwksKeyCache::new();
+                    let _ = cache.load_jwk_set(set);
+                    cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                }
+                SupabaseVerificationKey::JwksCache(cache) => {
+                    cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                }
+                SupabaseVerificationKey::FromEnvironment => {
+                    if let Ok(pem) = std::env::var("SUPABASE_JWT_PUBLIC_KEY") {
+                        let clean = pem.trim();
+                        if !clean.is_empty() {
+                            DecodingKey::from_rsa_pem(clean.as_bytes())
+                                .map_err(|_| AuthError::InvalidSignature)?
+                        } else {
+                            let cache = get_global_jwks_cache();
+                            cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                        }
+                    } else {
+                        let cache = get_global_jwks_cache();
+                        cache.resolve_key(kid, Algorithm::RS256, None)?.decoding_key
+                    }
+                }
+                SupabaseVerificationKey::Secret(_) | SupabaseVerificationKey::EcPem(_) => {
                     return Err(AuthError::UnsupportedAlgorithm(
-                        "Token uses RS256 but an HMAC secret was supplied".to_string(),
+                        "Token uses RS256 but key specification is not RSA or JWKS".to_string(),
                     ));
                 }
             };
-
-            let clean_pem = pem_str.trim();
-            if clean_pem.is_empty() {
-                warn!("Supabase JWT verification failed: RSA public key is empty");
-                return Err(AuthError::InvalidSignature);
-            }
-
-            let decoding_key = DecodingKey::from_rsa_pem(clean_pem.as_bytes())
-                .map_err(|_| AuthError::InvalidSignature)?;
-            let mut validation = Validation::new(Algorithm::RS256);
-            validation.validate_exp = true;
-            validation.validate_nbf = true;
-            validation.set_audience(&["authenticated"]);
-            validation.set_issuer(&[&expected_iss]);
-
-            let token_data = decode::<SupabaseJwtClaims>(clean_token, &decoding_key, &validation)
-                .map_err(map_jwt_error)?;
-
-            validate_claims_payload(&token_data.claims, &expected_iss)?;
-            Ok(token_data.claims)
+            (key, Algorithm::RS256)
+        }
+        Algorithm::ES256 => {
+            let key = match &key_spec {
+                SupabaseVerificationKey::EcPem(pem) => {
+                    let clean = pem.trim();
+                    if clean.is_empty() {
+                        return Err(AuthError::InvalidSignature);
+                    }
+                    DecodingKey::from_ec_pem(clean.as_bytes())
+                        .map_err(|_| AuthError::InvalidSignature)?
+                }
+                SupabaseVerificationKey::JwkSet(set) => {
+                    let cache = JwksKeyCache::new();
+                    let _ = cache.load_jwk_set(set);
+                    cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                }
+                SupabaseVerificationKey::JwksCache(cache) => {
+                    cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                }
+                SupabaseVerificationKey::FromEnvironment => {
+                    if let Ok(pem) = std::env::var("SUPABASE_JWT_EC_PUBLIC_KEY") {
+                        let clean = pem.trim();
+                        if !clean.is_empty() {
+                            DecodingKey::from_ec_pem(clean.as_bytes())
+                                .map_err(|_| AuthError::InvalidSignature)?
+                        } else {
+                            let cache = get_global_jwks_cache();
+                            cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                        }
+                    } else {
+                        let cache = get_global_jwks_cache();
+                        cache.resolve_key(kid, Algorithm::ES256, None)?.decoding_key
+                    }
+                }
+                SupabaseVerificationKey::Secret(_) | SupabaseVerificationKey::RsaPem(_) => {
+                    return Err(AuthError::UnsupportedAlgorithm(
+                        "Token uses ES256 but key specification is not EC or JWKS".to_string(),
+                    ));
+                }
+            };
+            (key, Algorithm::ES256)
         }
         other => {
             warn!("Rejected JWT with unsupported algorithm: {:?}", other);
-            Err(AuthError::UnsupportedAlgorithm(format!("{:?}", other)))
+            return Err(AuthError::UnsupportedAlgorithm(format!("{:?}", other)));
         }
-    }
+    };
+
+    let mut validation = Validation::new(validation_alg);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+    validation.set_audience(&["authenticated"]);
+    validation.set_issuer(&[&expected_iss]);
+
+    let token_data = decode::<SupabaseJwtClaims>(clean_token, &decoding_key, &validation)
+        .map_err(map_jwt_error)?;
+
+    validate_claims_payload(&token_data.claims, &expected_iss)?;
+    Ok(token_data.claims)
 }
 
 /// Verify cryptographic signature and claims of a Supabase HS256 JWT
@@ -682,6 +988,57 @@ pub(crate) mod tests {
             .expect("Failed to encode test RS256 JWT")
     }
 
+    fn generate_ephemeral_test_ec_keys() -> Option<(String, String)> {
+        let sec1_out = std::process::Command::new("openssl")
+            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout"])
+            .output()
+            .ok()?;
+        if !sec1_out.status.success() {
+            return None;
+        }
+
+        let mut pkcs8_child = std::process::Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        use std::io::Write;
+        if let Some(mut stdin) = pkcs8_child.stdin.take() {
+            let _ = stdin.write_all(&sec1_out.stdout);
+        }
+        let priv_out = pkcs8_child.wait_with_output().ok()?;
+        if !priv_out.status.success() {
+            return None;
+        }
+        let priv_pem = String::from_utf8(priv_out.stdout).ok()?;
+
+        let mut pub_child = std::process::Command::new("openssl")
+            .args(["ec", "-pubout"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        if let Some(mut stdin) = pub_child.stdin.take() {
+            let _ = stdin.write_all(&sec1_out.stdout);
+        }
+        let pub_out = pub_child.wait_with_output().ok()?;
+        if !pub_out.status.success() {
+            return None;
+        }
+        let pub_pem = String::from_utf8(pub_out.stdout).ok()?;
+
+        Some((priv_pem, pub_pem))
+    }
+
+    fn create_es256_token(priv_pem: &str, claims: &serde_json::Value, kid: Option<&str>) -> String {
+        let key = EncodingKey::from_ec_pem(priv_pem.as_bytes())
+            .expect("Failed to parse test EC private key");
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = kid.map(|s| s.to_string());
+        encode(&header, claims, &key).expect("Failed to encode test ES256 JWT")
+    }
+
     #[test]
     fn test_valid_supabase_jwt_verification_hs256() {
         let secret = "test_mock_jwt_secret_for_tests_only";
@@ -775,6 +1132,174 @@ pub(crate) mod tests {
             Some("https://test.supabase.co/auth/v1"),
         );
         assert_eq!(res, Err(AuthError::InvalidSignature));
+    }
+
+    #[test]
+    fn test_valid_supabase_jwt_verification_es256() {
+        let (priv_pem, pub_pem) = match generate_ephemeral_test_ec_keys() {
+            Some(keys) => keys,
+            None => {
+                eprintln!("Skipping ES256 test: openssl CLI unavailable in test environment");
+                return;
+            }
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_es256_987654321",
+            "email": "es256_merchant@example.com",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "nbf": now - 10,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token = create_es256_token(&priv_pem, &claims, Some("ec-key-1"));
+        let res = verify_supabase_jwt_with_key(
+            &token,
+            SupabaseVerificationKey::EcPem(&pub_pem),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(
+            res.is_ok(),
+            "Valid ES256 JWT must pass verification: {:?}",
+            res.err()
+        );
+        let verified = res.unwrap();
+        assert_eq!(verified.sub, Some("user_es256_987654321".to_string()));
+    }
+
+    #[test]
+    fn test_forged_es256_jwt_rejected() {
+        let (priv_pem1, _) = match generate_ephemeral_test_ec_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+        let (_, pub_pem2) = match generate_ephemeral_test_ec_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_es256_hacker",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token = create_es256_token(&priv_pem1, &claims, None);
+        let res = verify_supabase_jwt_with_key(
+            &token,
+            SupabaseVerificationKey::EcPem(&pub_pem2),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert_eq!(res, Err(AuthError::InvalidSignature));
+    }
+
+    #[test]
+    fn test_jwks_cache_resolution_and_key_rotation() {
+        let (priv_pem_v1, pub_pem_v1) = match generate_ephemeral_test_ec_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+        let (priv_pem_v2, pub_pem_v2) = match generate_ephemeral_test_ec_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+
+        let cache = Arc::new(JwksKeyCache::new());
+
+        // 1. Initially cache only contains key v1
+        let dec_v1 = DecodingKey::from_ec_pem(pub_pem_v1.as_bytes()).unwrap();
+        cache.insert_key("kid-v1".to_string(), dec_v1, Algorithm::ES256);
+
+        let now = chrono::Utc::now().timestamp();
+        let claims_v1 = serde_json::json!({
+            "sub": "user_rotation_test",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        let token_v1 = create_es256_token(&priv_pem_v1, &claims_v1, Some("kid-v1"));
+        let res_v1 = verify_supabase_jwt_with_key(
+            &token_v1,
+            SupabaseVerificationKey::JwksCache(cache.clone()),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(res_v1.is_ok(), "Token with kid-v1 must pass verification");
+
+        // 2. Token arrives with rotated key kid-v2 before cache has it -> fails with UnknownKeyId
+        let claims_v2 = serde_json::json!({
+            "sub": "user_rotation_test",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+        let token_v2 = create_es256_token(&priv_pem_v2, &claims_v2, Some("kid-v2"));
+        let res_v2_before = verify_supabase_jwt_with_key(
+            &token_v2,
+            SupabaseVerificationKey::JwksCache(cache.clone()),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert_eq!(
+            res_v2_before,
+            Err(AuthError::UnknownKeyId("kid-v2".to_string()))
+        );
+
+        // 3. Key rotation occurs: rotated key v2 is loaded into cache
+        let dec_v2 = DecodingKey::from_ec_pem(pub_pem_v2.as_bytes()).unwrap();
+        cache.insert_key("kid-v2".to_string(), dec_v2, Algorithm::ES256);
+
+        let res_v2_after = verify_supabase_jwt_with_key(
+            &token_v2,
+            SupabaseVerificationKey::JwksCache(cache.clone()),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(
+            res_v2_after.is_ok(),
+            "Rotated token with kid-v2 must pass verification after rotation"
+        );
+
+        // 4. Old token with kid-v1 still validates (graceful key overlap during rotation)
+        let res_v1_overlap = verify_supabase_jwt_with_key(
+            &token_v1,
+            SupabaseVerificationKey::JwksCache(cache.clone()),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(
+            res_v1_overlap.is_ok(),
+            "Existing key v1 remains valid during key rotation overlap"
+        );
+    }
+
+    #[test]
+    fn test_hs256_token_rejected_when_asymmetric_only() {
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user_hs256_attack",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "exp": now + 3600,
+            "iss": "https://test.supabase.co/auth/v1"
+        });
+
+        // Attacker creates HS256 token signed with symmetric secret
+        let token = create_hs256_token("attacker_hmac_secret", &claims);
+
+        // Verifier configured with EC PEM
+        let (_, pub_pem) = generate_ephemeral_test_ec_keys().unwrap();
+        let res = verify_supabase_jwt_with_key(
+            &token,
+            SupabaseVerificationKey::EcPem(&pub_pem),
+            Some("https://test.supabase.co/auth/v1"),
+        );
+        assert!(matches!(res, Err(AuthError::UnsupportedAlgorithm(_))));
     }
 
     const TEST_JWT_SECRET: &str = "test_mock_jwt_secret_for_tests_only";
