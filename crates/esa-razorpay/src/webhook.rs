@@ -321,7 +321,7 @@ pub fn parse_webhook_payload_detailed(
             let p_amount = root
                 .pointer("/payload/payment/entity/amount")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(r_amount);
+                .unwrap_or(0);
 
             (
                 p_id,
@@ -430,10 +430,11 @@ pub fn parse_webhook_payload_detailed(
         .minimum_amount_for_provider("razorpay", Some(&method))
         .map_err(|e| WebhookError::InvalidAmount(e.to_string()))?;
 
-    if amount_minor < min_amount {
+    let effective_amount = refund_amount_minor.unwrap_or(amount_minor);
+    if effective_amount < min_amount {
         return Err(WebhookError::InvalidAmount(format!(
             "Amount {} is below required minimum of {} for currency {}",
-            amount_minor, min_amount, currency
+            effective_amount, min_amount, currency
         )));
     }
 
@@ -1365,5 +1366,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed7.status, "failed");
+    }
+
+    #[test]
+    fn test_refund_without_payment_amount_does_not_fabricate_payment_amount() {
+        let payload = serde_json::json!({
+            "id": "evt_rf_no_p_amt",
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_standalone_1",
+                        "amount": 2500,
+                        "currency": "INR",
+                        "payment_id": "pay_standalone_1",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+
+        let body = serde_json::to_vec(&payload).unwrap();
+        let parsed = parse_webhook_payload_detailed(&body, None, None).unwrap();
+        assert_eq!(parsed.refund_id, Some("rfnd_standalone_1".to_string()));
+        assert_eq!(parsed.refund_amount_minor, Some(2500));
+        assert_eq!(
+            parsed.amount_minor, 0,
+            "When payment amount is missing, amount_minor must not be fabricated from refund amount"
+        );
+        assert_eq!(parsed.payment_id, "pay_standalone_1");
     }
 }

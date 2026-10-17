@@ -1,7 +1,7 @@
 use axum::{
     body::Bytes,
     extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -20,7 +20,7 @@ use esa_state::{
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn, Level};
 
@@ -262,60 +262,114 @@ pub(crate) fn is_demo_mutation_allowed() -> bool {
     matches!(detect_checkout_mode(), PaymentCheckoutMode::Simulated)
 }
 
-fn configure_cors() -> CorsLayer {
-    let explicit_allowed: Vec<String> = std::env::var("ALLOWED_ORIGINS")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(|o| o.trim().to_string())
-                .filter(|o| !o.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub is_production: bool,
+    pub allowed_origins: Vec<String>,
+}
 
-    let allow_origin = AllowOrigin::predicate(move |origin: &HeaderValue, _| {
-        if let Ok(origin_str) = origin.to_str() {
-            let origin_lower = origin_str.to_lowercase();
-            // Explicitly allowed origins from environment (or wildcard)
-            if explicit_allowed
-                .iter()
-                .any(|allowed| allowed == "*" || allowed.eq_ignore_ascii_case(origin_str))
-            {
+impl CorsConfig {
+    pub fn new(is_production: bool, allowed_origins: Vec<String>) -> Self {
+        Self {
+            is_production,
+            allowed_origins,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let is_production = is_production_mode();
+        let allowed_origins: Vec<String> = std::env::var("ALLOWED_ORIGINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|o| o.trim().to_string())
+                    .filter(|o| !o.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::new(is_production, allowed_origins)
+    }
+
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        let origin_clean = origin.trim();
+        let origin_lower = origin_clean.to_lowercase();
+
+        // 1. Exact production HTTPS origin is always allowed
+        if origin_lower == "https://esapay.vercel.app" {
+            return true;
+        }
+
+        // 2. Reject HTTP production origin
+        if origin_lower == "http://esapay.vercel.app" {
+            return false;
+        }
+
+        // 3. Explicitly configured allowed origins (e.g. specific preview URLs)
+        // Strictly reject wildcard '*' because credentials are enabled
+        for allowed in &self.allowed_origins {
+            let allowed_clean = allowed.trim();
+            if allowed_clean == "*" {
+                // Wildcard forbidden with credentials to prevent credentialed cross-origin data exposure
+                continue;
+            }
+            if allowed_clean.eq_ignore_ascii_case(origin_clean) {
                 return true;
             }
-            // Allow localhost and 127.0.0.1 on any port for local development
-            if origin_lower.starts_with("http://localhost:")
+        }
+
+        // 4. Localhost and loopback origins allowed ONLY in non-production mode
+        if !self.is_production
+            && (origin_lower.starts_with("http://localhost:")
                 || origin_lower == "http://localhost"
                 || origin_lower.starts_with("http://127.0.0.1:")
                 || origin_lower == "http://127.0.0.1"
                 || origin_lower.starts_with("https://localhost:")
-                || origin_lower == "https://localhost"
-            {
-                return true;
-            }
-            // Allow production and preview Vercel domains for Esapay
-            if origin_lower == "https://esapay.vercel.app"
-                || origin_lower == "http://esapay.vercel.app"
-                || origin_lower.ends_with(".vercel.app")
-            {
-                return true;
-            }
+                || origin_lower == "https://localhost")
+        {
+            return true;
         }
-        false
-    });
 
-    CorsLayer::new()
-        .allow_origin(allow_origin)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_headers(AllowHeaders::mirror_request())
-        .allow_credentials(true)
+        false
+    }
+
+    pub fn build_cors_layer(&self) -> CorsLayer {
+        let config = self.clone();
+        let allow_origin = AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+            if let Ok(origin_str) = origin.to_str() {
+                config.is_origin_allowed(origin_str)
+            } else {
+                false
+            }
+        });
+
+        let allowed_headers = [
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("x-esa-api-key"),
+            header::HeaderName::from_static("x-requested-with"),
+            header::HeaderName::from_static("x-razorpay-signature"),
+            header::HeaderName::from_static("x-razorpay-event-id"),
+        ];
+
+        CorsLayer::new()
+            .allow_origin(allow_origin)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
+            .allow_headers(allowed_headers)
+            .allow_credentials(true)
+    }
+}
+
+fn configure_cors() -> CorsLayer {
+    CorsConfig::from_env().build_cors_layer()
 }
 
 fn publish_metrics_telemetry(state: &AppState) {
@@ -1286,6 +1340,22 @@ async fn razorpay_webhook(
             "provider_event_id": provider_event_id,
             "payment_id": payment_id,
             "metadata_recorded": true,
+            "message": reason,
+        }))
+        .into_response(),
+        Ok(WebhookProcessingResult::Unapplied {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            reason,
+        }) => Json(serde_json::json!({
+            "status": "unapplied",
+            "inbox_id": inbox_id,
+            "provider": provider,
+            "provider_event_id": provider_event_id,
+            "payment_id": payment_id,
+            "unapplied": true,
             "message": reason,
         }))
         .into_response(),
@@ -6228,5 +6298,209 @@ mod integration_tests {
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::CONFLICT);
         }
+    }
+
+    #[tokio::test]
+    async fn test_cors_origin_allowance_rules_deterministic() {
+        // Production CORS configuration with an explicitly allowed preview origin
+        let prod_cors = CorsConfig::new(
+            true,
+            vec!["https://esapay-preview-pr-19.vercel.app".to_string()],
+        );
+
+        // 1. Exact production HTTPS origin succeeds
+        assert!(prod_cors.is_origin_allowed("https://esapay.vercel.app"));
+
+        // 2. Explicitly configured preview origin succeeds
+        assert!(prod_cors.is_origin_allowed("https://esapay-preview-pr-19.vercel.app"));
+
+        // 3. Unrelated *.vercel.app origin fails (suffix matching forbidden)
+        assert!(!prod_cors.is_origin_allowed("https://random-attacker.vercel.app"));
+        assert!(!prod_cors.is_origin_allowed("https://esapay-other.vercel.app"));
+
+        // 4. HTTP production origin fails
+        assert!(!prod_cors.is_origin_allowed("http://esapay.vercel.app"));
+
+        // 5. Localhost fails in production mode
+        assert!(!prod_cors.is_origin_allowed("http://localhost:3000"));
+        assert!(!prod_cors.is_origin_allowed("http://localhost:5173"));
+        assert!(!prod_cors.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(!prod_cors.is_origin_allowed("https://localhost"));
+
+        // 6. Non-production (development) mode allows localhost
+        let dev_cors = CorsConfig::new(false, vec![]);
+        assert!(dev_cors.is_origin_allowed("https://esapay.vercel.app"));
+        assert!(dev_cors.is_origin_allowed("http://localhost:3000"));
+        assert!(dev_cors.is_origin_allowed("http://localhost:5173"));
+        assert!(dev_cors.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(dev_cors.is_origin_allowed("https://localhost:443"));
+        // Development mode still rejects arbitrary unrelated origins and HTTP production
+        assert!(!dev_cors.is_origin_allowed("https://random-attacker.vercel.app"));
+        assert!(!dev_cors.is_origin_allowed("http://esapay.vercel.app"));
+
+        // 7. Wildcard configuration '*' cannot enable credentialed access
+        let wildcard_cors = CorsConfig::new(true, vec!["*".to_string()]);
+        assert!(!wildcard_cors.is_origin_allowed("https://attacker.com"));
+        assert!(!wildcard_cors.is_origin_allowed("https://evil.vercel.app"));
+        assert!(!wildcard_cors.is_origin_allowed("http://localhost:3000"));
+        // Legitimate production origin still allowed
+        assert!(wildcard_cors.is_origin_allowed("https://esapay.vercel.app"));
+    }
+
+    #[tokio::test]
+    async fn test_cors_preflight_and_headers_handling() {
+        let cors_config = CorsConfig::new(
+            true,
+            vec!["https://esapay-preview-pr-19.vercel.app".to_string()],
+        );
+        let app = Router::new()
+            .route("/api/test-preflight", post(|| async { "ok" }))
+            .layer(cors_config.build_cors_layer());
+
+        // 1. Legitimate preflight from exact production origin succeeds
+        let req_prod = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://esapay.vercel.app")
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "content-type, authorization, x-esa-api-key",
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_prod = app.clone().oneshot(req_prod).await.unwrap();
+        assert_eq!(resp_prod.status(), StatusCode::OK);
+        assert_eq!(
+            resp_prod
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://esapay.vercel.app")
+        );
+        assert_eq!(
+            resp_prod
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+
+        // 2. Legitimate preflight from configured preview origin succeeds
+        let req_preview = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://esapay-preview-pr-19.vercel.app")
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "content-type")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_preview = app.clone().oneshot(req_preview).await.unwrap();
+        assert_eq!(resp_preview.status(), StatusCode::OK);
+        assert_eq!(
+            resp_preview
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://esapay-preview-pr-19.vercel.app")
+        );
+
+        // 3. Preflight from arbitrary *.vercel.app origin is rejected (no allow-origin header)
+        let req_unauth = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://arbitrary-attacker.vercel.app")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_unauth = app.clone().oneshot(req_unauth).await.unwrap();
+        assert!(resp_unauth
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+
+        // 4. Preflight from HTTP production origin is rejected
+        let req_http = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "http://esapay.vercel.app")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_http = app.clone().oneshot(req_http).await.unwrap();
+        assert!(resp_http
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+
+        // 5. Preflight from localhost in production mode is rejected
+        let req_local = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "http://localhost:3000")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_local = app.oneshot(req_local).await.unwrap();
+        assert!(resp_local
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_webhook_first_seen_refund_returns_unapplied() {
+        let secret = "whsec_test_unapplied_01";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        let app = build_app(state);
+        let payload = serde_json::json!({
+            "id": "evt_api_first_seen_rfnd_01",
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_api_first_seen_01",
+                        "payment_id": "pay_api_first_seen_01",
+                        "amount": 2500,
+                        "currency": "INR",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(resp_json["status"], "unapplied");
+        assert_eq!(resp_json["unapplied"], true);
+        assert_eq!(resp_json["payment_id"], "pay_api_first_seen_01");
+
+        // Verify payment record was NOT fabricated in store
+        assert!(store
+            .get_payment_record("pay_api_first_seen_01")
+            .await
+            .unwrap()
+            .is_none());
     }
 }

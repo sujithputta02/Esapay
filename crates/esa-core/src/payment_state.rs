@@ -796,12 +796,14 @@ impl PaymentEntity {
     /// Guarantees:
     /// 1. Delivery Idempotency: Repeated event IDs return `TransitionOutcome::DuplicateIgnored` immediately
     ///    without any secondary transitions or side-effects.
-    /// 2. Refund Entity Idempotency: Different event deliveries referring to the same `refund_id`
+    /// 2. Refund Status Validation: Contradictory or invalid refund statuses are strictly rejected across
+    ///    all applicable payment states before any state mutation or ledger update.
+    /// 3. Refund Entity Idempotency: Different event deliveries referring to the same `refund_id`
     ///    only apply the refund amount at most once. Pending or failed refunds NEVER increment the completed
     ///    refunded balance.
-    /// 3. Out-of-order Resilience: Stale or late pending/failed events never downgrade an already processed refund.
-    /// 4. Fault Isolation: Rejected transitions NEVER record the event ID into `events_seen`.
-    /// 5. Refund Bounding: Refunds of zero or refunds exceeding remaining captured balance are strictly rejected.
+    /// 4. Out-of-order Resilience: Stale or late pending/failed events never downgrade an already processed refund.
+    /// 5. Fault Isolation: Rejected transitions NEVER record the event ID into `events_seen`.
+    /// 6. Refund Bounding: Refunds of zero or refunds exceeding remaining captured balance are strictly rejected.
     pub fn apply_event_with_refund(
         &mut self,
         event_id: &str,
@@ -828,6 +830,14 @@ impl PaymentEntity {
                 current_state: self.state,
                 reason: format!("Event '{}' has already been processed", clean_event_id),
             });
+        }
+
+        // 2. CENTRAL REFUND STATUS VALIDATION:
+        // Validates refund status against event type BEFORE executing any state-specific handling,
+        // ensuring Created, Authorized, Captured, PartiallyRefunded, Refunded, and PendingReconciliation
+        // reject invalid or contradictory refund events consistently.
+        if is_refund_event(event_type) {
+            validate_refund_event_status(event_type, refund_id, refund_status)?;
         }
 
         let previous_state = self.state;
@@ -1090,49 +1100,9 @@ impl PaymentEntity {
         let refund_status = params.refund_status;
         let previous_state = params.previous_state;
         let now = params.now;
-        // Validate explicit refund status against event type to reject contradictory combinations
-        if let Some(st) = refund_status {
-            match st {
-                "processed" | "pending" | "failed" => {}
-                other => {
-                    return Err(PaymentError::InvalidRefundStatus {
-                        status: other.to_string(),
-                    });
-                }
-            }
 
-            match event_type {
-                PaymentEventType::RefundProcessed if st != "processed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundProcessed".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                PaymentEventType::RefundFailed if st != "failed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundFailed".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                PaymentEventType::RefundCreated if st != "pending" && st != "processed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundCreated".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                PaymentEventType::RefundSpeedChanged if st == "failed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundSpeedChanged".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                _ => {}
-            }
-        }
+        // Defensive validation (also executed centrally in apply_event_with_refund)
+        validate_refund_event_status(event_type, refund_id, refund_status)?;
 
         if event_type == &PaymentEventType::RefundSpeedChanged {
             if let Some(r_id) = refund_id {
@@ -1462,6 +1432,86 @@ impl PaymentEntity {
             })
         }
     }
+}
+
+/// Helper to identify if an event is a refund-related event.
+pub fn is_refund_event(event_type: &PaymentEventType) -> bool {
+    matches!(
+        event_type,
+        PaymentEventType::RefundCreated
+            | PaymentEventType::RefundProcessed
+            | PaymentEventType::RefundFailed
+            | PaymentEventType::RefundSpeedChanged
+    )
+}
+
+/// Central validation for refund event statuses across all state transitions.
+///
+/// Matrix:
+/// - Explicit unsupported status strings must be rejected.
+/// - When status is omitted (None), safe event-specific defaults are preserved.
+/// - `refund.processed` must reject explicit `pending` and `failed` statuses.
+/// - `refund.failed` must reject explicit `pending` and `processed` statuses.
+/// - `refund.created` may accept `pending` and supported instant-refund `processed`, but must reject contradictory statuses (e.g. `failed`).
+/// - `refund.speed_changed` must remain metadata-only and reject contradictory statuses (e.g. `failed`).
+pub fn validate_refund_event_status(
+    event_type: &PaymentEventType,
+    refund_id: Option<&str>,
+    refund_status: Option<&str>,
+) -> Result<(), PaymentError> {
+    if !is_refund_event(event_type) {
+        return Ok(());
+    }
+
+    if let Some(st) = refund_status {
+        let clean_status = st.trim();
+        match clean_status {
+            "processed" | "pending" | "failed" => {}
+            other => {
+                return Err(PaymentError::InvalidRefundStatus {
+                    status: other.to_string(),
+                });
+            }
+        }
+
+        let ref_id_str = refund_id.unwrap_or_default().to_string();
+
+        match event_type {
+            PaymentEventType::RefundProcessed if clean_status != "processed" => {
+                return Err(PaymentError::ContradictoryRefundStatus {
+                    refund_id: ref_id_str,
+                    event_type: "RefundProcessed".to_string(),
+                    status: clean_status.to_string(),
+                });
+            }
+            PaymentEventType::RefundFailed if clean_status != "failed" => {
+                return Err(PaymentError::ContradictoryRefundStatus {
+                    refund_id: ref_id_str,
+                    event_type: "RefundFailed".to_string(),
+                    status: clean_status.to_string(),
+                });
+            }
+            PaymentEventType::RefundCreated
+                if clean_status != "pending" && clean_status != "processed" =>
+            {
+                return Err(PaymentError::ContradictoryRefundStatus {
+                    refund_id: ref_id_str,
+                    event_type: "RefundCreated".to_string(),
+                    status: clean_status.to_string(),
+                });
+            }
+            PaymentEventType::RefundSpeedChanged if clean_status == "failed" => {
+                return Err(PaymentError::ContradictoryRefundStatus {
+                    refund_id: ref_id_str,
+                    event_type: "RefundSpeedChanged".to_string(),
+                    status: clean_status.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2464,5 +2514,191 @@ mod tests {
             Ok(TransitionOutcome::Applied { .. })
         ));
         assert_eq!(payment.refunded_amount_minor, 4000);
+    }
+
+    #[test]
+    fn test_contradictory_refund_statuses_rejected_across_all_applicable_states() {
+        // States to test: Created, Authorized, Captured, PartiallyRefunded, Refunded, PendingReconciliation
+        let states = [
+            PaymentState::Created,
+            PaymentState::Authorized,
+            PaymentState::Captured,
+            PaymentState::PartiallyRefunded,
+            PaymentState::Refunded,
+            PaymentState::PendingReconciliation,
+        ];
+
+        let invalid_cases = [
+            // (event_type, explicit_status, expected_error_type)
+            (
+                PaymentEventType::RefundProcessed,
+                "pending",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundProcessed,
+                "failed",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundFailed,
+                "pending",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundFailed,
+                "processed",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundCreated,
+                "failed",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundSpeedChanged,
+                "failed",
+                "ContradictoryRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundProcessed,
+                "unsupported_xyz",
+                "InvalidRefundStatus",
+            ),
+            (
+                PaymentEventType::RefundCreated,
+                "bogus_status",
+                "InvalidRefundStatus",
+            ),
+        ];
+
+        for &initial_state in &states {
+            for &(ref ev_type, explicit_st, expected_err) in &invalid_cases {
+                let mut payment =
+                    PaymentEntity::new("pay_core_val_test".into(), 10000, "INR".into());
+                payment.state = initial_state;
+                if initial_state == PaymentState::PartiallyRefunded {
+                    payment.refunded_amount_minor = 2000;
+                } else if initial_state == PaymentState::Refunded {
+                    payment.refunded_amount_minor = 10000;
+                }
+
+                let initial_refunded_balance = payment.refunded_amount_minor;
+                let initial_seen_len = payment.events_seen.len();
+                let initial_refunds_len = payment.refunds.len();
+                let event_id = format!("evt_reject_{:?}_{}", ev_type, explicit_st);
+
+                let res = payment.apply_event_with_refund(
+                    &event_id,
+                    ev_type,
+                    Some(1000),
+                    Some("rfnd_test_val"),
+                    Some(explicit_st),
+                );
+
+                assert!(
+                    res.is_err(),
+                    "State {:?} with event {:?} and status '{}' must be rejected",
+                    initial_state,
+                    ev_type,
+                    explicit_st
+                );
+
+                match res.unwrap_err() {
+                    PaymentError::ContradictoryRefundStatus { status, .. } => {
+                        assert_eq!(expected_err, "ContradictoryRefundStatus");
+                        assert_eq!(status, explicit_st);
+                    }
+                    PaymentError::InvalidRefundStatus { status } => {
+                        assert_eq!(expected_err, "InvalidRefundStatus");
+                        assert_eq!(status, explicit_st);
+                    }
+                    other => panic!("Unexpected error variant: {:?}", other),
+                }
+
+                // Invariants on rejection:
+                assert_eq!(
+                    payment.state, initial_state,
+                    "Payment state must not change on rejected event"
+                );
+                assert_eq!(
+                    payment.events_seen.len(),
+                    initial_seen_len,
+                    "Rejected event must NOT enter events_seen"
+                );
+                assert!(
+                    !payment.events_seen.contains(&event_id),
+                    "events_seen must not contain rejected event ID"
+                );
+                assert_eq!(
+                    payment.refunded_amount_minor, initial_refunded_balance,
+                    "Refund balance must not change on rejected event"
+                );
+                assert_eq!(
+                    payment.refunds.len(),
+                    initial_refunds_len,
+                    "No refund record must be created on rejected event"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_refund_lifecycle_and_defaults_preserved() {
+        let mut payment = PaymentEntity::new("pay_valid_rf".into(), 10000, "INR".into());
+        payment
+            .apply_event("evt_cap", &PaymentEventType::PaymentCaptured, None)
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+
+        // 1. Omitted status preserves safe event-specific defaults
+        let res_default_proc = payment.apply_event_with_refund(
+            "evt_omitted_proc",
+            &PaymentEventType::RefundProcessed,
+            Some(1000),
+            Some("rf_omitted_1"),
+            None, // status omitted
+        );
+        assert!(res_default_proc.is_ok());
+        assert_eq!(payment.refunded_amount_minor, 1000);
+        let rf1 = payment
+            .refunds
+            .iter()
+            .find(|r| r.refund_id == "rf_omitted_1")
+            .unwrap();
+        assert_eq!(rf1.status, "processed");
+        assert!(rf1.applied_to_balance);
+
+        // 2. Supported instant refund: refund.created with status "processed" applies balance
+        let res_instant = payment.apply_event_with_refund(
+            "evt_inst_2",
+            &PaymentEventType::RefundCreated,
+            Some(2000),
+            Some("rf_inst_2"),
+            Some("processed"),
+        );
+        assert!(res_instant.is_ok());
+        assert_eq!(payment.refunded_amount_minor, 3000);
+        let rf2 = payment
+            .refunds
+            .iter()
+            .find(|r| r.refund_id == "rf_inst_2")
+            .unwrap();
+        assert_eq!(rf2.status, "processed");
+        assert!(rf2.applied_to_balance);
+
+        // 3. Subsequent refund.processed for the already-applied instant refund is duplicate ignored
+        let res_inst_dup = payment.apply_event_with_refund(
+            "evt_inst_dup",
+            &PaymentEventType::RefundProcessed,
+            Some(2000),
+            Some("rf_inst_2"),
+            Some("processed"),
+        );
+        assert!(matches!(
+            res_inst_dup,
+            Ok(TransitionOutcome::DuplicateIgnored { .. })
+        ));
+        assert_eq!(payment.refunded_amount_minor, 3000);
     }
 }

@@ -12,6 +12,7 @@ pub enum WebhookStatus {
     Pending,
     Processed,
     Failed,
+    Unapplied,
 }
 
 impl WebhookStatus {
@@ -20,6 +21,7 @@ impl WebhookStatus {
             Self::Pending => "pending",
             Self::Processed => "processed",
             Self::Failed => "failed",
+            Self::Unapplied => "unapplied",
         }
     }
 }
@@ -31,6 +33,7 @@ impl std::str::FromStr for WebhookStatus {
         Ok(match s.to_lowercase().as_str() {
             "processed" => Self::Processed,
             "failed" => Self::Failed,
+            "unapplied" => Self::Unapplied,
             _ => Self::Pending,
         })
     }
@@ -98,6 +101,14 @@ pub enum WebhookProcessingResult {
     },
     /// Metadata-only event safely recorded and deduplicated without modifying or creating payment state
     MetadataRecorded {
+        inbox_id: i64,
+        provider: String,
+        provider_event_id: String,
+        payment_id: String,
+        reason: String,
+    },
+    /// Financial refund event safely recorded without authoritative payment record; pending reconciliation
+    Unapplied {
         inbox_id: i64,
         provider: String,
         provider_event_id: String,
@@ -228,17 +239,20 @@ impl PostgresWebhookStore {
             "#,
             r#"
             DO $$
+            DECLARE
+                v_pk_name TEXT;
             BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu 
-                      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                    WHERE tc.table_name = 'payment_refunds' 
-                      AND tc.constraint_type = 'PRIMARY KEY'
-                    GROUP BY tc.constraint_name
-                    HAVING COUNT(*) = 1 AND MAX(kcu.column_name) = 'refund_id'
-                ) THEN
-                    ALTER TABLE payment_refunds DROP CONSTRAINT payment_refunds_pkey;
+                SELECT tc.constraint_name INTO v_pk_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu 
+                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_name = 'payment_refunds' 
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                GROUP BY tc.constraint_name
+                HAVING COUNT(*) = 1 AND MAX(kcu.column_name) = 'refund_id';
+
+                IF v_pk_name IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE payment_refunds DROP CONSTRAINT ' || quote_ident(v_pk_name);
                     ALTER TABLE payment_refunds ADD PRIMARY KEY (provider, refund_id);
                 END IF;
 
@@ -381,6 +395,36 @@ impl WebhookStore for PostgresWebhookStore {
                                 provider: provider.to_string(),
                                 provider_event_id: provider_event_id.to_string(),
                             });
+                        } else if status_str == "unapplied" {
+                            // Check whether the payment record has arrived since the unapplied refund was recorded
+                            let check_payment =
+                                sqlx::query("SELECT 1 FROM payment_records WHERE payment_id = $1;")
+                                    .bind(payment_id)
+                                    .fetch_optional(&mut *tx)
+                                    .await
+                                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                            if check_payment.is_none() {
+                                let _ = tx.rollback().await;
+                                return Ok(WebhookProcessingResult::Unapplied {
+                                    inbox_id: id,
+                                    provider: provider.to_string(),
+                                    provider_event_id: provider_event_id.to_string(),
+                                    payment_id: pid,
+                                    reason: "Financial refund event already recorded without authoritative payment record; pending reconciliation".to_string(),
+                                });
+                            }
+
+                            // Payment now exists! Safely claim the unapplied inbox record to process the transition
+                            sqlx::query(
+                                "UPDATE webhook_inbox SET status = 'pending', error_message = NULL WHERE id = $1;",
+                            )
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                            id
                         } else {
                             // Safe recovery: prior attempt failed; claim it for retry
                             sqlx::query(
@@ -489,6 +533,29 @@ impl WebhookStore for PostgresWebhookStore {
             .await
             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
 
+        // 3. Validate refund event status upfront before state mutations
+        if esa_core::payment_state::is_refund_event(&event_type) {
+            if let Err(err) = esa_core::payment_state::validate_refund_event_status(
+                &event_type,
+                refund_id,
+                refund_status,
+            ) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE webhook_inbox
+                    SET status = 'failed', error_message = $1
+                    WHERE id = $2;
+                    "#,
+                )
+                .bind(err.to_string())
+                .bind(inbox_id)
+                .execute(&mut *tx)
+                .await;
+                let _ = tx.commit().await;
+                return Err(WebhookStoreError::PaymentState(err));
+            }
+        }
+
         // 4. Load payment record FOR UPDATE to prevent race conditions on payment state
         let payment_row = sqlx::query(
             r#"
@@ -503,28 +570,102 @@ impl WebhookStore for PostgresWebhookStore {
         .await
         .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
 
-        // If this is a metadata-only speed change event and the payment record does not exist yet:
-        // Do NOT create a fabricated payment record or refund record!
-        // Safely record and deduplicate the webhook in webhook_inbox and commit transaction.
-        if payment_row.is_none() && event_type == PaymentEventType::RefundSpeedChanged {
-            let _ = sqlx::query(
-                "UPDATE webhook_inbox SET status = 'processed', processed_at = NOW() WHERE id = $1;",
-            )
-            .bind(inbox_id)
-            .execute(&mut *tx)
-            .await;
-            tx.commit()
+        // 5. Handle events arriving before payment record exists
+        if payment_row.is_none() {
+            if event_type == PaymentEventType::RefundSpeedChanged {
+                let _ = sqlx::query(
+                    "UPDATE webhook_inbox SET status = 'processed', processed_at = NOW() WHERE id = $1;",
+                )
+                .bind(inbox_id)
+                .execute(&mut *tx)
+                .await;
+                tx.commit()
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                return Ok(WebhookProcessingResult::MetadataRecorded {
+                    inbox_id,
+                    provider: provider.to_string(),
+                    provider_event_id: provider_event_id.to_string(),
+                    payment_id: payment_id.to_string(),
+                    reason: "Metadata-only speed change event recorded for unknown payment; no payment or refund record fabricated"
+                        .to_string(),
+                });
+            }
+
+            if esa_core::payment_state::is_refund_event(&event_type) {
+                // Legitimate financial refund arrived before payment capture!
+                // 1. Do NOT fabricate an authoritative payment record.
+                // 2. Preserve enough validated information in payment_refunds with applied_to_balance = false.
+                if let Some(r_id) = refund_id {
+                    let clean_r_id = r_id.trim();
+                    if !clean_r_id.is_empty() {
+                        let actual_status = refund_status.unwrap_or(match event_type {
+                            PaymentEventType::RefundProcessed => "processed",
+                            PaymentEventType::RefundFailed => "failed",
+                            _ => "pending",
+                        });
+
+                        if existing_refund_row.is_some() {
+                            let _ = sqlx::query(
+                                r#"
+                                UPDATE payment_refunds
+                                SET status = $1, applied_to_balance = false, updated_at = NOW()
+                                WHERE provider = $2 AND refund_id = $3 AND payment_id = $4 AND currency = $5;
+                                "#,
+                            )
+                            .bind(actual_status)
+                            .bind(provider)
+                            .bind(clean_r_id)
+                            .bind(payment_id)
+                            .bind(currency)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+                        } else {
+                            let ref_amt = refund_amount_minor.unwrap_or(amount_minor);
+                            sqlx::query(
+                                r#"
+                                INSERT INTO payment_refunds (
+                                    provider, refund_id, payment_id, amount_minor, currency, status, applied_to_balance, created_at, updated_at
+                                )
+                                VALUES ($1, $2, $3, $4, $5, $6, false, NOW(), NOW());
+                                "#,
+                            )
+                            .bind(provider)
+                            .bind(clean_r_id)
+                            .bind(payment_id)
+                            .bind(ref_amt as i64)
+                            .bind(currency)
+                            .bind(actual_status)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+                        }
+                    }
+                }
+
+                // 3. Mark webhook_inbox as unapplied lifecycle state
+                sqlx::query(
+                    "UPDATE webhook_inbox SET status = 'unapplied', processed_at = NOW() WHERE id = $1;",
+                )
+                .bind(inbox_id)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
 
-            return Ok(WebhookProcessingResult::MetadataRecorded {
-                inbox_id,
-                provider: provider.to_string(),
-                provider_event_id: provider_event_id.to_string(),
-                payment_id: payment_id.to_string(),
-                reason: "Metadata-only speed change event recorded for unknown payment; no payment or refund record fabricated"
-                    .to_string(),
-            });
+                tx.commit()
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                return Ok(WebhookProcessingResult::Unapplied {
+                    inbox_id,
+                    provider: provider.to_string(),
+                    provider_event_id: provider_event_id.to_string(),
+                    payment_id: payment_id.to_string(),
+                    reason: "Financial refund event safely recorded without authoritative payment record; pending reconciliation".to_string(),
+                });
+            }
         }
 
         let mut payment_entity = match payment_row {
@@ -568,7 +709,9 @@ impl WebhookStore for PostgresWebhookStore {
                 let amount_matches = if event_type == PaymentEventType::RefundSpeedChanged {
                     true
                 } else if refund_amount_minor.is_some() {
-                    amount_minor == existing_amount || Some(amount_minor) == refund_amount_minor
+                    amount_minor == existing_amount
+                        || amount_minor == 0
+                        || Some(amount_minor) == refund_amount_minor
                 } else {
                     amount_minor == existing_amount
                 };
@@ -996,6 +1139,29 @@ impl WebhookStore for InMemoryWebhookStore {
                         provider_event_id: provider_event_id.to_string(),
                     });
                 }
+                WebhookStatus::Unapplied => {
+                    // Check whether the payment record has arrived since the unapplied refund was recorded
+                    let payments_guard = self.payments.lock();
+                    let payment_exists = payments_guard.contains_key(payment_id);
+                    drop(payments_guard);
+
+                    if !payment_exists {
+                        return Ok(WebhookProcessingResult::Unapplied {
+                            inbox_id: existing.id,
+                            provider: provider.to_string(),
+                            provider_event_id: provider_event_id.to_string(),
+                            payment_id: existing
+                                .payment_id
+                                .clone()
+                                .unwrap_or_else(|| payment_id.to_string()),
+                            reason: "Financial refund event already recorded without authoritative payment record; pending reconciliation".to_string(),
+                        });
+                    }
+
+                    // Payment now exists! Safely claim the unapplied inbox record to process the transition
+                    existing.status = WebhookStatus::Pending;
+                    existing.error_message = None;
+                }
                 WebhookStatus::Failed => {
                     // Safe retry: claim it by setting to Pending
                     existing.status = WebhookStatus::Pending;
@@ -1026,6 +1192,22 @@ impl WebhookStore for InMemoryWebhookStore {
         let inbox_id = inbox_guard.get(&key).unwrap().id;
         drop(inbox_guard);
 
+        // Validate refund event status upfront before state mutations
+        if esa_core::payment_state::is_refund_event(&event_type) {
+            if let Err(err) = esa_core::payment_state::validate_refund_event_status(
+                &event_type,
+                refund_id,
+                refund_status,
+            ) {
+                let mut inbox_guard = self.inbox.lock();
+                if let Some(record) = inbox_guard.get_mut(&key) {
+                    record.status = WebhookStatus::Failed;
+                    record.error_message = Some(err.to_string());
+                }
+                return Err(WebhookStoreError::PaymentState(err));
+            }
+        }
+
         // Check refund ID consistency across store scoped by (provider, refund_id)
         let mut created_refund_reservation = false;
         if let Some(r_id) = refund_id {
@@ -1033,7 +1215,7 @@ impl WebhookStore for InMemoryWebhookStore {
             if !clean_r_id.is_empty() {
                 let refund_key = (provider.to_string(), clean_r_id.to_string());
                 let mut refunds_guard = self.refunds.lock();
-                if let Some(entry) = refunds_guard.get(&refund_key) {
+                if let Some(entry) = refunds_guard.get_mut(&refund_key) {
                     if entry.payment_id != payment_id {
                         let err_msg = format!(
                             "Refund '{}' payment ID mismatch: existing '{}', received '{}'",
@@ -1074,8 +1256,18 @@ impl WebhookStore for InMemoryWebhookStore {
                             return Err(WebhookStoreError::Mismatch(err_msg));
                         }
                     }
+
+                    // Update status if provided
+                    if let Some(st) = refund_status {
+                        entry.status = st.to_string();
+                    }
                 } else if event_type != PaymentEventType::RefundSpeedChanged {
                     // Atomically reserve the (provider, refund_id) to serialize concurrent requests for different payments
+                    let initial_status = refund_status.unwrap_or(match event_type {
+                        PaymentEventType::RefundProcessed => "processed",
+                        PaymentEventType::RefundFailed => "failed",
+                        _ => "pending",
+                    });
                     refunds_guard.insert(
                         refund_key.clone(),
                         InMemoryRefundEntry {
@@ -1084,7 +1276,7 @@ impl WebhookStore for InMemoryWebhookStore {
                             payment_id: payment_id.to_string(),
                             amount_minor: refund_amount_minor.unwrap_or(amount_minor),
                             currency: currency.to_string(),
-                            status: "pending".to_string(),
+                            status: initial_status.to_string(),
                             applied_to_balance: false,
                         },
                     );
@@ -1112,7 +1304,9 @@ impl WebhookStore for InMemoryWebhookStore {
             let amount_matches = if event_type == PaymentEventType::RefundSpeedChanged {
                 true
             } else if refund_amount_minor.is_some() {
-                amount_minor == existing.amount_minor || Some(amount_minor) == refund_amount_minor
+                amount_minor == existing.amount_minor
+                    || amount_minor == 0
+                    || Some(amount_minor) == refund_amount_minor
             } else {
                 amount_minor == existing.amount_minor
             };
@@ -1147,6 +1341,53 @@ impl WebhookStore for InMemoryWebhookStore {
                         .to_string(),
                 });
             }
+
+            if esa_core::payment_state::is_refund_event(&event_type) {
+                // Legitimate financial refund arrived before payment capture!
+                // 1. Do NOT fabricate an authoritative payment record.
+                // 2. Preserve enough validated information in refunds with applied_to_balance = false.
+                if let Some(r_id) = refund_id {
+                    let clean_r_id = r_id.trim();
+                    if !clean_r_id.is_empty() {
+                        let actual_status = refund_status.unwrap_or(match event_type {
+                            PaymentEventType::RefundProcessed => "processed",
+                            PaymentEventType::RefundFailed => "failed",
+                            _ => "pending",
+                        });
+                        let refund_key = (provider.to_string(), clean_r_id.to_string());
+                        let mut refunds_guard = self.refunds.lock();
+                        let ref_amt = refund_amount_minor.unwrap_or(amount_minor);
+                        refunds_guard.insert(
+                            refund_key,
+                            InMemoryRefundEntry {
+                                provider: provider.to_string(),
+                                refund_id: clean_r_id.to_string(),
+                                payment_id: payment_id.to_string(),
+                                amount_minor: ref_amt,
+                                currency: currency.to_string(),
+                                status: actual_status.to_string(),
+                                applied_to_balance: false,
+                            },
+                        );
+                    }
+                }
+
+                // 3. Mark webhook_inbox as unapplied lifecycle state
+                let mut inbox_guard = self.inbox.lock();
+                if let Some(record) = inbox_guard.get_mut(&key) {
+                    record.status = WebhookStatus::Unapplied;
+                    record.processed_at = Some(Utc::now());
+                }
+
+                return Ok(WebhookProcessingResult::Unapplied {
+                    inbox_id,
+                    provider: provider.to_string(),
+                    provider_event_id: provider_event_id.to_string(),
+                    payment_id: payment_id.to_string(),
+                    reason: "Financial refund event safely recorded without authoritative payment record; pending reconciliation".to_string(),
+                });
+            }
+
             PaymentEntity::new(payment_id.to_string(), amount_minor, currency.to_string())
         };
 
@@ -1687,6 +1928,7 @@ mod tests {
                 WebhookProcessingResult::AlreadyProcessed { .. } => already_processed_count += 1,
                 WebhookProcessingResult::InFlight { .. } => {}
                 WebhookProcessingResult::MetadataRecorded { .. } => {}
+                WebhookProcessingResult::Unapplied { .. } => {}
             }
         }
 
@@ -3893,5 +4135,533 @@ mod tests {
                 .is_none(),
             "Refund record must not be fabricated for unseen refund in speed_changed"
         );
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_first_seen_refund_before_capture_lifecycle_and_reconciliation() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": "pre_refund"});
+        let pay_id = "pay_first_seen_01";
+        let rfnd_id = "rfnd_first_seen_01";
+        let evt_refund = "evt_rfnd_first_seen_01";
+        let evt_capture = "evt_cap_first_seen_01";
+
+        // Step 1: Normal refund webhook arrives BEFORE corresponding payment capture.
+        // Refund amount (2500) differs substantially from captured payment amount (10000).
+        let p_rfnd = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_refund,
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: pay_id,
+            amount_minor: 0, // Provider omitted payment entity amount
+            currency: "INR",
+            refund_id: Some(rfnd_id),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+
+        let res1 = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("First-seen refund must succeed as unapplied");
+
+        assert!(matches!(
+            res1,
+            WebhookProcessingResult::Unapplied {
+                ref payment_id,
+                ..
+            } if payment_id == pay_id
+        ));
+
+        // Missing payment does NOT acquire a fabricated authoritative amount
+        assert!(
+            store.get_payment_record(pay_id).await.unwrap().is_none(),
+            "Payment record must NOT be fabricated from refund amount"
+        );
+
+        // Refund record exists in payment_refunds with applied_to_balance = false
+        let rfnd_rec = store
+            .get_refund_record("razorpay", rfnd_id)
+            .await
+            .unwrap()
+            .expect("Refund record must be preserved");
+        assert_eq!(rfnd_rec.amount_minor, 2500);
+        assert_eq!(rfnd_rec.status, "processed");
+        assert!(!rfnd_rec.applied_to_balance);
+
+        // Inbox record is in explicit unapplied lifecycle state
+        let inbox_rec = store
+            .get_inbox_record("razorpay", evt_refund)
+            .await
+            .unwrap()
+            .expect("Inbox record must exist");
+        assert_eq!(inbox_rec.status, WebhookStatus::Unapplied);
+
+        // Step 2: Duplicate delivery before capture arrives -> idempotent Unapplied
+        let res_dup = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Duplicate unapplied delivery must succeed idempotently");
+        assert!(matches!(res_dup, WebhookProcessingResult::Unapplied { .. }));
+        assert!(store.get_payment_record(pay_id).await.unwrap().is_none());
+
+        // Step 3: Authoritative payment.captured arrives later with actual amount 10000
+        let p_cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_capture,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+
+        let res_cap = store
+            .process_webhook_event(&p_cap)
+            .await
+            .expect("payment.captured must succeed and not be rejected by earlier refund webhook");
+        assert!(matches!(res_cap, WebhookProcessingResult::Applied { .. }));
+
+        let pay_after_cap = store
+            .get_payment_record(pay_id)
+            .await
+            .unwrap()
+            .expect("Payment record must exist after capture");
+        assert_eq!(pay_after_cap.state, PaymentState::Captured);
+        assert_eq!(pay_after_cap.amount_minor, 10000);
+        assert_eq!(pay_after_cap.refunded_amount_minor, 0);
+
+        // The refund remains available for safe reconciliation and has NOT yet updated balance
+        let rfnd_rec_before_recon = store
+            .get_refund_record("razorpay", rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rfnd_rec_before_recon.applied_to_balance);
+
+        // Step 4: Redelivery/retry of the refund webhook arrives now that payment exists
+        let res_recon = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Reconciliation/retry of unapplied refund must succeed");
+        assert!(matches!(res_recon, WebhookProcessingResult::Applied { .. }));
+
+        let pay_after_recon = store
+            .get_payment_record(pay_id)
+            .await
+            .unwrap()
+            .expect("Payment record must exist");
+        assert_eq!(pay_after_recon.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_after_recon.amount_minor, 10000);
+        assert_eq!(pay_after_recon.refunded_amount_minor, 2500);
+
+        // Refund record now marked applied_to_balance = true
+        let rfnd_rec_after_recon = store
+            .get_refund_record("razorpay", rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rfnd_rec_after_recon.applied_to_balance);
+        assert_eq!(rfnd_rec_after_recon.status, "processed");
+
+        // Inbox record marked processed
+        let inbox_after_recon = store
+            .get_inbox_record("razorpay", evt_refund)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_after_recon.status, WebhookStatus::Processed);
+
+        // Step 5: Duplicate of refund webhook after application -> AlreadyProcessed without double counting
+        let res_post_dup = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Duplicate event after processing must return AlreadyProcessed");
+        assert!(matches!(
+            res_post_dup,
+            WebhookProcessingResult::AlreadyProcessed { .. }
+        ));
+
+        let pay_final = store.get_payment_record(pay_id).await.unwrap().unwrap();
+        assert_eq!(pay_final.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_final.refunded_amount_minor, 2500);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_first_seen_pending_and_failed_refund_semantics() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": "pending_and_failed"});
+        let pay_id = "pay_pending_fail_01";
+        let rfnd_pending_id = "rfnd_pending_01";
+        let evt_pending = "evt_pending_01";
+        let evt_capture = "evt_cap_pending_fail_01";
+
+        // 1. Pending refund arrives before capture
+        let p_pending = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_pending,
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(rfnd_pending_id),
+            refund_amount_minor: Some(1500),
+            refund_status: Some("pending"),
+            payload: &payload,
+        };
+
+        let res_p = store.process_webhook_event(&p_pending).await.unwrap();
+        assert!(matches!(res_p, WebhookProcessingResult::Unapplied { .. }));
+
+        let rfnd_p = store
+            .get_refund_record("razorpay", rfnd_pending_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rfnd_p.status, "pending");
+        assert!(!rfnd_p.applied_to_balance);
+        assert_eq!(rfnd_p.amount_minor, 1500);
+
+        // 2. Capture arrives
+        let p_cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_capture,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: pay_id,
+            amount_minor: 5000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_cap).await.unwrap();
+
+        // 3. Retry pending refund event -> applied to payment entity but DOES NOT increase balance
+        let res_p_retry = store.process_webhook_event(&p_pending).await.unwrap();
+        assert!(matches!(
+            res_p_retry,
+            WebhookProcessingResult::Applied { .. }
+        ));
+
+        let pay_after_p = store.get_payment_record(pay_id).await.unwrap().unwrap();
+        assert_eq!(pay_after_p.state, PaymentState::Captured);
+        assert_eq!(pay_after_p.refunded_amount_minor, 0);
+
+        let rfnd_p_after = store
+            .get_refund_record("razorpay", rfnd_pending_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rfnd_p_after.status, "pending");
+        assert!(!rfnd_p_after.applied_to_balance);
+
+        // 4. Later refund.processed event arrives for same refund_id -> now updates balance
+        let p_processed = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_rfnd_processed_after_pending",
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(rfnd_pending_id),
+            refund_amount_minor: Some(1500),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        let res_proc = store.process_webhook_event(&p_processed).await.unwrap();
+        assert!(matches!(res_proc, WebhookProcessingResult::Applied { .. }));
+
+        let pay_after_proc = store.get_payment_record(pay_id).await.unwrap().unwrap();
+        assert_eq!(pay_after_proc.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_after_proc.refunded_amount_minor, 1500);
+
+        let rfnd_proc = store
+            .get_refund_record("razorpay", rfnd_pending_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rfnd_proc.status, "processed");
+        assert!(rfnd_proc.applied_to_balance);
+    }
+
+    #[tokio::test]
+    async fn test_postgres_first_seen_refund_before_capture_lifecycle_and_reconciliation() {
+        let pool = match get_test_postgres_pool().await {
+            Some(p) => p,
+            None => return,
+        };
+        let store = Arc::new(PostgresWebhookStore::new(pool.clone()));
+        let unique_suffix = uuid::Uuid::new_v4();
+        let pay_id = format!("pay_pg_pre_{}", unique_suffix);
+        let rfnd_id = format!("rfnd_pg_pre_{}", unique_suffix);
+        let evt_refund = format!("evt_pg_rfnd_{}", unique_suffix);
+        let evt_capture = format!("evt_pg_cap_{}", unique_suffix);
+        let payload = serde_json::json!({"pg_test": "pre_refund_reconciliation"});
+
+        // Step 1: Normal refund webhook arrives BEFORE corresponding payment capture
+        // Refund amount (3000) differs substantially from captured payment amount (12000)
+        let p_rfnd = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_refund,
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: &pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(&rfnd_id),
+            refund_amount_minor: Some(3000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+
+        let res1 = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("First-seen refund must succeed as unapplied in postgres");
+
+        assert!(matches!(
+            res1,
+            WebhookProcessingResult::Unapplied {
+                ref payment_id,
+                ..
+            } if payment_id == &pay_id
+        ));
+
+        // Missing payment does NOT acquire a fabricated authoritative amount
+        assert!(
+            store.get_payment_record(&pay_id).await.unwrap().is_none(),
+            "Payment record must NOT be fabricated from refund amount in postgres"
+        );
+
+        // Refund record exists in payment_refunds with applied_to_balance = false
+        let rfnd_rec = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .expect("Refund record must be preserved");
+        assert_eq!(rfnd_rec.amount_minor, 3000);
+        assert_eq!(rfnd_rec.status, "processed");
+        assert!(!rfnd_rec.applied_to_balance);
+
+        // Inbox record is in explicit unapplied lifecycle state
+        let inbox_rec = store
+            .get_inbox_record("razorpay", &evt_refund)
+            .await
+            .unwrap()
+            .expect("Inbox record must exist");
+        assert_eq!(inbox_rec.status, WebhookStatus::Unapplied);
+
+        // Step 2: Duplicate delivery before capture arrives -> idempotent Unapplied
+        let res_dup = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Duplicate unapplied delivery must succeed idempotently in postgres");
+        assert!(matches!(res_dup, WebhookProcessingResult::Unapplied { .. }));
+        assert!(store.get_payment_record(&pay_id).await.unwrap().is_none());
+
+        // Step 3: Authoritative payment.captured arrives later with actual amount 12000
+        let p_cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_capture,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &pay_id,
+            amount_minor: 12000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+
+        let res_cap = store
+            .process_webhook_event(&p_cap)
+            .await
+            .expect("payment.captured must succeed and not be rejected by earlier refund webhook");
+        assert!(matches!(res_cap, WebhookProcessingResult::Applied { .. }));
+
+        let pay_after_cap = store
+            .get_payment_record(&pay_id)
+            .await
+            .unwrap()
+            .expect("Payment record must exist after capture");
+        assert_eq!(pay_after_cap.state, PaymentState::Captured);
+        assert_eq!(pay_after_cap.amount_minor, 12000);
+        assert_eq!(pay_after_cap.refunded_amount_minor, 0);
+
+        // The refund remains available for safe reconciliation and has NOT yet updated balance
+        let rfnd_rec_before_recon = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rfnd_rec_before_recon.applied_to_balance);
+
+        // Step 4: Redelivery/retry of the refund webhook arrives now that payment exists
+        let res_recon = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Reconciliation/retry of unapplied refund must succeed in postgres");
+        assert!(matches!(res_recon, WebhookProcessingResult::Applied { .. }));
+
+        let pay_after_recon = store
+            .get_payment_record(&pay_id)
+            .await
+            .unwrap()
+            .expect("Payment record must exist");
+        assert_eq!(pay_after_recon.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_after_recon.amount_minor, 12000);
+        assert_eq!(pay_after_recon.refunded_amount_minor, 3000);
+
+        // Refund record now marked applied_to_balance = true
+        let rfnd_rec_after_recon = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rfnd_rec_after_recon.applied_to_balance);
+        assert_eq!(rfnd_rec_after_recon.status, "processed");
+
+        // Inbox record marked processed
+        let inbox_after_recon = store
+            .get_inbox_record("razorpay", &evt_refund)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_after_recon.status, WebhookStatus::Processed);
+
+        // Step 5: Duplicate of refund webhook after application -> AlreadyProcessed without double counting
+        let res_post_dup = store
+            .process_webhook_event(&p_rfnd)
+            .await
+            .expect("Duplicate event after processing must return AlreadyProcessed");
+        assert!(matches!(
+            res_post_dup,
+            WebhookProcessingResult::AlreadyProcessed { .. }
+        ));
+
+        let pay_final = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(pay_final.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_final.refunded_amount_minor, 3000);
+    }
+
+    #[tokio::test]
+    async fn test_postgres_legacy_schema_migration_and_upgrade() {
+        let pool = match get_test_postgres_pool().await {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Simulate legacy schema: single column PK on refund_id, missing applied_to_balance
+        // Drop constraints and columns to recreate legacy state
+        let _ = sqlx::query("DROP TABLE IF EXISTS payment_refunds_legacy_test;")
+            .execute(&pool)
+            .await;
+        sqlx::query(
+            r#"
+            CREATE TABLE payment_refunds_legacy_test (
+                provider VARCHAR(64) NOT NULL,
+                refund_id VARCHAR(255) PRIMARY KEY,
+                payment_id VARCHAR(255) NOT NULL,
+                amount_minor BIGINT NOT NULL,
+                currency VARCHAR(10) NOT NULL,
+                status VARCHAR(50) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("Creating legacy test table must succeed");
+
+        // Insert legacy row into legacy test table
+        sqlx::query(
+            r#"
+            INSERT INTO payment_refunds_legacy_test (
+                provider, refund_id, payment_id, amount_minor, currency, status
+            ) VALUES ('razorpay', 'rfnd_legacy_01', 'pay_legacy_01', 5000, 'INR', 'processed');
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("Inserting legacy row must succeed");
+
+        // Run upgrade migration block targeting the table
+        let upgrade_sql = r#"
+            DO $$
+            DECLARE
+                v_pk_name TEXT;
+            BEGIN
+                SELECT tc.constraint_name INTO v_pk_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu 
+                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_name = 'payment_refunds_legacy_test' 
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                GROUP BY tc.constraint_name
+                HAVING COUNT(*) = 1 AND MAX(kcu.column_name) = 'refund_id';
+
+                IF v_pk_name IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE payment_refunds_legacy_test DROP CONSTRAINT ' || quote_ident(v_pk_name);
+                    ALTER TABLE payment_refunds_legacy_test ADD PRIMARY KEY (provider, refund_id);
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'payment_refunds_legacy_test' AND column_name = 'applied_to_balance'
+                ) THEN
+                    ALTER TABLE payment_refunds_legacy_test ADD COLUMN applied_to_balance BOOLEAN NOT NULL DEFAULT FALSE;
+                END IF;
+            END $$;
+        "#;
+        sqlx::query(upgrade_sql)
+            .execute(&pool)
+            .await
+            .expect("Legacy upgrade script must succeed");
+
+        // Verify primary key is now composite (provider, refund_id)
+        let pk_cols: Vec<String> = sqlx::query(
+            r#"
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu 
+              ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+            WHERE tc.table_name = 'payment_refunds_legacy_test' AND tc.constraint_type = 'PRIMARY KEY'
+            ORDER BY kcu.ordinal_position;
+            "#
+        )
+        .map(|r: sqlx::postgres::PgRow| r.get("column_name"))
+        .fetch_all(&pool)
+        .await
+        .expect("Querying PK columns must succeed");
+
+        assert_eq!(
+            pk_cols,
+            vec!["provider".to_string(), "refund_id".to_string()]
+        );
+
+        // Verify applied_to_balance column exists and preserved existing row with FALSE
+        let row = sqlx::query(
+            "SELECT amount_minor, status, applied_to_balance FROM payment_refunds_legacy_test WHERE refund_id = 'rfnd_legacy_01';"
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Querying legacy row must succeed");
+
+        let amt: i64 = row.get("amount_minor");
+        let st: String = row.get("status");
+        let applied: bool = row.get("applied_to_balance");
+        assert_eq!(amt, 5000);
+        assert_eq!(st, "processed");
+        assert!(!applied);
+
+        // Clean up legacy test table
+        let _ = sqlx::query("DROP TABLE payment_refunds_legacy_test;")
+            .execute(&pool)
+            .await;
     }
 }
