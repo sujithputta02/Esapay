@@ -1,10 +1,14 @@
 use chrono::Utc;
+use esa_core::payment_state::Currency;
 use esa_core::{PaymentEvent, PaymentEventType, PaymentMethodClass, Region};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tracing::warn;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Maximum permissible raw webhook request body size (64 KiB) before parsing.
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 65_536;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WebhookError {
@@ -14,6 +18,8 @@ pub enum WebhookError {
     MissingSignature,
     #[error("webhook secret not configured")]
     MissingWebhookSecret,
+    #[error("request body exceeds maximum allowed size of {0} bytes (received {1} bytes)")]
+    PayloadTooLarge(usize, usize),
     #[error("invalid webhook JSON: {0}")]
     InvalidJson(String),
     #[error("unsupported or malformed event payload: {0}")]
@@ -22,10 +28,33 @@ pub enum WebhookError {
     UnsupportedEvent(String),
     #[error("unsupported payment status: {0}")]
     UnsupportedStatus(String),
+    #[error("merchant account ID mismatch: expected '{expected}', got '{actual}'")]
+    MerchantMismatch { expected: String, actual: String },
+    #[error("invalid currency: {0}")]
+    InvalidCurrency(String),
+    #[error("invalid amount: {0}")]
+    InvalidAmount(String),
     #[error("duplicate event")]
     DuplicateEvent,
     #[error("webhook rate limit exceeded")]
     RateLimited,
+}
+
+/// Normalized, validated webhook event with separate provider event ID and payment ID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedWebhook {
+    pub provider: &'static str,
+    pub provider_event_id: String,
+    pub event_type: PaymentEventType,
+    pub payment_id: String,
+    pub order_id: Option<String>,
+    pub account_id: Option<String>,
+    pub amount_minor: u64,
+    pub currency: String,
+    pub refund_id: Option<String>,
+    pub refund_amount_minor: Option<u64>,
+    pub status: String,
+    pub payment_event: PaymentEvent,
 }
 
 /// Verify Razorpay webhook HMAC-SHA256 signature (hex).
@@ -78,81 +107,343 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Parse Razorpay webhook JSON into a normalized `PaymentEvent` (no raw card data).
-pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> {
-    let root: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| WebhookError::InvalidJson(e.to_string()))?;
-
-    let event_name = root.get("event").and_then(|v| v.as_str()).unwrap_or("");
-
-    let event_type = map_event_type(event_name)?;
-
-    let payment_entity = root
-        .pointer("/payload/payment/entity")
-        .or_else(|| root.pointer("/payload/order/entity"))
-        .or_else(|| root.pointer("/payload/refund/entity"));
-
-    if payment_entity.is_none() {
-        return Err(WebhookError::MalformedPayload(
-            "Missing payment/order/refund entity in payload".to_string(),
+/// Detailed parser and schema validator for Razorpay webhook payloads.
+/// Enforces size bounding, schema integrity, provider event ID preservation,
+/// merchant account validation, currency, amount limits, and payment reference separation.
+pub fn parse_webhook_payload_detailed(
+    body: &[u8],
+    event_id_header: Option<&str>,
+    expected_account_id: Option<&str>,
+) -> Result<ParsedWebhook, WebhookError> {
+    if body.len() > MAX_WEBHOOK_BODY_BYTES {
+        return Err(WebhookError::PayloadTooLarge(
+            body.len(),
+            MAX_WEBHOOK_BODY_BYTES,
         ));
     }
 
-    let entity = payment_entity.unwrap();
+    let root: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| WebhookError::InvalidJson(e.to_string()))?;
 
-    let payment_id = entity
-        .get("id")
+    if !root.is_object() {
+        return Err(WebhookError::MalformedPayload(
+            "Root webhook payload must be a JSON object".to_string(),
+        ));
+    }
+
+    // Verify merchant account identity if expected
+    let account_id = root
+        .get("account_id")
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            root.get("account_id")
+        .map(|s| s.trim().to_string());
+
+    if let Some(expected) = expected_account_id {
+        let expected_clean = expected.trim();
+        if !expected_clean.is_empty() {
+            let actual = account_id.as_deref().unwrap_or("");
+            if actual != expected_clean {
+                warn!(
+                    "Razorpay webhook merchant mismatch: expected '{}', got '{}'",
+                    expected_clean, actual
+                );
+                return Err(WebhookError::MerchantMismatch {
+                    expected: expected_clean.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
+    }
+
+    let event_name = root
+        .get("event")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WebhookError::MalformedPayload("Missing 'event' field".to_string()))?;
+
+    let event_type = map_event_type(event_name)?;
+
+    // Handle refund entity vs payment/order entity
+    let (
+        payment_id,
+        order_id,
+        amount_minor,
+        currency,
+        status,
+        method,
+        refund_id,
+        refund_amount_minor,
+        entity_for_region,
+    ) = match event_type {
+        PaymentEventType::RefundCreated => {
+            let refund_entity = root.pointer("/payload/refund/entity").ok_or_else(|| {
+                WebhookError::MalformedPayload(
+                    "Missing '/payload/refund/entity' in refund.created webhook".to_string(),
+                )
+            })?;
+
+            let r_id = refund_entity
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    WebhookError::MalformedPayload("Missing refund entity 'id'".to_string())
+                })?
+                .trim()
+                .to_string();
+
+            let r_amount = refund_entity
+                .get("amount")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| {
+                    WebhookError::InvalidAmount("Missing or invalid refund amount".to_string())
+                })?;
+
+            if r_amount == 0 {
+                return Err(WebhookError::InvalidAmount(
+                    "Refund amount cannot be zero".to_string(),
+                ));
+            }
+
+            let p_id = refund_entity
+                .get("payment_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    root.pointer("/payload/payment/entity/id")
+                        .and_then(|v| v.as_str())
+                })
+                .ok_or_else(|| {
+                    WebhookError::MalformedPayload("Missing payment_id for refund".to_string())
+                })?
+                .trim()
+                .to_string();
+
+            let curr = refund_entity
+                .get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INR")
+                .trim()
+                .to_string();
+
+            let st = refund_entity
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("processed")
+                .trim()
+                .to_string();
+
+            // Validate refund status
+            match st.as_str() {
+                "processed" | "pending" | "failed" => {}
+                other => {
+                    warn!("Unsupported refund status: {}", other);
+                    return Err(WebhookError::UnsupportedStatus(other.to_string()));
+                }
+            }
+
+            let m = root
+                .pointer("/payload/payment/entity/method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("upi")
+                .to_string();
+
+            let ord_id = root
+                .pointer("/payload/payment/entity/order_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let p_amount = root
+                .pointer("/payload/payment/entity/amount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(r_amount);
+
+            (
+                p_id,
+                ord_id,
+                p_amount,
+                curr,
+                st,
+                m,
+                Some(r_id),
+                Some(r_amount),
+                refund_entity,
+            )
+        }
+        _ => {
+            let payment_entity = root
+                .pointer("/payload/payment/entity")
+                .or_else(|| root.pointer("/payload/order/entity"))
+                .ok_or_else(|| {
+                    WebhookError::MalformedPayload(
+                        "Missing payment or order entity in webhook payload".to_string(),
+                    )
+                })?;
+
+            let p_id = payment_entity
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    WebhookError::MalformedPayload("Missing payment ID in payload".to_string())
+                })?
+                .trim()
+                .to_string();
+
+            if p_id.is_empty() {
+                return Err(WebhookError::MalformedPayload(
+                    "Payment ID cannot be empty".to_string(),
+                ));
+            }
+
+            let ord_id = payment_entity
+                .get("order_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string());
+
+            let amount = payment_entity
+                .get("amount")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| {
+                    WebhookError::InvalidAmount("Missing or non-numeric amount".to_string())
+                })?;
+
+            if amount == 0 {
+                return Err(WebhookError::InvalidAmount(
+                    "Payment amount must be greater than zero".to_string(),
+                ));
+            }
+
+            let curr = payment_entity
+                .get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INR")
+                .trim()
+                .to_string();
+
+            let st = payment_entity
+                .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
-        });
+                .trim()
+                .to_string();
 
-    let amount = entity.get("amount").and_then(|v| v.as_u64());
-    let method = entity
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("upi");
+            // Validate status
+            match st.as_str() {
+                "captured" | "authorized" | "failed" => {}
+                other => {
+                    warn!("Unsupported payment status: {}", other);
+                    return Err(WebhookError::UnsupportedStatus(other.to_string()));
+                }
+            }
 
-    let status = entity
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+            let m = payment_entity
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("upi")
+                .to_string();
+
+            (
+                p_id,
+                ord_id,
+                amount,
+                curr,
+                st,
+                m,
+                None,
+                None,
+                payment_entity,
+            )
+        }
+    };
+
+    // Validate currency
+    let validated_currency =
+        Currency::new(&currency).map_err(|e| WebhookError::InvalidCurrency(e.to_string()))?;
+
+    // Validate minimum amount against provider policy
+    let min_amount = validated_currency
+        .minimum_amount_for_provider("razorpay", Some(&method))
+        .map_err(|e| WebhookError::InvalidAmount(e.to_string()))?;
+
+    if amount_minor < min_amount {
+        return Err(WebhookError::InvalidAmount(format!(
+            "Amount {} is below required minimum of {} for currency {}",
+            amount_minor, min_amount, currency
+        )));
+    }
+
+    // Determine provider_event_id:
+    // 1. Explicit header X-Razorpay-Event-Id if present
+    // 2. Top-level 'id' in JSON if present
+    // 3. Deterministic provider event identifier (separate from payment_id)
+    let provider_event_id = if let Some(hdr) = event_id_header {
+        let clean = hdr.trim();
+        if !clean.is_empty() {
+            clean.to_string()
+        } else {
+            derive_provider_event_id(event_name, &payment_id, refund_id.as_deref())
+        }
+    } else if let Some(root_id) = root.get("id").and_then(|v| v.as_str()) {
+        let clean = root_id.trim();
+        if !clean.is_empty() {
+            clean.to_string()
+        } else {
+            derive_provider_event_id(event_name, &payment_id, refund_id.as_deref())
+        }
+    } else {
+        derive_provider_event_id(event_name, &payment_id, refund_id.as_deref())
+    };
+
+    let region = map_region(entity_for_region);
+    let method_class = map_payment_method(&method);
 
     let success = matches!(
         event_type,
         PaymentEventType::PaymentCaptured | PaymentEventType::OrderPaid
     ) || status == "captured";
 
-    let region = map_region(entity);
-    let method_class = map_payment_method(method);
-
-    // Pseudonymous reference only — never store PAN, card number, or customer PII
     let pseudo_ref = format!(
         "RZP-{}",
         payment_id.chars().rev().take(8).collect::<String>()
     );
 
-    let currency = entity
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("INR")
-        .to_string();
-
-    Ok(PaymentEvent {
-        event_id: format!("rzp_{}", payment_id),
-        event_type,
+    let payment_event = PaymentEvent {
+        event_id: provider_event_id.clone(),
+        event_type: event_type.clone(),
         timestamp: Utc::now(),
         region,
         payment_method_class: method_class,
         pseudonymous_reference: pseudo_ref,
-        amount_cents: amount,
-        amount_minor: amount,
-        currency,
+        amount_cents: Some(amount_minor),
+        amount_minor: Some(amount_minor),
+        currency: currency.clone(),
         processing_latency_ms: None,
         success,
+    };
+
+    Ok(ParsedWebhook {
+        provider: "razorpay",
+        provider_event_id,
+        event_type,
+        payment_id,
+        order_id,
+        account_id,
+        amount_minor,
+        currency,
+        refund_id,
+        refund_amount_minor,
+        status,
+        payment_event,
     })
+}
+
+fn derive_provider_event_id(event_name: &str, payment_id: &str, refund_id: Option<&str>) -> String {
+    if let Some(r_id) = refund_id {
+        format!("rzp_evt_refund_{}", r_id)
+    } else {
+        format!("rzp_evt_{}_{}", event_name, payment_id)
+    }
+}
+
+/// Parse Razorpay webhook JSON into a normalized `PaymentEvent` (no raw card data).
+pub fn parse_webhook_payload(body: &[u8]) -> Result<PaymentEvent, WebhookError> {
+    parse_webhook_payload_detailed(body, None, None).map(|p| p.payment_event)
 }
 
 /// Build a normalized event from a Razorpay payment API entity (checkout confirm fallback).
@@ -322,10 +613,117 @@ mod tests {
         let body = serde_json::to_vec(&payload).unwrap();
         let event = parse_webhook_payload(&body).expect("Should parse captured event");
         assert_eq!(event.event_type, PaymentEventType::PaymentCaptured);
-        assert_eq!(event.event_id, "rzp_pay_test_100");
+        assert_eq!(event.event_id, "rzp_evt_payment.captured_pay_test_100");
         assert_eq!(event.amount_cents, Some(25000));
         assert!(event.success);
         assert_eq!(event.region, Region::IndiaWest);
+    }
+
+    #[test]
+    fn test_webhook_payload_too_large_fails() {
+        let large_body = vec![b'a'; MAX_WEBHOOK_BODY_BYTES + 10];
+        let res = parse_webhook_payload_detailed(&large_body, None, None);
+        assert!(matches!(res, Err(WebhookError::PayloadTooLarge(_, _))));
+    }
+
+    #[test]
+    fn test_merchant_id_mismatch_fails_closed() {
+        let payload = serde_json::json!({
+            "account_id": "acc_attacker_999",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_test_100",
+                        "amount": 25000,
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let res = parse_webhook_payload_detailed(&body, None, Some("acc_legit_111"));
+        assert_eq!(
+            res,
+            Err(WebhookError::MerchantMismatch {
+                expected: "acc_legit_111".to_string(),
+                actual: "acc_attacker_999".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_invalid_currency_fails_closed() {
+        let payload = serde_json::json!({
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_curr_001",
+                        "amount": 25000,
+                        "currency": "FAKE_CURRENCY",
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let res = parse_webhook_payload_detailed(&body, None, None);
+        assert!(matches!(res, Err(WebhookError::InvalidCurrency(_))));
+    }
+
+    #[test]
+    fn test_amount_below_minimum_fails_closed() {
+        let payload = serde_json::json!({
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_min_001",
+                        "amount": 50, // 50 paise is below Razorpay 100 paise min
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let res = parse_webhook_payload_detailed(&body, None, None);
+        assert!(matches!(res, Err(WebhookError::InvalidAmount(_))));
+    }
+
+    #[test]
+    fn test_refund_created_webhook_parsing() {
+        let payload = serde_json::json!({
+            "id": "evt_refund_9988",
+            "event": "refund.created",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_abc_123",
+                        "amount": 5000,
+                        "currency": "INR",
+                        "payment_id": "pay_orig_456",
+                        "status": "processed"
+                    }
+                },
+                "payment": {
+                    "entity": {
+                        "id": "pay_orig_456",
+                        "amount": 20000,
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let parsed = parse_webhook_payload_detailed(&body, None, None).unwrap();
+        assert_eq!(parsed.provider_event_id, "evt_refund_9988");
+        assert_eq!(parsed.payment_id, "pay_orig_456");
+        assert_eq!(parsed.refund_id, Some("rfnd_abc_123".to_string()));
+        assert_eq!(parsed.refund_amount_minor, Some(5000));
+        assert_eq!(parsed.event_type, PaymentEventType::RefundCreated);
     }
 
     #[test]

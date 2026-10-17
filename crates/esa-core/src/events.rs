@@ -20,7 +20,7 @@ pub enum PaymentEventType {
     RefundCreated,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentEvent {
     pub event_id: String,
     pub event_type: PaymentEventType,
