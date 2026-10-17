@@ -1,20 +1,26 @@
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, Query, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use esa_agents::OllamaClient;
 use esa_core::*;
-use esa_razorpay::{payment_entity_to_event, RazorpayAdapter, RazorpayConfig, WebhookError};
+use esa_razorpay::{
+    payment_entity_to_event, webhook::MAX_WEBHOOK_BODY_BYTES, RazorpayAdapter, RazorpayConfig,
+    WebhookError,
+};
 use esa_runtime::{EsaOrchestrator, RuntimeEvent, RuntimeEventHandler};
-use esa_state::StateFabric;
+use esa_state::{
+    InMemoryWebhookStore, PostgresWebhookStore, StateFabric, WebhookProcessingResult, WebhookStore,
+    WebhookStoreError,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn, Level};
 
@@ -256,50 +262,114 @@ pub(crate) fn is_demo_mutation_allowed() -> bool {
     matches!(detect_checkout_mode(), PaymentCheckoutMode::Simulated)
 }
 
-fn configure_cors() -> CorsLayer {
-    let allowed_origins = std::env::var("ALLOWED_ORIGINS").ok();
-    let mut origins = Vec::new();
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub is_production: bool,
+    pub allowed_origins: Vec<String>,
+}
 
-    if let Some(origins_str) = allowed_origins {
-        for origin in origins_str.split(',') {
-            let trimmed = origin.trim();
-            if !trimmed.is_empty() {
-                if let Ok(header_val) = trimmed.parse::<HeaderValue>() {
-                    origins.push(header_val);
-                }
-            }
+impl CorsConfig {
+    pub fn new(is_production: bool, allowed_origins: Vec<String>) -> Self {
+        Self {
+            is_production,
+            allowed_origins,
         }
     }
 
-    if origins.is_empty() {
-        origins = vec![
-            "http://localhost:5173".parse().unwrap(),
-            "http://127.0.0.1:5173".parse().unwrap(),
-            "http://localhost:3000".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-            "http://localhost:8080".parse().unwrap(),
-            "http://127.0.0.1:8080".parse().unwrap(),
-        ];
+    pub fn from_env() -> Self {
+        let is_production = is_production_mode();
+        let allowed_origins: Vec<String> = std::env::var("ALLOWED_ORIGINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|o| o.trim().to_string())
+                    .filter(|o| !o.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::new(is_production, allowed_origins)
     }
 
-    CorsLayer::new()
-        .allow_origin(origins)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        let origin_clean = origin.trim();
+        let origin_lower = origin_clean.to_lowercase();
+
+        // 1. Exact production HTTPS origin is always allowed
+        if origin_lower == "https://esapay.vercel.app" {
+            return true;
+        }
+
+        // 2. Reject HTTP production origin
+        if origin_lower == "http://esapay.vercel.app" {
+            return false;
+        }
+
+        // 3. Explicitly configured allowed origins (e.g. specific preview URLs)
+        // Strictly reject wildcard '*' because credentials are enabled
+        for allowed in &self.allowed_origins {
+            let allowed_clean = allowed.trim();
+            if allowed_clean == "*" {
+                // Wildcard forbidden with credentials to prevent credentialed cross-origin data exposure
+                continue;
+            }
+            if allowed_clean.eq_ignore_ascii_case(origin_clean) {
+                return true;
+            }
+        }
+
+        // 4. Localhost and loopback origins allowed ONLY in non-production mode
+        if !self.is_production
+            && (origin_lower.starts_with("http://localhost:")
+                || origin_lower == "http://localhost"
+                || origin_lower.starts_with("http://127.0.0.1:")
+                || origin_lower == "http://127.0.0.1"
+                || origin_lower.starts_with("https://localhost:")
+                || origin_lower == "https://localhost")
+        {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn build_cors_layer(&self) -> CorsLayer {
+        let config = self.clone();
+        let allow_origin = AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+            if let Ok(origin_str) = origin.to_str() {
+                config.is_origin_allowed(origin_str)
+            } else {
+                false
+            }
+        });
+
+        let allowed_headers = [
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::ACCEPT,
-            header::ORIGIN,
-            HeaderName::from_static("x-api-key"),
-            HeaderName::from_static("x-razorpay-signature"),
-        ])
-        .allow_credentials(true)
+            header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("x-esa-api-key"),
+            header::HeaderName::from_static("x-requested-with"),
+            header::HeaderName::from_static("x-razorpay-signature"),
+            header::HeaderName::from_static("x-razorpay-event-id"),
+        ];
+
+        CorsLayer::new()
+            .allow_origin(allow_origin)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
+            .allow_headers(allowed_headers)
+            .allow_credentials(true)
+    }
+}
+
+fn configure_cors() -> CorsLayer {
+    CorsConfig::from_env().build_cors_layer()
 }
 
 fn publish_metrics_telemetry(state: &AppState) {
@@ -610,6 +680,10 @@ async fn main() -> anyhow::Result<()> {
     // Initialize API rate limiter (Token-bucket protection against abuse/DDoS)
     let rate_limiter = rate_limiter::ApiRateLimiter::new();
 
+    // Initialize durable webhook inbox and payment record store (fails closed if DATABASE_URL is set but DB fails)
+    let webhook_store: Arc<dyn WebhookStore> =
+        resolve_webhook_store(std::env::var("DATABASE_URL").ok().as_deref()).await?;
+
     // Create app state
     let app_state = AppState {
         state_fabric,
@@ -625,6 +699,7 @@ async fn main() -> anyhow::Result<()> {
         last_benchmark: Arc::new(std::sync::RwLock::new(None)),
         last_ablation: Arc::new(std::sync::RwLock::new(None)),
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        webhook_store,
     };
 
     let app = build_app(app_state);
@@ -662,8 +737,14 @@ fn build_app(app_state: AppState) -> Router {
         .route("/api/v1/workloads/:id", get(get_workload))
         .route("/api/events/payment", post(ingest_payment_event))
         .route("/api/v1/events/payment", post(ingest_payment_event))
-        .route("/api/razorpay/webhook", post(razorpay_webhook))
-        .route("/api/v1/razorpay/webhook", post(razorpay_webhook))
+        .route(
+            "/api/razorpay/webhook",
+            post(razorpay_webhook).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/razorpay/webhook",
+            post(razorpay_webhook).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
+        )
         .route("/api/razorpay/status", get(razorpay_status))
         .route("/api/v1/razorpay/status", get(razorpay_status))
         .route("/api/razorpay/orders", post(razorpay_create_order))
@@ -847,6 +928,7 @@ struct AppState {
     last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
     last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
     gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
+    webhook_store: Arc<dyn WebhookStore>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -939,6 +1021,88 @@ async fn ingest_payment_event(
         "message": "Payment processed and workload metrics automatically adjusted"
     })))
 }
+/// Resolves the WebhookStore based on the optional DATABASE_URL string and production flag.
+/// FAILS CLOSED in production:
+/// - If in production mode, a reachable PostgreSQL DATABASE_URL and successful schema
+///   initialization are STRICTLY REQUIRED. Unset, blank, or 'memory' database URLs fail closed.
+/// - In development or test mode, explicit 'memory' or absent/blank DATABASE_URL selects
+///   InMemoryWebhookStore. If a PostgreSQL DATABASE_URL is configured, connection and schema
+///   initialization must succeed or it fails closed (never silently falling back to memory).
+pub async fn resolve_webhook_store_with_mode(
+    db_url_opt: Option<&str>,
+    is_production: bool,
+) -> anyhow::Result<Arc<dyn WebhookStore>> {
+    let trimmed = db_url_opt.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    if is_production {
+        match trimmed {
+            Some("memory") => {
+                anyhow::bail!(
+                    "In-memory webhook store ('memory') is prohibited in production. A reachable PostgreSQL DATABASE_URL is strictly required."
+                );
+            }
+            None => {
+                anyhow::bail!(
+                    "DATABASE_URL is missing or blank in production. A reachable PostgreSQL DATABASE_URL is strictly required."
+                );
+            }
+            Some(db_url) => {
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .acquire_timeout(std::time::Duration::from_secs(3))
+                    .connect(db_url)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Production DATABASE_URL connection failed: {}. Failing closed.",
+                            e
+                        )
+                    })?;
+                PostgresWebhookStore::init_schema(&pool)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                        "Production DATABASE_URL schema initialization failed: {}. Failing closed.",
+                        e
+                    )
+                    })?;
+                info!("Connected durable PostgresWebhookStore to production database");
+                return Ok(Arc::new(PostgresWebhookStore::new(pool)));
+            }
+        }
+    }
+
+    if let Some(db_url) = trimmed {
+        if db_url != "memory" {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_secs(3))
+                .connect(db_url)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "DATABASE_URL is configured but connection failed: {}. Failing closed.",
+                        e
+                    )
+                })?;
+            PostgresWebhookStore::init_schema(&pool).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "DATABASE_URL is configured but schema initialization failed: {}. Failing closed.",
+                    e
+                )
+            })?;
+            info!("Connected durable PostgresWebhookStore to database");
+            return Ok(Arc::new(PostgresWebhookStore::new(pool)));
+        }
+    }
+
+    info!("Using InMemoryWebhookStore for development/test mode");
+    Ok(Arc::new(InMemoryWebhookStore::new()))
+}
+
+pub async fn resolve_webhook_store(
+    db_url_opt: Option<&str>,
+) -> anyhow::Result<Arc<dyn WebhookStore>> {
+    resolve_webhook_store_with_mode(db_url_opt, is_production_mode()).await
+}
 
 async fn razorpay_webhook(
     State(state): State<AppState>,
@@ -958,11 +1122,37 @@ async fn razorpay_webhook(
         }
     };
 
+    // 1. Strict request body size limit enforcement before expensive parsing
+    if body.len() > MAX_WEBHOOK_BODY_BYTES {
+        warn!(
+            "Razorpay webhook rejected: payload size {} exceeds limit of {} bytes",
+            body.len(),
+            MAX_WEBHOOK_BODY_BYTES
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": "payload_too_large",
+                "message": format!(
+                    "Payload size {} exceeds maximum allowed limit of {} bytes",
+                    body.len(),
+                    MAX_WEBHOOK_BODY_BYTES
+                )
+            })),
+        )
+            .into_response();
+    }
+
     let signature = headers
         .get("X-Razorpay-Signature")
         .and_then(|v| v.to_str().ok());
 
-    let event = match adapter.process_webhook(body.as_ref(), signature) {
+    let event_id_header = headers
+        .get("X-Razorpay-Event-Id")
+        .and_then(|v| v.to_str().ok());
+
+    // 2. Cryptographic signature verification and schema/attribute validation
+    let parsed = match adapter.process_webhook_detailed(body.as_ref(), signature, event_id_header) {
         Ok(event) => event,
         Err(WebhookError::RateLimited) => {
             return (
@@ -971,9 +1161,20 @@ async fn razorpay_webhook(
             )
                 .into_response();
         }
+        Err(WebhookError::PayloadTooLarge(len, max)) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({
+                    "error": "payload_too_large",
+                    "message": format!("Payload size {} exceeds limit of {} bytes", len, max)
+                })),
+            )
+                .into_response();
+        }
         Err(WebhookError::DuplicateEvent) => {
             return Json(serde_json::json!({
-                "status": "duplicate",
+                "status": "already_processed",
+                "idempotent": true,
                 "message": "Event already processed"
             }))
             .into_response();
@@ -992,37 +1193,217 @@ async fn razorpay_webhook(
         Err(WebhookError::InvalidJson(msg)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": msg })),
+                Json(serde_json::json!({ "error": "invalid_json", "message": msg })),
             )
                 .into_response();
         }
         Err(WebhookError::MalformedPayload(msg)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": msg })),
+                Json(serde_json::json!({ "error": "malformed_payload", "message": msg })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::MerchantMismatch { expected, actual }) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "merchant_mismatch",
+                    "message": format!("Expected merchant account '{}', got '{}'", expected, actual)
+                })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::InvalidCurrency(msg)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_currency", "message": msg })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::InvalidAmount(msg)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_amount", "message": msg })),
             )
                 .into_response();
         }
         Err(WebhookError::UnsupportedEvent(msg)) | Err(WebhookError::UnsupportedStatus(msg)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": msg })),
+                Json(serde_json::json!({
+                    "error": "unsupported_event_or_status",
+                    "message": msg
+                })),
+            )
+                .into_response();
+        }
+        Err(WebhookError::ContradictoryRefundStatus { event, status }) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "contradictory_refund_status",
+                    "message": format!("Contradictory refund event '{}' with status '{}'", event, status)
+                })),
             )
                 .into_response();
         }
     };
 
-    let result = payment::apply_payment_event(&state.state_fabric, &event);
-    publish_payment_side_effects(&state, &result);
+    let payload_val: serde_json::Value = match serde_json::from_slice(body.as_ref()) {
+        Ok(v) => v,
+        Err(_) => serde_json::json!({}),
+    };
 
-    Json(serde_json::json!({
-        "status": "accepted",
-        "source": "razorpay",
-        "event_id": result.event_id,
-        "workload_updated": result.workload_updated,
-        "workload_id": result.workload_id,
-    }))
-    .into_response()
+    // 3. Durable transactional event inbox deduplication and state machine transition
+    let params = esa_state::WebhookEventParams {
+        provider: parsed.provider,
+        provider_event_id: &parsed.provider_event_id,
+        event_type: parsed.event_type.clone(),
+        payment_id: &parsed.payment_id,
+        amount_minor: parsed.amount_minor,
+        currency: &parsed.currency,
+        refund_id: parsed.refund_id.as_deref(),
+        refund_amount_minor: parsed.refund_amount_minor,
+        refund_status: Some(parsed.status.as_str()),
+        payload: &payload_val,
+    };
+    let process_res = state.webhook_store.process_webhook_event(&params).await;
+
+    match process_res {
+        Ok(WebhookProcessingResult::Applied {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            transition,
+            payment,
+        }) => {
+            let result = payment::apply_payment_event(&state.state_fabric, &parsed.payment_event);
+            publish_payment_side_effects(&state, &result);
+
+            Json(serde_json::json!({
+                "status": "accepted",
+                "inbox_id": inbox_id,
+                "provider": provider,
+                "provider_event_id": provider_event_id,
+                "payment_id": payment_id,
+                "payment_state": payment.state,
+                "transition": transition,
+                "workload_updated": result.workload_updated,
+                "workload_id": result.workload_id,
+            }))
+            .into_response()
+        }
+        Ok(WebhookProcessingResult::AlreadyProcessed {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            processed_at,
+        }) => Json(serde_json::json!({
+            "status": "already_processed",
+            "inbox_id": inbox_id,
+            "provider": provider,
+            "provider_event_id": provider_event_id,
+            "payment_id": payment_id,
+            "processed_at": processed_at,
+            "idempotent": true,
+            "message": "Event already processed"
+        }))
+        .into_response(),
+        Ok(WebhookProcessingResult::InFlight {
+            inbox_id,
+            provider,
+            provider_event_id,
+        }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "in_flight",
+                "inbox_id": inbox_id,
+                "provider": provider,
+                "provider_event_id": provider_event_id,
+                "message": "Event is currently being processed by another worker"
+            })),
+        )
+            .into_response(),
+        Ok(WebhookProcessingResult::MetadataRecorded {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            reason,
+        }) => Json(serde_json::json!({
+            "status": "accepted",
+            "inbox_id": inbox_id,
+            "provider": provider,
+            "provider_event_id": provider_event_id,
+            "payment_id": payment_id,
+            "metadata_recorded": true,
+            "message": reason,
+        }))
+        .into_response(),
+        Ok(WebhookProcessingResult::Unapplied {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            reason,
+        }) => Json(serde_json::json!({
+            "status": "unapplied",
+            "inbox_id": inbox_id,
+            "provider": provider,
+            "provider_event_id": provider_event_id,
+            "payment_id": payment_id,
+            "unapplied": true,
+            "message": reason,
+        }))
+        .into_response(),
+        Err(WebhookStoreError::Mismatch(err)) => {
+            warn!("Webhook entity mismatch rejected: {}", err);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "entity_mismatch",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::PaymentState(err)) => {
+            warn!("Payment state transition rejected: {}", err);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "payment_state_error",
+                    "message": err.to_string()
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::Database(err)) => {
+            error!("Durable webhook store database error: {}", err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "database_error",
+                    "message": "Durable event processing failed; provider may retry"
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::Serialization(err)) => {
+            error!("Webhook store serialization error: {}", err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "serialization_error",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn razorpay_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -2784,6 +3165,7 @@ mod integration_tests {
             last_benchmark: Arc::new(std::sync::RwLock::new(None)),
             last_ablation: Arc::new(std::sync::RwLock::new(None)),
             gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            webhook_store: Arc::new(InMemoryWebhookStore::new()),
         }
     }
 
@@ -4583,5 +4965,1542 @@ mod integration_tests {
                 Some(true)
             );
         }
+    }
+
+    // =========================================================================
+    // Phase 2 Slice 2A: Secure Webhook Processing and Durable Event Idempotency
+    // =========================================================================
+
+    fn compute_test_signature(body: &[u8], secret: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    }
+
+    fn create_test_state_with_webhook(
+        secret: &str,
+        account_id: Option<&str>,
+    ) -> (AppState, Arc<dyn WebhookStore>) {
+        let mut state = create_test_state();
+        let config = RazorpayConfig {
+            key_id: "rzp_test_fixture123".to_string(),
+            key_secret: "rzp_test_secret123".to_string(),
+            webhook_secret: secret.to_string(),
+            api_base: "https://api.razorpay.com/v1".to_string(),
+            test_mode_only: true,
+            webhook_rate_limit_per_sec: 1000,
+            api_rate_limit_per_sec: 1000,
+            account_id: account_id.map(|s| s.to_string()),
+        };
+        let adapter = RazorpayAdapter::with_config(config);
+        state.razorpay = Some(Arc::new(adapter));
+        let store = Arc::clone(&state.webhook_store);
+        (state, store)
+    }
+
+    #[tokio::test]
+    async fn test_webhook_valid_signature_over_exact_body() {
+        let secret = "whsec_test_secret_alpha_12345";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+        let app = build_app(state);
+
+        let raw_payload = serde_json::json!({
+            "id": "evt_valid_001",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_valid_001",
+                        "amount": 50000, // INR 500.00
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi",
+                        "notes": { "region": "IN-WEST" }
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&raw_payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("accepted")
+        );
+        assert_eq!(
+            json.get("provider_event_id").and_then(|v| v.as_str()),
+            Some("evt_valid_001")
+        );
+        assert_eq!(
+            json.get("payment_id").and_then(|v| v.as_str()),
+            Some("pay_valid_001")
+        );
+
+        // Verify state is Captured
+        let payment = store
+            .get_payment_record("pay_valid_001")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.amount_minor, 50000);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_missing_secret_and_missing_signature_fails_closed() {
+        // 1. Missing signature header
+        {
+            let secret = "whsec_test_secret_beta_67890";
+            let (state, _) = create_test_state_with_webhook(secret, None);
+            let app = build_app(state);
+
+            let body = b"{\"event\":\"payment.captured\"}";
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_vec()))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 2. Missing/empty webhook secret configured in adapter
+        {
+            let (state, _) = create_test_state_with_webhook("", None);
+            let app = build_app(state);
+
+            let body = b"{\"event\":\"payment.captured\"}";
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", "dummy_sig")
+                .body(axum::body::Body::from(body.to_vec()))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_tampered_body_and_invalid_signature_rejected() {
+        let secret = "whsec_test_secret_gamma_54321";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+        let app = build_app(state);
+
+        let body_original = b"{\"event\":\"payment.captured\",\"amount\":5000}";
+        let sig = compute_test_signature(body_original, secret);
+
+        // Attacker tampers body by altering 1 byte or appending data
+        let body_tampered = b"{\"event\":\"payment.captured\",\"amount\":9999}";
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body_tampered.to_vec()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_malformed_payload_and_oversized_request_rejected() {
+        let secret = "whsec_test_secret_delta_99999";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        // 1. Oversized body (> 64 KiB)
+        {
+            let app = build_app(state.clone());
+            let oversized_body = vec![b'x'; MAX_WEBHOOK_BODY_BYTES + 1024];
+            let sig = compute_test_signature(&oversized_body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(oversized_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        // 2. Malformed JSON
+        {
+            let app = build_app(state.clone());
+            let malformed_body = b"not a json { [ }";
+            let sig = compute_test_signature(malformed_body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(malformed_body.to_vec()))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_unknown_event_type_and_payment_status_rejected() {
+        let secret = "whsec_test_secret_epsilon_11111";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        // 1. Unknown event type
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "event": "payment.future_unsupported_event",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_unknown_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // 2. Unknown payment status
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_unknown_status_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "quantum_uncertainty"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_duplicate_event_delivery_idempotent() {
+        let secret = "whsec_test_secret_zeta_22222";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        let raw_payload = serde_json::json!({
+            "id": "evt_dup_999",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_dup_999",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&raw_payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        // Delivery 1 -> Accepted
+        {
+            let app = build_app(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body.clone()))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("status").and_then(|v| v.as_str()),
+                Some("accepted")
+            );
+        }
+
+        // Delivery 2 (Duplicate) -> AlreadyProcessed (Idempotent 200 OK)
+        {
+            let app = build_app(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("status").and_then(|v| v.as_str()),
+                Some("already_processed")
+            );
+            assert_eq!(json.get("idempotent").and_then(|v| v.as_bool()), Some(true));
+        }
+
+        // Verify payment record in store was only transitioned once
+        let payment = store
+            .get_payment_record("pay_dup_999")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.events_seen.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_concurrent_duplicate_delivery_safe() {
+        let secret = "whsec_test_secret_eta_33333";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        let raw_payload = serde_json::json!({
+            "id": "evt_concurrent_api_555",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_concurrent_api_555",
+                        "amount": 20000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "card"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&raw_payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = state.clone();
+            let b = body.clone();
+            let sg = sig.clone();
+            handles.push(tokio::spawn(async move {
+                let app = build_app(s);
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/razorpay/webhook")
+                    .header("content-type", "application/json")
+                    .header("x-razorpay-signature", &sg)
+                    .body(axum::body::Body::from(b))
+                    .unwrap();
+
+                app.oneshot(req).await.unwrap()
+            }));
+        }
+
+        let mut accepted_count = 0;
+        let mut already_processed_count = 0;
+        let mut in_flight_count = 0;
+
+        for h in handles {
+            let resp = h.await.unwrap();
+            let status = resp.status();
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+            if status == StatusCode::OK {
+                let s_str = json.get("status").and_then(|v| v.as_str());
+                if s_str == Some("accepted") {
+                    accepted_count += 1;
+                } else if s_str == Some("already_processed") {
+                    already_processed_count += 1;
+                }
+            } else if status == StatusCode::CONFLICT {
+                in_flight_count += 1;
+            }
+        }
+
+        // Exactly one concurrent worker must have applied the transition
+        assert_eq!(accepted_count, 1);
+        assert!(already_processed_count + in_flight_count >= 1);
+
+        let payment = store
+            .get_payment_record("pay_concurrent_api_555")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.events_seen.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_out_of_order_capture_and_late_failure_events() {
+        let secret = "whsec_test_secret_theta_44444";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        // 1. Authoritative capture event arrives first
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_ooo_cap",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_ooo_100",
+                            "amount": 15000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Delayed failure event arrives late for the same payment
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_ooo_fail",
+                "event": "payment.failed",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_ooo_100",
+                            "amount": 15000,
+                            "currency": "INR",
+                            "status": "failed",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            // Transition must report LateEventIgnored
+            let transition_str = format!("{:?}", json.get("transition"));
+            assert!(transition_str.contains("LateEventIgnored"));
+        }
+
+        // 3. Verify state machine invariant: Payment remains Captured!
+        let payment = store
+            .get_payment_record("pay_ooo_100")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_wrong_merchant_account_rejected() {
+        let secret = "whsec_test_secret_iota_55555";
+        let (state, _) = create_test_state_with_webhook(secret, Some("acc_legit_merchant_123"));
+        let app = build_app(state);
+
+        let payload = serde_json::json!({
+            "account_id": "acc_fraudulent_attacker_999",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_wrong_merchant",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("merchant_mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_amount_and_currency_mismatch_rejected() {
+        let secret = "whsec_test_secret_kappa_66666";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        // 1. Amount below minimum (50 paise < 100 paise)
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_low_amount",
+                            "amount": 50,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // 2. Unsupported currency
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_fake_currency",
+                            "amount": 10000,
+                            "currency": "XYZ",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_database_outage_error_and_transaction_rollback() {
+        // Create an AppState with a MockWebhookStore that returns Database error
+        struct FailingWebhookStore;
+        #[esa_state::async_trait]
+        impl WebhookStore for FailingWebhookStore {
+            async fn process_webhook_event(
+                &self,
+                _params: &esa_state::WebhookEventParams<'_>,
+            ) -> Result<WebhookProcessingResult, WebhookStoreError> {
+                Err(WebhookStoreError::Database(
+                    "Connection pool exhausted".into(),
+                ))
+            }
+            async fn get_inbox_record(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<esa_state::WebhookInboxRecord>, WebhookStoreError> {
+                Ok(None)
+            }
+            async fn get_payment_record(
+                &self,
+                _: &str,
+            ) -> Result<Option<PaymentEntity>, WebhookStoreError> {
+                Ok(None)
+            }
+        }
+
+        let secret = "whsec_test_secret_lambda_77777";
+        let (mut state, _) = create_test_state_with_webhook(secret, None);
+        state.webhook_store = Arc::new(FailingWebhookStore);
+        let app = build_app(state);
+
+        let payload = serde_json::json!({
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_db_failure",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Server MUST return 500 so upstream provider retries safely
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_webhook_store_behavior() {
+        // 1. Explicit development/test mode: unset, empty, or "memory" resolve to InMemoryWebhookStore
+        let s_none = resolve_webhook_store_with_mode(None, false).await;
+        assert!(s_none.is_ok());
+
+        let s_empty = resolve_webhook_store_with_mode(Some(""), false).await;
+        assert!(s_empty.is_ok());
+
+        let s_spaces = resolve_webhook_store_with_mode(Some("   "), false).await;
+        assert!(s_spaces.is_ok());
+
+        let s_mem = resolve_webhook_store_with_mode(Some("memory"), false).await;
+        assert!(s_mem.is_ok());
+
+        // 2. Production mode with missing DATABASE_URL -> MUST FAIL CLOSED
+        let prod_none = resolve_webhook_store_with_mode(None, true).await;
+        assert!(
+            prod_none.is_err(),
+            "Production must fail closed when DATABASE_URL is missing"
+        );
+        assert!(prod_none
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing or blank"));
+
+        // 3. Production mode with blank DATABASE_URL -> MUST FAIL CLOSED
+        let prod_blank = resolve_webhook_store_with_mode(Some("   "), true).await;
+        assert!(
+            prod_blank.is_err(),
+            "Production must fail closed when DATABASE_URL is blank"
+        );
+
+        // 4. Production mode with explicit 'memory' -> MUST FAIL CLOSED
+        let prod_mem = resolve_webhook_store_with_mode(Some("memory"), true).await;
+        assert!(
+            prod_mem.is_err(),
+            "Production must fail closed when configured with 'memory'"
+        );
+        assert!(prod_mem
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("prohibited in production"));
+
+        // 5. Production mode with invalid DATABASE_URL -> MUST FAIL CLOSED
+        let prod_invalid = resolve_webhook_store_with_mode(
+            Some("postgres://invalid:invalid@localhost:59999/esa_test"),
+            true,
+        )
+        .await;
+        assert!(
+            prod_invalid.is_err(),
+            "Production must fail closed when DATABASE_URL connection fails"
+        );
+
+        // 6. Non-production mode with invalid database URL must also FAIL CLOSED (never silently fallback)
+        let dev_invalid = resolve_webhook_store_with_mode(
+            Some("postgres://invalid:invalid@localhost:59999/esa_test"),
+            false,
+        )
+        .await;
+        assert!(
+            dev_invalid.is_err(),
+            "Must fail closed if configured DATABASE_URL connection fails"
+        );
+        let err_msg = dev_invalid.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("Failing closed"),
+            "Error message must specify failing closed: {}",
+            err_msg
+        );
+
+        // 7. Successful PostgreSQL initialization if test DB is reachable
+        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+            if !db_url.trim().is_empty()
+                && db_url != "memory"
+                && sqlx::PgPool::connect(&db_url).await.is_ok()
+            {
+                let prod_pg = resolve_webhook_store_with_mode(Some(&db_url), true).await;
+                assert!(
+                    prod_pg.is_ok(),
+                    "Production with reachable PostgreSQL must succeed"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_entity_mismatch_rejected_with_conflict() {
+        let secret = "whsec_test_secret_mu_88888";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial capture with INR 5000
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_init_capture_mismatch",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_mismatch_entity_test",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Reused event ID with mismatched payment ID -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_init_capture_mismatch", // Reused event ID!
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_completely_different_id", // Different payment ID!
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("entity_mismatch")
+            );
+        }
+
+        // 3. Subsequent event with mismatched original amount 99999 -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_refund_amt_mismatch",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_test_002",
+                            "payment_id": "pay_mismatch_entity_test",
+                            "amount": 1000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_mismatch_entity_test",
+                            "amount": 99999, // Amount mismatch!
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("entity_mismatch")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_invalid_state_transition_persisted_as_failed_inbox() {
+        let secret = "whsec_test_secret_nu_99999";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial capture of 5000 paise
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_capture_initial",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_test_inv_state_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Over-refund attempt (attempting 20000 paise refund on 5000 paise payment)
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_over_refund_attempt",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_over_001",
+                            "payment_id": "pay_test_inv_state_001",
+                            "amount": 20000, // Exceeds balance!
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_test_inv_state_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        // 3. Verify inbox record was persisted with Failed status
+        let inbox = store
+            .get_inbox_record("razorpay", "evt_over_refund_attempt")
+            .await
+            .unwrap()
+            .expect("Inbox record must exist");
+        assert_eq!(inbox.status, esa_state::WebhookStatus::Failed);
+        assert!(inbox.error_message.is_some());
+
+        // 4. Verify payment record remains Captured and uncorrupted
+        let payment = store
+            .get_payment_record("pay_test_inv_state_001")
+            .await
+            .unwrap()
+            .expect("Payment record must exist");
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.refunded_amount_minor, 0);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_event_id_conflicting_payload_rejected_by_api() {
+        let secret = "whsec_test_secret_dup_payload_77";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        let app = build_app(state.clone());
+        let payload_orig = serde_json::json!({
+            "id": "evt_dup_api_101",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_dup_api_test",
+                        "amount": 5000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi",
+                        "notes": { "intent": "original" }
+                    }
+                }
+            }
+        });
+        let body_orig = serde_json::to_vec(&payload_orig).unwrap();
+        let sig_orig = compute_test_signature(&body_orig, secret);
+
+        // 1. Initial delivery -> 200 OK
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_orig)
+            .body(axum::body::Body::from(body_orig.clone()))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // 2. Exact duplicate delivery -> 200 OK with already_processed
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_orig)
+            .body(axum::body::Body::from(body_orig))
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(resp2.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2.get("status").and_then(|v| v.as_str()),
+            Some("already_processed")
+        );
+
+        // 3. Same event ID with conflicting payload (tampered notes) -> 409 Conflict
+        let payload_tampered = serde_json::json!({
+            "id": "evt_dup_api_101", // SAME event ID!
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_dup_api_test", // SAME payment ID!
+                        "amount": 5000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi",
+                        "notes": { "intent": "tampered_payload" }
+                    }
+                }
+            }
+        });
+        let body_tampered = serde_json::to_vec(&payload_tampered).unwrap();
+        let sig_tampered = compute_test_signature(&body_tampered, secret);
+
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_tampered)
+            .body(axum::body::Body::from(body_tampered))
+            .unwrap();
+        let resp3 = app.oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::CONFLICT);
+        let b3 = axum::body::to_bytes(resp3.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+        assert_eq!(
+            j3.get("error").and_then(|v| v.as_str()),
+            Some("entity_mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refund_api_idempotency_and_lifecycle() {
+        let secret = "whsec_test_secret_rf_api_44";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial payment capture of 10000 paise
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_cap_api_1",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Pending refund delivery (refund.created with pending status) -> 200 OK, balance UNCHANGED
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_pending_api",
+                "event": "refund.created",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1",
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "pending"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payment.refunded_amount_minor, 0,
+                "Pending refund must not increase refunded amount"
+            );
+            assert_eq!(payment.state, PaymentState::Captured);
+        }
+
+        // 3. Processed refund delivery (refund.processed) -> 200 OK, balance INCREMENTED
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_proc_api", // Different event ID!
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(payment.refunded_amount_minor, 4000);
+            assert_eq!(payment.state, PaymentState::PartiallyRefunded);
+        }
+
+        // 4. Duplicate delivery of processed refund with ANOTHER event ID -> 200 OK, balance NOT double-counted
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_proc_another_delivery", // Another event ID!
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payment.refunded_amount_minor, 4000,
+                "Refund must not be double counted!"
+            );
+        }
+
+        // 5. Reused refund ID with conflicting amount -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_conflict_amt_delivery",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 9999, // Conflicting amount!
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cors_origin_allowance_rules_deterministic() {
+        // Production CORS configuration with an explicitly allowed preview origin
+        let prod_cors = CorsConfig::new(
+            true,
+            vec!["https://esapay-preview-pr-19.vercel.app".to_string()],
+        );
+
+        // 1. Exact production HTTPS origin succeeds
+        assert!(prod_cors.is_origin_allowed("https://esapay.vercel.app"));
+
+        // 2. Explicitly configured preview origin succeeds
+        assert!(prod_cors.is_origin_allowed("https://esapay-preview-pr-19.vercel.app"));
+
+        // 3. Unrelated *.vercel.app origin fails (suffix matching forbidden)
+        assert!(!prod_cors.is_origin_allowed("https://random-attacker.vercel.app"));
+        assert!(!prod_cors.is_origin_allowed("https://esapay-other.vercel.app"));
+
+        // 4. HTTP production origin fails
+        assert!(!prod_cors.is_origin_allowed("http://esapay.vercel.app"));
+
+        // 5. Localhost fails in production mode
+        assert!(!prod_cors.is_origin_allowed("http://localhost:3000"));
+        assert!(!prod_cors.is_origin_allowed("http://localhost:5173"));
+        assert!(!prod_cors.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(!prod_cors.is_origin_allowed("https://localhost"));
+
+        // 6. Non-production (development) mode allows localhost
+        let dev_cors = CorsConfig::new(false, vec![]);
+        assert!(dev_cors.is_origin_allowed("https://esapay.vercel.app"));
+        assert!(dev_cors.is_origin_allowed("http://localhost:3000"));
+        assert!(dev_cors.is_origin_allowed("http://localhost:5173"));
+        assert!(dev_cors.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(dev_cors.is_origin_allowed("https://localhost:443"));
+        // Development mode still rejects arbitrary unrelated origins and HTTP production
+        assert!(!dev_cors.is_origin_allowed("https://random-attacker.vercel.app"));
+        assert!(!dev_cors.is_origin_allowed("http://esapay.vercel.app"));
+
+        // 7. Wildcard configuration '*' cannot enable credentialed access
+        let wildcard_cors = CorsConfig::new(true, vec!["*".to_string()]);
+        assert!(!wildcard_cors.is_origin_allowed("https://attacker.com"));
+        assert!(!wildcard_cors.is_origin_allowed("https://evil.vercel.app"));
+        assert!(!wildcard_cors.is_origin_allowed("http://localhost:3000"));
+        // Legitimate production origin still allowed
+        assert!(wildcard_cors.is_origin_allowed("https://esapay.vercel.app"));
+    }
+
+    #[tokio::test]
+    async fn test_cors_preflight_and_headers_handling() {
+        let cors_config = CorsConfig::new(
+            true,
+            vec!["https://esapay-preview-pr-19.vercel.app".to_string()],
+        );
+        let app = Router::new()
+            .route("/api/test-preflight", post(|| async { "ok" }))
+            .layer(cors_config.build_cors_layer());
+
+        // 1. Legitimate preflight from exact production origin succeeds
+        let req_prod = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://esapay.vercel.app")
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "content-type, authorization, x-esa-api-key",
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_prod = app.clone().oneshot(req_prod).await.unwrap();
+        assert_eq!(resp_prod.status(), StatusCode::OK);
+        assert_eq!(
+            resp_prod
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://esapay.vercel.app")
+        );
+        assert_eq!(
+            resp_prod
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+
+        // 2. Legitimate preflight from configured preview origin succeeds
+        let req_preview = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://esapay-preview-pr-19.vercel.app")
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "content-type")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_preview = app.clone().oneshot(req_preview).await.unwrap();
+        assert_eq!(resp_preview.status(), StatusCode::OK);
+        assert_eq!(
+            resp_preview
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://esapay-preview-pr-19.vercel.app")
+        );
+
+        // 3. Preflight from arbitrary *.vercel.app origin is rejected (no allow-origin header)
+        let req_unauth = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "https://arbitrary-attacker.vercel.app")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_unauth = app.clone().oneshot(req_unauth).await.unwrap();
+        assert!(resp_unauth
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+
+        // 4. Preflight from HTTP production origin is rejected
+        let req_http = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "http://esapay.vercel.app")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_http = app.clone().oneshot(req_http).await.unwrap();
+        assert!(resp_http
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+
+        // 5. Preflight from localhost in production mode is rejected
+        let req_local = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/test-preflight")
+            .header("origin", "http://localhost:3000")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_local = app.oneshot(req_local).await.unwrap();
+        assert!(resp_local
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_webhook_first_seen_refund_returns_unapplied() {
+        let secret = "whsec_test_unapplied_01";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        let app = build_app(state);
+        let payload = serde_json::json!({
+            "id": "evt_api_first_seen_rfnd_01",
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_api_first_seen_01",
+                        "payment_id": "pay_api_first_seen_01",
+                        "amount": 2500,
+                        "currency": "INR",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = compute_test_signature(&body, secret);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(resp_json["status"], "unapplied");
+        assert_eq!(resp_json["unapplied"], true);
+        assert_eq!(resp_json["payment_id"], "pay_api_first_seen_01");
+
+        // Verify payment record was NOT fabricated in store
+        assert!(store
+            .get_payment_record("pay_api_first_seen_01")
+            .await
+            .unwrap()
+            .is_none());
     }
 }

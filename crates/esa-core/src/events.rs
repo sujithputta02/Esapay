@@ -18,9 +18,15 @@ pub enum PaymentEventType {
     OrderPaid,
     #[serde(rename = "refund.created")]
     RefundCreated,
+    #[serde(rename = "refund.processed")]
+    RefundProcessed,
+    #[serde(rename = "refund.failed")]
+    RefundFailed,
+    #[serde(rename = "refund.speed_changed")]
+    RefundSpeedChanged,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentEvent {
     pub event_id: String,
     pub event_type: PaymentEventType,
