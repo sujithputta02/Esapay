@@ -260,24 +260,44 @@ pub fn parse_webhook_payload_detailed(
                 }
 
                 match event_type {
-                    PaymentEventType::RefundProcessed if explicit == "failed" => {
-                        warn!("Contradictory refund event 'refund.processed' with status 'failed'");
+                    PaymentEventType::RefundProcessed if explicit != "processed" => {
+                        warn!(
+                            "Contradictory refund event 'refund.processed' with status '{}'",
+                            explicit
+                        );
                         return Err(WebhookError::ContradictoryRefundStatus {
                             event: "refund.processed".to_string(),
                             status: explicit.to_string(),
                         });
                     }
-                    PaymentEventType::RefundFailed if explicit == "processed" => {
-                        warn!("Contradictory refund event 'refund.failed' with status 'processed'");
+                    PaymentEventType::RefundFailed if explicit != "failed" => {
+                        warn!(
+                            "Contradictory refund event 'refund.failed' with status '{}'",
+                            explicit
+                        );
                         return Err(WebhookError::ContradictoryRefundStatus {
                             event: "refund.failed".to_string(),
                             status: explicit.to_string(),
                         });
                     }
-                    PaymentEventType::RefundCreated if explicit == "failed" => {
-                        warn!("Contradictory refund event 'refund.created' with status 'failed'");
+                    PaymentEventType::RefundCreated
+                        if explicit != "pending" && explicit != "processed" =>
+                    {
+                        warn!(
+                            "Contradictory refund event 'refund.created' with status '{}'",
+                            explicit
+                        );
                         return Err(WebhookError::ContradictoryRefundStatus {
                             event: "refund.created".to_string(),
+                            status: explicit.to_string(),
+                        });
+                    }
+                    PaymentEventType::RefundSpeedChanged if explicit == "failed" => {
+                        warn!(
+                            "Contradictory refund event 'refund.speed_changed' with status 'failed'"
+                        );
+                        return Err(WebhookError::ContradictoryRefundStatus {
+                            event: "refund.speed_changed".to_string(),
                             status: explicit.to_string(),
                         });
                     }
@@ -1170,6 +1190,90 @@ mod tests {
                 ref event,
                 ref status
             }) if event == "refund.created" && status == "failed"
+        ));
+
+        // 4. refund.processed with explicitly pending status -> rejected
+        let payload_proc_pend = serde_json::json!({
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_proc_pend",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_proc_pend",
+                        "status": "pending"
+                    }
+                }
+            }
+        });
+        let res_proc_pend = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_proc_pend).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res_proc_pend,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.processed" && status == "pending"
+        ));
+
+        // 5. refund.failed with explicitly pending status -> rejected
+        let payload_fail_pend = serde_json::json!({
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_fail_pend",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_fail_pend",
+                        "status": "pending"
+                    }
+                }
+            }
+        });
+        let res_fail_pend = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_fail_pend).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res_fail_pend,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.failed" && status == "pending"
+        ));
+
+        // 6. refund.speed_changed with explicitly failed status -> rejected
+        let payload_spd_fail = serde_json::json!({
+            "event": "refund.speed_changed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_spd_fail",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_spd_fail",
+                        "status": "failed"
+                    }
+                }
+            }
+        });
+        let res_spd_fail = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_spd_fail).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res_spd_fail,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.speed_changed" && status == "failed"
         ));
 
         // 4. refund.created with explicitly processed status -> supported (instant refund)

@@ -1090,6 +1090,50 @@ impl PaymentEntity {
         let refund_status = params.refund_status;
         let previous_state = params.previous_state;
         let now = params.now;
+        // Validate explicit refund status against event type to reject contradictory combinations
+        if let Some(st) = refund_status {
+            match st {
+                "processed" | "pending" | "failed" => {}
+                other => {
+                    return Err(PaymentError::InvalidRefundStatus {
+                        status: other.to_string(),
+                    });
+                }
+            }
+
+            match event_type {
+                PaymentEventType::RefundProcessed if st != "processed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundProcessed".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                PaymentEventType::RefundFailed if st != "failed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundFailed".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                PaymentEventType::RefundCreated if st != "pending" && st != "processed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundCreated".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                PaymentEventType::RefundSpeedChanged if st == "failed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundSpeedChanged".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
         if event_type == &PaymentEventType::RefundSpeedChanged {
             if let Some(r_id) = refund_id {
                 let clean_r_id = r_id.trim();
@@ -1106,43 +1150,6 @@ impl PaymentEntity {
                 new_state: self.state,
                 reason: "Refund processing speed updated; monetary balance unchanged".to_string(),
             });
-        }
-
-        // Validate explicit refund status against event type to reject contradictory combinations
-        if let Some(st) = refund_status {
-            match st {
-                "processed" | "pending" | "failed" => {}
-                other => {
-                    return Err(PaymentError::InvalidRefundStatus {
-                        status: other.to_string(),
-                    });
-                }
-            }
-
-            match event_type {
-                PaymentEventType::RefundProcessed if st == "failed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundProcessed".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                PaymentEventType::RefundFailed if st == "processed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundFailed".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                PaymentEventType::RefundCreated if st == "failed" => {
-                    return Err(PaymentError::ContradictoryRefundStatus {
-                        refund_id: refund_id.unwrap_or_default().to_string(),
-                        event_type: "RefundCreated".to_string(),
-                        status: st.to_string(),
-                    });
-                }
-                _ => {}
-            }
         }
 
         let is_processed = event_type == &PaymentEventType::RefundProcessed
@@ -2283,16 +2290,83 @@ mod tests {
             })
         );
 
-        // 4. Unknown/unsupported status string -> rejected
+        // 4. RefundProcessed with explicitly "pending" status -> rejected
         let err4 = payment.apply_event_with_refund(
-            "evt_bad_st",
+            "evt_proc_pend",
             &PaymentEventType::RefundProcessed,
             Some(3000),
             Some("rfnd_contra_4"),
-            Some("bogus_state"),
+            Some("pending"),
         );
         assert_eq!(
             err4,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_4".into(),
+                event_type: "RefundProcessed".into(),
+                status: "pending".into(),
+            })
+        );
+        assert_eq!(payment.refunded_amount_minor, 0);
+
+        // 5. RefundFailed with explicitly "pending" status -> rejected
+        let err5 = payment.apply_event_with_refund(
+            "evt_fail_pend",
+            &PaymentEventType::RefundFailed,
+            Some(3000),
+            Some("rfnd_contra_5"),
+            Some("pending"),
+        );
+        assert_eq!(
+            err5,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_5".into(),
+                event_type: "RefundFailed".into(),
+                status: "pending".into(),
+            })
+        );
+        assert_eq!(payment.refunded_amount_minor, 0);
+
+        // 6. RefundSpeedChanged with explicitly "failed" status -> rejected
+        let err6 = payment.apply_event_with_refund(
+            "evt_spd_fail",
+            &PaymentEventType::RefundSpeedChanged,
+            Some(3000),
+            Some("rfnd_contra_6"),
+            Some("failed"),
+        );
+        assert_eq!(
+            err6,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_6".into(),
+                event_type: "RefundSpeedChanged".into(),
+                status: "failed".into(),
+            })
+        );
+
+        // 7. Unknown/unsupported status string -> rejected
+        let err7 = payment.apply_event_with_refund(
+            "evt_bad_st",
+            &PaymentEventType::RefundProcessed,
+            Some(3000),
+            Some("rfnd_contra_7"),
+            Some("bogus_state"),
+        );
+        assert_eq!(
+            err7,
+            Err(PaymentError::InvalidRefundStatus {
+                status: "bogus_state".into(),
+            })
+        );
+
+        let err8 = payment.apply_event_with_refund(
+            "evt_spd_bad_st",
+            &PaymentEventType::RefundSpeedChanged,
+            Some(3000),
+            Some("rfnd_contra_8"),
+            Some("bogus_state"),
+        );
+        assert_eq!(
+            err8,
             Err(PaymentError::InvalidRefundStatus {
                 status: "bogus_state".into(),
             })

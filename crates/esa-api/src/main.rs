@@ -1,7 +1,7 @@
 use axum::{
     body::Bytes,
     extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -20,7 +20,7 @@ use esa_state::{
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn, Level};
 
@@ -263,48 +263,58 @@ pub(crate) fn is_demo_mutation_allowed() -> bool {
 }
 
 fn configure_cors() -> CorsLayer {
-    let allowed_origins = std::env::var("ALLOWED_ORIGINS").ok();
-    let mut origins = Vec::new();
+    let explicit_allowed: Vec<String> = std::env::var("ALLOWED_ORIGINS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
-    if let Some(origins_str) = allowed_origins {
-        for origin in origins_str.split(',') {
-            let trimmed = origin.trim();
-            if !trimmed.is_empty() {
-                if let Ok(header_val) = trimmed.parse::<HeaderValue>() {
-                    origins.push(header_val);
-                }
+    let allow_origin = AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+        if let Ok(origin_str) = origin.to_str() {
+            let origin_lower = origin_str.to_lowercase();
+            // Explicitly allowed origins from environment (or wildcard)
+            if explicit_allowed
+                .iter()
+                .any(|allowed| allowed == "*" || allowed.eq_ignore_ascii_case(origin_str))
+            {
+                return true;
+            }
+            // Allow localhost and 127.0.0.1 on any port for local development
+            if origin_lower.starts_with("http://localhost:")
+                || origin_lower == "http://localhost"
+                || origin_lower.starts_with("http://127.0.0.1:")
+                || origin_lower == "http://127.0.0.1"
+                || origin_lower.starts_with("https://localhost:")
+                || origin_lower == "https://localhost"
+            {
+                return true;
+            }
+            // Allow production and preview Vercel domains for Esapay
+            if origin_lower == "https://esapay.vercel.app"
+                || origin_lower == "http://esapay.vercel.app"
+                || origin_lower.ends_with(".vercel.app")
+            {
+                return true;
             }
         }
-    }
-
-    if origins.is_empty() {
-        origins = vec![
-            "http://localhost:5173".parse().unwrap(),
-            "http://127.0.0.1:5173".parse().unwrap(),
-            "http://localhost:3000".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-            "http://localhost:8080".parse().unwrap(),
-            "http://127.0.0.1:8080".parse().unwrap(),
-        ];
-    }
+        false
+    });
 
     CorsLayer::new()
-        .allow_origin(origins)
+        .allow_origin(allow_origin)
         .allow_methods([
             Method::GET,
             Method::POST,
             Method::PUT,
             Method::DELETE,
+            Method::PATCH,
             Method::OPTIONS,
         ])
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::ACCEPT,
-            header::ORIGIN,
-            HeaderName::from_static("x-api-key"),
-            HeaderName::from_static("x-razorpay-signature"),
-        ])
+        .allow_headers(AllowHeaders::mirror_request())
         .allow_credentials(true)
 }
 
@@ -1263,6 +1273,22 @@ async fn razorpay_webhook(
             })),
         )
             .into_response(),
+        Ok(WebhookProcessingResult::MetadataRecorded {
+            inbox_id,
+            provider,
+            provider_event_id,
+            payment_id,
+            reason,
+        }) => Json(serde_json::json!({
+            "status": "accepted",
+            "inbox_id": inbox_id,
+            "provider": provider,
+            "provider_event_id": provider_event_id,
+            "payment_id": payment_id,
+            "metadata_recorded": true,
+            "message": reason,
+        }))
+        .into_response(),
         Err(WebhookStoreError::Mismatch(err)) => {
             warn!("Webhook entity mismatch rejected: {}", err);
             (
