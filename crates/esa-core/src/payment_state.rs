@@ -725,6 +725,8 @@ pub struct RefundEntity {
     pub amount_minor: u64,
     pub currency: String,
     pub status: String, // "pending", "processed", "failed"
+    #[serde(default)]
+    pub applied_to_balance: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1081,6 +1083,26 @@ impl PaymentEntity {
         let previous_state = params.previous_state;
         let now = params.now;
         if event_type == &PaymentEventType::RefundSpeedChanged {
+            if let Some(r_id) = refund_id {
+                let clean_r_id = r_id.trim();
+                if !clean_r_id.is_empty() {
+                    if let Some(existing) =
+                        self.refunds.iter_mut().find(|r| r.refund_id == clean_r_id)
+                    {
+                        existing.updated_at = now;
+                    } else if let Some(amt) = refund_amount_minor {
+                        self.refunds.push(RefundEntity {
+                            refund_id: clean_r_id.to_string(),
+                            amount_minor: amt,
+                            currency: self.currency.clone(),
+                            status: "pending".to_string(),
+                            applied_to_balance: false,
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+                }
+            }
             return Ok(TransitionOutcome::Applied {
                 previous_state,
                 new_state: self.state,
@@ -1150,6 +1172,7 @@ impl PaymentEntity {
                                     .refunded_amount_minor
                                     .saturating_add(existing.amount_minor);
                                 existing.status = "processed".to_string();
+                                existing.applied_to_balance = true;
                                 existing.updated_at = now;
                                 self.updated_at = now;
                                 if self.refunded_amount_minor >= self.amount_minor {
@@ -1167,6 +1190,7 @@ impl PaymentEntity {
                                 });
                             } else if is_failed {
                                 existing.status = "failed".to_string();
+                                existing.applied_to_balance = false;
                                 existing.updated_at = now;
                                 self.updated_at = now;
                                 return Ok(TransitionOutcome::Applied {
@@ -1205,6 +1229,7 @@ impl PaymentEntity {
                                     .refunded_amount_minor
                                     .saturating_add(existing.amount_minor);
                                 existing.status = "processed".to_string();
+                                existing.applied_to_balance = true;
                                 existing.updated_at = now;
                                 self.updated_at = now;
                                 if self.refunded_amount_minor >= self.amount_minor {
@@ -1221,10 +1246,10 @@ impl PaymentEntity {
                                     ),
                                 });
                             } else {
-                                return Ok(TransitionOutcome::DuplicateIgnored {
+                                return Ok(TransitionOutcome::LateEventIgnored {
                                     current_state: self.state,
                                     reason: format!(
-                                        "Refund '{}' is already marked as failed",
+                                        "Refund '{}' is already marked as failed; stale or duplicate event ignored without downgrading",
                                         clean_r_id
                                     ),
                                 });
@@ -1278,6 +1303,7 @@ impl PaymentEntity {
                         amount_minor: refund,
                         currency: self.currency.clone(),
                         status: "processed".to_string(),
+                        applied_to_balance: true,
                         created_at: now,
                         updated_at: now,
                     });
@@ -1301,6 +1327,7 @@ impl PaymentEntity {
                         amount_minor: refund,
                         currency: self.currency.clone(),
                         status: "failed".to_string(),
+                        applied_to_balance: false,
                         created_at: now,
                         updated_at: now,
                     });
@@ -1320,6 +1347,7 @@ impl PaymentEntity {
                         amount_minor: refund,
                         currency: self.currency.clone(),
                         status: "pending".to_string(),
+                        applied_to_balance: false,
                         created_at: now,
                         updated_at: now,
                     });
