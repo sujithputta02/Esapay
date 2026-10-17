@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, Query, State},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -673,8 +673,14 @@ fn build_app(app_state: AppState) -> Router {
         .route("/api/v1/workloads/:id", get(get_workload))
         .route("/api/events/payment", post(ingest_payment_event))
         .route("/api/v1/events/payment", post(ingest_payment_event))
-        .route("/api/razorpay/webhook", post(razorpay_webhook))
-        .route("/api/v1/razorpay/webhook", post(razorpay_webhook))
+        .route(
+            "/api/razorpay/webhook",
+            post(razorpay_webhook).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/razorpay/webhook",
+            post(razorpay_webhook).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
+        )
         .route("/api/razorpay/status", get(razorpay_status))
         .route("/api/v1/razorpay/status", get(razorpay_status))
         .route("/api/razorpay/orders", post(razorpay_create_order))
@@ -951,22 +957,68 @@ async fn ingest_payment_event(
         "message": "Payment processed and workload metrics automatically adjusted"
     })))
 }
-/// Resolves the WebhookStore based on the optional DATABASE_URL string.
-/// FAILS CLOSED: If DATABASE_URL is set and not empty or "memory", connection
-/// and schema initialization must succeed; it will NEVER silently fall back
-/// to an in-memory store.
-pub async fn resolve_webhook_store(
+/// Resolves the WebhookStore based on the optional DATABASE_URL string and production flag.
+/// FAILS CLOSED in production:
+/// - If in production mode, a reachable PostgreSQL DATABASE_URL and successful schema
+///   initialization are STRICTLY REQUIRED. Unset, blank, or 'memory' database URLs fail closed.
+/// - In development or test mode, explicit 'memory' or absent/blank DATABASE_URL selects
+///   InMemoryWebhookStore. If a PostgreSQL DATABASE_URL is configured, connection and schema
+///   initialization must succeed or it fails closed (never silently falling back to memory).
+pub async fn resolve_webhook_store_with_mode(
     db_url_opt: Option<&str>,
+    is_production: bool,
 ) -> anyhow::Result<Arc<dyn WebhookStore>> {
-    if let Some(db_url) = db_url_opt {
-        let trimmed = db_url.trim();
-        if !trimmed.is_empty() && trimmed != "memory" {
-            let pool = sqlx::PgPool::connect(trimmed).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "DATABASE_URL is configured but connection failed: {}. Failing closed.",
-                    e
-                )
-            })?;
+    let trimmed = db_url_opt.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    if is_production {
+        match trimmed {
+            Some("memory") => {
+                anyhow::bail!(
+                    "In-memory webhook store ('memory') is prohibited in production. A reachable PostgreSQL DATABASE_URL is strictly required."
+                );
+            }
+            None => {
+                anyhow::bail!(
+                    "DATABASE_URL is missing or blank in production. A reachable PostgreSQL DATABASE_URL is strictly required."
+                );
+            }
+            Some(db_url) => {
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .acquire_timeout(std::time::Duration::from_secs(3))
+                    .connect(db_url)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Production DATABASE_URL connection failed: {}. Failing closed.",
+                            e
+                        )
+                    })?;
+                PostgresWebhookStore::init_schema(&pool)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                        "Production DATABASE_URL schema initialization failed: {}. Failing closed.",
+                        e
+                    )
+                    })?;
+                info!("Connected durable PostgresWebhookStore to production database");
+                return Ok(Arc::new(PostgresWebhookStore::new(pool)));
+            }
+        }
+    }
+
+    if let Some(db_url) = trimmed {
+        if db_url != "memory" {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_secs(3))
+                .connect(db_url)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "DATABASE_URL is configured but connection failed: {}. Failing closed.",
+                        e
+                    )
+                })?;
             PostgresWebhookStore::init_schema(&pool).await.map_err(|e| {
                 anyhow::anyhow!(
                     "DATABASE_URL is configured but schema initialization failed: {}. Failing closed.",
@@ -978,8 +1030,14 @@ pub async fn resolve_webhook_store(
         }
     }
 
-    info!("DATABASE_URL is unset, empty, or 'memory' — using InMemoryWebhookStore");
+    info!("Using InMemoryWebhookStore for development/test mode");
     Ok(Arc::new(InMemoryWebhookStore::new()))
+}
+
+pub async fn resolve_webhook_store(
+    db_url_opt: Option<&str>,
+) -> anyhow::Result<Arc<dyn WebhookStore>> {
+    resolve_webhook_store_with_mode(db_url_opt, is_production_mode()).await
 }
 
 async fn razorpay_webhook(
@@ -1131,7 +1189,9 @@ async fn razorpay_webhook(
         payment_id: &parsed.payment_id,
         amount_minor: parsed.amount_minor,
         currency: &parsed.currency,
+        refund_id: parsed.refund_id.as_deref(),
         refund_amount_minor: parsed.refund_amount_minor,
+        refund_status: Some(parsed.status.as_str()),
         payload: &payload_val,
     };
     let process_res = state.webhook_store.process_webhook_event(&params).await;
@@ -5499,33 +5559,91 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_resolve_webhook_store_behavior() {
-        // Unset, empty, or "memory" resolve to InMemoryWebhookStore
-        let s_none = resolve_webhook_store(None).await;
+        // 1. Explicit development/test mode: unset, empty, or "memory" resolve to InMemoryWebhookStore
+        let s_none = resolve_webhook_store_with_mode(None, false).await;
         assert!(s_none.is_ok());
 
-        let s_empty = resolve_webhook_store(Some("")).await;
+        let s_empty = resolve_webhook_store_with_mode(Some(""), false).await;
         assert!(s_empty.is_ok());
 
-        let s_spaces = resolve_webhook_store(Some("   ")).await;
+        let s_spaces = resolve_webhook_store_with_mode(Some("   "), false).await;
         assert!(s_spaces.is_ok());
 
-        let s_mem = resolve_webhook_store(Some("memory")).await;
+        let s_mem = resolve_webhook_store_with_mode(Some("memory"), false).await;
         assert!(s_mem.is_ok());
 
-        // Invalid database URL must FAIL CLOSED and return Err, never silently falling back to in-memory
-        let s_invalid =
-            resolve_webhook_store(Some("postgres://invalid:invalid@localhost:59999/esa_test"))
-                .await;
+        // 2. Production mode with missing DATABASE_URL -> MUST FAIL CLOSED
+        let prod_none = resolve_webhook_store_with_mode(None, true).await;
         assert!(
-            s_invalid.is_err(),
-            "Must fail closed if DATABASE_URL connection fails"
+            prod_none.is_err(),
+            "Production must fail closed when DATABASE_URL is missing"
         );
-        let err_msg = s_invalid.err().unwrap().to_string();
+        assert!(prod_none
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing or blank"));
+
+        // 3. Production mode with blank DATABASE_URL -> MUST FAIL CLOSED
+        let prod_blank = resolve_webhook_store_with_mode(Some("   "), true).await;
+        assert!(
+            prod_blank.is_err(),
+            "Production must fail closed when DATABASE_URL is blank"
+        );
+
+        // 4. Production mode with explicit 'memory' -> MUST FAIL CLOSED
+        let prod_mem = resolve_webhook_store_with_mode(Some("memory"), true).await;
+        assert!(
+            prod_mem.is_err(),
+            "Production must fail closed when configured with 'memory'"
+        );
+        assert!(prod_mem
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("prohibited in production"));
+
+        // 5. Production mode with invalid DATABASE_URL -> MUST FAIL CLOSED
+        let prod_invalid = resolve_webhook_store_with_mode(
+            Some("postgres://invalid:invalid@localhost:59999/esa_test"),
+            true,
+        )
+        .await;
+        assert!(
+            prod_invalid.is_err(),
+            "Production must fail closed when DATABASE_URL connection fails"
+        );
+
+        // 6. Non-production mode with invalid database URL must also FAIL CLOSED (never silently fallback)
+        let dev_invalid = resolve_webhook_store_with_mode(
+            Some("postgres://invalid:invalid@localhost:59999/esa_test"),
+            false,
+        )
+        .await;
+        assert!(
+            dev_invalid.is_err(),
+            "Must fail closed if configured DATABASE_URL connection fails"
+        );
+        let err_msg = dev_invalid.err().unwrap().to_string();
         assert!(
             err_msg.contains("Failing closed"),
             "Error message must specify failing closed: {}",
             err_msg
         );
+
+        // 7. Successful PostgreSQL initialization if test DB is reachable
+        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+            if !db_url.trim().is_empty()
+                && db_url != "memory"
+                && sqlx::PgPool::connect(&db_url).await.is_ok()
+            {
+                let prod_pg = resolve_webhook_store_with_mode(Some(&db_url), true).await;
+                assert!(
+                    prod_pg.is_ok(),
+                    "Production with reachable PostgreSQL must succeed"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -5753,5 +5871,326 @@ mod integration_tests {
             .expect("Payment record must exist");
         assert_eq!(payment.state, PaymentState::Captured);
         assert_eq!(payment.refunded_amount_minor, 0);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_event_id_conflicting_payload_rejected_by_api() {
+        let secret = "whsec_test_secret_dup_payload_77";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        let app = build_app(state.clone());
+        let payload_orig = serde_json::json!({
+            "id": "evt_dup_api_101",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_dup_api_test",
+                        "amount": 5000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi",
+                        "notes": { "intent": "original" }
+                    }
+                }
+            }
+        });
+        let body_orig = serde_json::to_vec(&payload_orig).unwrap();
+        let sig_orig = compute_test_signature(&body_orig, secret);
+
+        // 1. Initial delivery -> 200 OK
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_orig)
+            .body(axum::body::Body::from(body_orig.clone()))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // 2. Exact duplicate delivery -> 200 OK with already_processed
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_orig)
+            .body(axum::body::Body::from(body_orig))
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(resp2.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2.get("status").and_then(|v| v.as_str()),
+            Some("already_processed")
+        );
+
+        // 3. Same event ID with conflicting payload (tampered notes) -> 409 Conflict
+        let payload_tampered = serde_json::json!({
+            "id": "evt_dup_api_101", // SAME event ID!
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_dup_api_test", // SAME payment ID!
+                        "amount": 5000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "method": "upi",
+                        "notes": { "intent": "tampered_payload" }
+                    }
+                }
+            }
+        });
+        let body_tampered = serde_json::to_vec(&payload_tampered).unwrap();
+        let sig_tampered = compute_test_signature(&body_tampered, secret);
+
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/webhook")
+            .header("content-type", "application/json")
+            .header("x-razorpay-signature", &sig_tampered)
+            .body(axum::body::Body::from(body_tampered))
+            .unwrap();
+        let resp3 = app.oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::CONFLICT);
+        let b3 = axum::body::to_bytes(resp3.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+        assert_eq!(
+            j3.get("error").and_then(|v| v.as_str()),
+            Some("entity_mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refund_api_idempotency_and_lifecycle() {
+        let secret = "whsec_test_secret_rf_api_44";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial payment capture of 10000 paise
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_cap_api_1",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Pending refund delivery (refund.created with pending status) -> 200 OK, balance UNCHANGED
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_pending_api",
+                "event": "refund.created",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1",
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "pending"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payment.refunded_amount_minor, 0,
+                "Pending refund must not increase refunded amount"
+            );
+            assert_eq!(payment.state, PaymentState::Captured);
+        }
+
+        // 3. Processed refund delivery (refund.processed) -> 200 OK, balance INCREMENTED
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_proc_api", // Different event ID!
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(payment.refunded_amount_minor, 4000);
+            assert_eq!(payment.state, PaymentState::PartiallyRefunded);
+        }
+
+        // 4. Duplicate delivery of processed refund with ANOTHER event ID -> 200 OK, balance NOT double-counted
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_proc_another_delivery", // Another event ID!
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 4000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let payment = store
+                .get_payment_record("pay_rf_api_100")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payment.refunded_amount_minor, 4000,
+                "Refund must not be double counted!"
+            );
+        }
+
+        // 5. Reused refund ID with conflicting amount -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_rf_conflict_amt_delivery",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_entity_api_1", // Same refund ID!
+                            "payment_id": "pay_rf_api_100",
+                            "amount": 9999, // Conflicting amount!
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_rf_api_100",
+                            "amount": 10000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+        }
     }
 }

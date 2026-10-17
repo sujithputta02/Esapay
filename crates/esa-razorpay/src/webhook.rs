@@ -173,10 +173,13 @@ pub fn parse_webhook_payload_detailed(
         refund_amount_minor,
         entity_for_region,
     ) = match event_type {
-        PaymentEventType::RefundCreated => {
+        PaymentEventType::RefundCreated
+        | PaymentEventType::RefundProcessed
+        | PaymentEventType::RefundFailed
+        | PaymentEventType::RefundSpeedChanged => {
             let refund_entity = root.pointer("/payload/refund/entity").ok_or_else(|| {
                 WebhookError::MalformedPayload(
-                    "Missing '/payload/refund/entity' in refund.created webhook".to_string(),
+                    "Missing '/payload/refund/entity' in refund webhook".to_string(),
                 )
             })?;
 
@@ -188,6 +191,12 @@ pub fn parse_webhook_payload_detailed(
                 })?
                 .trim()
                 .to_string();
+
+            if r_id.is_empty() {
+                return Err(WebhookError::MalformedPayload(
+                    "Refund entity 'id' cannot be empty".to_string(),
+                ));
+            }
 
             let r_amount = refund_entity
                 .get("amount")
@@ -215,6 +224,12 @@ pub fn parse_webhook_payload_detailed(
                 .trim()
                 .to_string();
 
+            if p_id.is_empty() {
+                return Err(WebhookError::MalformedPayload(
+                    "Payment ID for refund cannot be empty".to_string(),
+                ));
+            }
+
             let curr = refund_entity
                 .get("currency")
                 .and_then(|v| v.as_str())
@@ -222,10 +237,16 @@ pub fn parse_webhook_payload_detailed(
                 .trim()
                 .to_string();
 
+            let default_status = match event_type {
+                PaymentEventType::RefundProcessed => "processed",
+                PaymentEventType::RefundFailed => "failed",
+                _ => "pending",
+            };
+
             let st = refund_entity
                 .get("status")
                 .and_then(|v| v.as_str())
-                .unwrap_or("processed")
+                .unwrap_or(default_status)
                 .trim()
                 .to_string();
 
@@ -370,30 +391,40 @@ pub fn parse_webhook_payload_detailed(
 
     // Determine provider_event_id:
     // 1. Explicit header X-Razorpay-Event-Id if present
-    // 2. Top-level 'id' in JSON if present
-    // 3. Top-level 'event_id' in JSON if present
-    // 4. Proven-unique fallback identifier incorporating cryptographic payload hash to prevent collisions
+    // 2. In-body 'id' or 'event_id' if present
+    // 3. Fallback SHA-256 digest over the raw payload body
+    // Policy for discrepancy: If both header and in-body identifier are present, they MUST match.
+    // Discrepancy is rejected as MalformedPayload to prevent replay ambiguity or spoofing.
+    let in_body_id = root
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| root.get("event_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let provider_event_id = if let Some(hdr) = event_id_header {
-        let clean = hdr.trim();
-        if !clean.is_empty() {
-            clean.to_string()
+        let clean_hdr = hdr.trim();
+        if !clean_hdr.is_empty() {
+            if let Some(ref body_id) = in_body_id {
+                if body_id != clean_hdr {
+                    warn!(
+                        "Header X-Razorpay-Event-Id '{}' conflicts with body event ID '{}'",
+                        clean_hdr, body_id
+                    );
+                    return Err(WebhookError::MalformedPayload(format!(
+                        "Header X-Razorpay-Event-Id '{}' conflicts with body event ID '{}'",
+                        clean_hdr, body_id
+                    )));
+                }
+            }
+            clean_hdr.to_string()
+        } else if let Some(body_id) = in_body_id {
+            body_id
         } else {
             derive_proven_fallback_event_id(event_name, &payment_id, refund_id.as_deref(), body)
         }
-    } else if let Some(root_id) = root.get("id").and_then(|v| v.as_str()) {
-        let clean = root_id.trim();
-        if !clean.is_empty() {
-            clean.to_string()
-        } else {
-            derive_proven_fallback_event_id(event_name, &payment_id, refund_id.as_deref(), body)
-        }
-    } else if let Some(root_eid) = root.get("event_id").and_then(|v| v.as_str()) {
-        let clean = root_eid.trim();
-        if !clean.is_empty() {
-            clean.to_string()
-        } else {
-            derive_proven_fallback_event_id(event_name, &payment_id, refund_id.as_deref(), body)
-        }
+    } else if let Some(body_id) = in_body_id {
+        body_id
     } else {
         derive_proven_fallback_event_id(event_name, &payment_id, refund_id.as_deref(), body)
     };
@@ -441,9 +472,8 @@ pub fn parse_webhook_payload_detailed(
     })
 }
 
-/// Derive a deterministic, collision-resistant event identifier when the provider does not supply
-/// an explicit header or top-level event ID. Incorporates 64 bits of cryptographic SHA-256 entropy
-/// computed over the exact raw body bytes to guarantee distinct events never collide.
+/// Derive a deterministic fallback event identifier based on a full 256-bit SHA-256 digest
+/// of the raw webhook body when the provider does not supply an explicit header or body event ID.
 fn derive_proven_fallback_event_id(
     event_name: &str,
     payment_id: &str,
@@ -454,7 +484,7 @@ fn derive_proven_fallback_event_id(
     let mut hasher = Sha256::new();
     hasher.update(body);
     let digest = hasher.finalize();
-    let body_hash = hex::encode(&digest[..8]);
+    let body_hash = hex::encode(digest);
 
     if let Some(r_id) = refund_id {
         format!("rzp_evt_refund_{}_{}", r_id, body_hash)
@@ -535,8 +565,11 @@ fn map_event_type(name: &str) -> Result<PaymentEventType, WebhookError> {
         "payment.captured" => Ok(PaymentEventType::PaymentCaptured),
         "payment.failed" => Ok(PaymentEventType::PaymentFailed),
         "order.paid" => Ok(PaymentEventType::OrderPaid),
-        "refund.created" | "refund.processed" | "refund.speed_processed" => {
-            Ok(PaymentEventType::RefundCreated)
+        "refund.created" => Ok(PaymentEventType::RefundCreated),
+        "refund.processed" => Ok(PaymentEventType::RefundProcessed),
+        "refund.failed" => Ok(PaymentEventType::RefundFailed),
+        "refund.speed_changed" | "refund.speed_processed" => {
+            Ok(PaymentEventType::RefundSpeedChanged)
         }
         other => {
             warn!("Rejected unsupported Razorpay event type: {}", other);
@@ -646,9 +679,8 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_event_id_from_header_precedence() {
+    fn test_provider_event_id_from_header() {
         let payload = serde_json::json!({
-            "id": "evt_in_body_123",
             "event": "payment.captured",
             "payload": {
                 "payment": {
@@ -665,6 +697,49 @@ mod tests {
         let parsed = parse_webhook_payload_detailed(&body, Some("evt_from_header_456"), None)
             .expect("Should parse");
         assert_eq!(parsed.provider_event_id, "evt_from_header_456");
+    }
+
+    #[test]
+    fn test_provider_event_id_header_and_body_match() {
+        let payload = serde_json::json!({
+            "id": "evt_matching_123",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_test_hdr",
+                        "amount": 25000,
+                        "currency": "INR",
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let parsed = parse_webhook_payload_detailed(&body, Some("evt_matching_123"), None)
+            .expect("Should parse");
+        assert_eq!(parsed.provider_event_id, "evt_matching_123");
+    }
+
+    #[test]
+    fn test_provider_event_id_header_and_body_conflict_fails() {
+        let payload = serde_json::json!({
+            "id": "evt_in_body_123",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_test_hdr",
+                        "amount": 25000,
+                        "currency": "INR",
+                        "status": "captured"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let res = parse_webhook_payload_detailed(&body, Some("evt_from_header_456"), None);
+        assert!(matches!(res, Err(WebhookError::MalformedPayload(_))));
     }
 
     #[test]
@@ -892,5 +967,94 @@ mod tests {
         let res_failed = payment_entity_to_event(&entity_failed).unwrap();
         assert_eq!(res_failed.event_type, PaymentEventType::PaymentFailed);
         assert!(!res_failed.success);
+    }
+
+    #[test]
+    fn test_refund_processed_and_failed_webhook_parsing() {
+        let payload_proc = serde_json::json!({
+            "id": "evt_rfnd_proc_1",
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_proc_100",
+                        "amount": 3000,
+                        "currency": "INR",
+                        "payment_id": "pay_test_orig",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+        let body_proc = serde_json::to_vec(&payload_proc).unwrap();
+        let parsed_proc = parse_webhook_payload_detailed(&body_proc, None, None).unwrap();
+        assert_eq!(parsed_proc.event_type, PaymentEventType::RefundProcessed);
+        assert_eq!(parsed_proc.refund_id.as_deref(), Some("rfnd_proc_100"));
+        assert_eq!(parsed_proc.refund_amount_minor, Some(3000));
+        assert_eq!(parsed_proc.status, "processed");
+
+        let payload_failed = serde_json::json!({
+            "id": "evt_rfnd_fail_1",
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_fail_200",
+                        "amount": 3000,
+                        "currency": "INR",
+                        "payment_id": "pay_test_orig",
+                        "status": "failed"
+                    }
+                }
+            }
+        });
+        let body_failed = serde_json::to_vec(&payload_failed).unwrap();
+        let parsed_failed = parse_webhook_payload_detailed(&body_failed, None, None).unwrap();
+        assert_eq!(parsed_failed.event_type, PaymentEventType::RefundFailed);
+        assert_eq!(parsed_failed.refund_id.as_deref(), Some("rfnd_fail_200"));
+        assert_eq!(parsed_failed.status, "failed");
+
+        let payload_speed = serde_json::json!({
+            "id": "evt_rfnd_spd_1",
+            "event": "refund.speed_changed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_spd_300",
+                        "amount": 3000,
+                        "currency": "INR",
+                        "payment_id": "pay_test_orig",
+                        "status": "pending"
+                    }
+                }
+            }
+        });
+        let body_speed = serde_json::to_vec(&payload_speed).unwrap();
+        let parsed_speed = parse_webhook_payload_detailed(&body_speed, None, None).unwrap();
+        assert_eq!(
+            parsed_speed.event_type,
+            PaymentEventType::RefundSpeedChanged
+        );
+        assert_eq!(parsed_speed.refund_id.as_deref(), Some("rfnd_spd_300"));
+    }
+
+    #[test]
+    fn test_refund_empty_id_rejected() {
+        let payload = serde_json::json!({
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "   ",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_123"
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let res = parse_webhook_payload_detailed(&body, None, None);
+        assert!(matches!(res, Err(WebhookError::MalformedPayload(_))));
     }
 }
