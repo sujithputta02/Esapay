@@ -616,31 +616,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize API rate limiter (Token-bucket protection against abuse/DDoS)
     let rate_limiter = rate_limiter::ApiRateLimiter::new();
 
-    // Initialize durable webhook inbox and payment record store
-    let webhook_store: Arc<dyn WebhookStore> = if let Ok(db_url) = std::env::var("DATABASE_URL") {
-        if !db_url.trim().is_empty() && db_url != "memory" {
-            match sqlx::PgPool::connect(&db_url).await {
-                Ok(pool) => {
-                    if let Err(e) = PostgresWebhookStore::init_schema(&pool).await {
-                        warn!("Failed to initialize Postgres webhook schema: {}", e);
-                    }
-                    info!("Connected durable PostgresWebhookStore to database");
-                    Arc::new(PostgresWebhookStore::new(pool))
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to connect to DATABASE_URL: {} — falling back to InMemoryWebhookStore",
-                        e
-                    );
-                    Arc::new(InMemoryWebhookStore::new())
-                }
-            }
-        } else {
-            Arc::new(InMemoryWebhookStore::new())
-        }
-    } else {
-        Arc::new(InMemoryWebhookStore::new())
-    };
+    // Initialize durable webhook inbox and payment record store (fails closed if DATABASE_URL is set but DB fails)
+    let webhook_store: Arc<dyn WebhookStore> =
+        resolve_webhook_store(std::env::var("DATABASE_URL").ok().as_deref()).await?;
 
     // Create app state
     let app_state = AppState {
@@ -973,6 +951,36 @@ async fn ingest_payment_event(
         "message": "Payment processed and workload metrics automatically adjusted"
     })))
 }
+/// Resolves the WebhookStore based on the optional DATABASE_URL string.
+/// FAILS CLOSED: If DATABASE_URL is set and not empty or "memory", connection
+/// and schema initialization must succeed; it will NEVER silently fall back
+/// to an in-memory store.
+pub async fn resolve_webhook_store(
+    db_url_opt: Option<&str>,
+) -> anyhow::Result<Arc<dyn WebhookStore>> {
+    if let Some(db_url) = db_url_opt {
+        let trimmed = db_url.trim();
+        if !trimmed.is_empty() && trimmed != "memory" {
+            let pool = sqlx::PgPool::connect(trimmed).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "DATABASE_URL is configured but connection failed: {}. Failing closed.",
+                    e
+                )
+            })?;
+            PostgresWebhookStore::init_schema(&pool).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "DATABASE_URL is configured but schema initialization failed: {}. Failing closed.",
+                    e
+                )
+            })?;
+            info!("Connected durable PostgresWebhookStore to database");
+            return Ok(Arc::new(PostgresWebhookStore::new(pool)));
+        }
+    }
+
+    info!("DATABASE_URL is unset, empty, or 'memory' — using InMemoryWebhookStore");
+    Ok(Arc::new(InMemoryWebhookStore::new()))
+}
 
 async fn razorpay_webhook(
     State(state): State<AppState>,
@@ -1185,6 +1193,17 @@ async fn razorpay_webhook(
             })),
         )
             .into_response(),
+        Err(WebhookStoreError::Mismatch(err)) => {
+            warn!("Webhook entity mismatch rejected: {}", err);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "entity_mismatch",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
         Err(WebhookStoreError::PaymentState(err)) => {
             warn!("Payment state transition rejected: {}", err);
             (
@@ -5476,5 +5495,263 @@ mod integration_tests {
         let resp = app.oneshot(req).await.unwrap();
         // Server MUST return 500 so upstream provider retries safely
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_webhook_store_behavior() {
+        // Unset, empty, or "memory" resolve to InMemoryWebhookStore
+        let s_none = resolve_webhook_store(None).await;
+        assert!(s_none.is_ok());
+
+        let s_empty = resolve_webhook_store(Some("")).await;
+        assert!(s_empty.is_ok());
+
+        let s_spaces = resolve_webhook_store(Some("   ")).await;
+        assert!(s_spaces.is_ok());
+
+        let s_mem = resolve_webhook_store(Some("memory")).await;
+        assert!(s_mem.is_ok());
+
+        // Invalid database URL must FAIL CLOSED and return Err, never silently falling back to in-memory
+        let s_invalid =
+            resolve_webhook_store(Some("postgres://invalid:invalid@localhost:59999/esa_test"))
+                .await;
+        assert!(
+            s_invalid.is_err(),
+            "Must fail closed if DATABASE_URL connection fails"
+        );
+        let err_msg = s_invalid.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("Failing closed"),
+            "Error message must specify failing closed: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_entity_mismatch_rejected_with_conflict() {
+        let secret = "whsec_test_secret_mu_88888";
+        let (state, _) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial capture with INR 5000
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_init_capture_mismatch",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_mismatch_entity_test",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Reused event ID with mismatched payment ID -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_init_capture_mismatch", // Reused event ID!
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_completely_different_id", // Different payment ID!
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("entity_mismatch")
+            );
+        }
+
+        // 3. Subsequent event with mismatched original amount 99999 -> 409 Conflict
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_refund_amt_mismatch",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_test_002",
+                            "payment_id": "pay_mismatch_entity_test",
+                            "amount": 1000,
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_mismatch_entity_test",
+                            "amount": 99999, // Amount mismatch!
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("entity_mismatch")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_invalid_state_transition_persisted_as_failed_inbox() {
+        let secret = "whsec_test_secret_nu_99999";
+        let (state, store) = create_test_state_with_webhook(secret, None);
+
+        // 1. Initial capture of 5000 paise
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_capture_initial",
+                "event": "payment.captured",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_test_inv_state_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 2. Over-refund attempt (attempting 20000 paise refund on 5000 paise payment)
+        {
+            let app = build_app(state.clone());
+            let payload = serde_json::json!({
+                "id": "evt_over_refund_attempt",
+                "event": "refund.processed",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_over_001",
+                            "payment_id": "pay_test_inv_state_001",
+                            "amount": 20000, // Exceeds balance!
+                            "currency": "INR",
+                            "status": "processed"
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "id": "pay_test_inv_state_001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured"
+                        }
+                    }
+                }
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let sig = compute_test_signature(&body, secret);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/razorpay/webhook")
+                .header("content-type", "application/json")
+                .header("x-razorpay-signature", &sig)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        // 3. Verify inbox record was persisted with Failed status
+        let inbox = store
+            .get_inbox_record("razorpay", "evt_over_refund_attempt")
+            .await
+            .unwrap()
+            .expect("Inbox record must exist");
+        assert_eq!(inbox.status, esa_state::WebhookStatus::Failed);
+        assert!(inbox.error_message.is_some());
+
+        // 4. Verify payment record remains Captured and uncorrupted
+        let payment = store
+            .get_payment_record("pay_test_inv_state_001")
+            .await
+            .unwrap()
+            .expect("Payment record must exist");
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.refunded_amount_minor, 0);
     }
 }

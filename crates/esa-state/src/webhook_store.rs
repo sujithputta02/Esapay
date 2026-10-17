@@ -104,6 +104,8 @@ pub enum WebhookStoreError {
     PaymentState(#[from] PaymentError),
     #[error("Serialization error: {0}")]
     Serialization(String),
+    #[error("Entity mismatch: {0}")]
+    Mismatch(String),
 }
 
 #[async_trait]
@@ -257,6 +259,15 @@ impl WebhookStore for PostgresWebhookStore {
                         let status_str: String = row.get("status");
                         let processed_at: Option<DateTime<Utc>> = row.get("processed_at");
                         let existing_payment_id: Option<String> = row.get("payment_id");
+                        if let Some(ref pid) = existing_payment_id {
+                            if pid != payment_id {
+                                let _ = tx.rollback().await;
+                                return Err(WebhookStoreError::Mismatch(format!(
+                                    "Payment ID mismatch for event '{}': expected '{}', received '{}'",
+                                    provider_event_id, pid, payment_id
+                                )));
+                            }
+                        }
                         let pid = existing_payment_id.unwrap_or_else(|| payment_id.to_string());
 
                         if status_str == "processed" {
@@ -302,10 +313,21 @@ impl WebhookStore for PostgresWebhookStore {
             }
         };
 
-        // 2. Load payment record FOR UPDATE to prevent race conditions on payment state
+        // 2. Serialize concurrent webhook events for the same (provider, payment_id)
+        // using a PostgreSQL transaction-scoped advisory lock.
+        // This guarantees that when payment_records has no row yet, concurrent events
+        // for the same payment are strictly serialized and cannot race to insert uncoordinated rows.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2));")
+            .bind(provider)
+            .bind(payment_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        // 3. Load payment record FOR UPDATE to prevent race conditions on payment state
         let payment_row = sqlx::query(
             r#"
-            SELECT state, amount_minor, currency, refunded_amount_minor, events_seen, created_at, updated_at
+            SELECT provider, state, amount_minor, currency, refunded_amount_minor, events_seen, created_at, updated_at
             FROM payment_records
             WHERE payment_id = $1
             FOR UPDATE;
@@ -318,10 +340,66 @@ impl WebhookStore for PostgresWebhookStore {
 
         let mut payment_entity = match payment_row {
             Some(row) => {
+                let existing_provider: String = row.get("provider");
+                if existing_provider != provider {
+                    let err_msg = format!(
+                        "Provider mismatch for payment '{}': expected '{}', received '{}'",
+                        payment_id, existing_provider, provider
+                    );
+                    let _ = sqlx::query(
+                        "UPDATE webhook_inbox SET status = 'failed', error_message = $1 WHERE id = $2;",
+                    )
+                    .bind(&err_msg)
+                    .bind(inbox_id)
+                    .execute(&mut *tx)
+                    .await;
+                    let _ = tx.commit().await;
+                    return Err(WebhookStoreError::Mismatch(err_msg));
+                }
+
+                let curr: String = row.get("currency");
+                if curr != currency {
+                    let err_msg = format!(
+                        "Currency mismatch for payment '{}': expected '{}', received '{}'",
+                        payment_id, curr, currency
+                    );
+                    let _ = sqlx::query(
+                        "UPDATE webhook_inbox SET status = 'failed', error_message = $1 WHERE id = $2;",
+                    )
+                    .bind(&err_msg)
+                    .bind(inbox_id)
+                    .execute(&mut *tx)
+                    .await;
+                    let _ = tx.commit().await;
+                    return Err(WebhookStoreError::Mismatch(err_msg));
+                }
+
+                let amt: i64 = row.get("amount_minor");
+                let existing_amount = amt as u64;
+                let amount_matches = if refund_amount_minor.is_some() {
+                    amount_minor == existing_amount || Some(amount_minor) == refund_amount_minor
+                } else {
+                    amount_minor == existing_amount
+                };
+
+                if !amount_matches {
+                    let err_msg = format!(
+                        "Amount mismatch for payment '{}': expected {} minor units, received {} minor units",
+                        payment_id, existing_amount, amount_minor
+                    );
+                    let _ = sqlx::query(
+                        "UPDATE webhook_inbox SET status = 'failed', error_message = $1 WHERE id = $2;",
+                    )
+                    .bind(&err_msg)
+                    .bind(inbox_id)
+                    .execute(&mut *tx)
+                    .await;
+                    let _ = tx.commit().await;
+                    return Err(WebhookStoreError::Mismatch(err_msg));
+                }
+
                 let state_str: String = row.get("state");
                 let state: PaymentState = parse_payment_state(&state_str)?;
-                let amt: i64 = row.get("amount_minor");
-                let curr: String = row.get("currency");
                 let ref_amt: i64 = row.get("refunded_amount_minor");
                 let events_seen_json: serde_json::Value = row.get("events_seen");
                 let events_seen: Vec<String> = serde_json::from_value(events_seen_json)
@@ -332,7 +410,7 @@ impl WebhookStore for PostgresWebhookStore {
                 PaymentEntity {
                     payment_id: payment_id.to_string(),
                     state,
-                    amount_minor: amt as u64,
+                    amount_minor: existing_amount,
                     currency: curr,
                     refunded_amount_minor: ref_amt as u64,
                     events_seen,
@@ -343,25 +421,28 @@ impl WebhookStore for PostgresWebhookStore {
             None => PaymentEntity::new(payment_id.to_string(), amount_minor, currency.to_string()),
         };
 
-        // 3. Apply state machine transition
+        // 4. Apply state machine transition
         let transition =
             match payment_entity.apply_event(provider_event_id, &event_type, refund_amount_minor) {
                 Ok(t) => t,
                 Err(err) => {
-                    // Record failure in webhook inbox and rollback payment changes
+                    // Record failure in webhook inbox using the CURRENT transaction.
+                    // DO NOT use a second pool connection, which deadlocks on the row lock held by tx!
+                    // Committing tx safely persists the failed status and releases all locks,
+                    // while leaving payment_records untouched because no writes occurred yet.
                     let _ = sqlx::query(
                         r#"
-                    UPDATE webhook_inbox
-                    SET status = 'failed', error_message = $1
-                    WHERE id = $2;
-                    "#,
+                        UPDATE webhook_inbox
+                        SET status = 'failed', error_message = $1
+                        WHERE id = $2;
+                        "#,
                     )
                     .bind(err.to_string())
                     .bind(inbox_id)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await;
 
-                    let _ = tx.rollback().await;
+                    let _ = tx.commit().await;
                     return Err(WebhookStoreError::PaymentState(err));
                 }
             };
@@ -542,6 +623,15 @@ impl WebhookStore for InMemoryWebhookStore {
 
         let mut inbox_guard = self.inbox.lock();
         if let Some(existing) = inbox_guard.get_mut(&key) {
+            if let Some(ref pid) = existing.payment_id {
+                if pid != payment_id {
+                    return Err(WebhookStoreError::Mismatch(format!(
+                        "Payment ID mismatch for event '{}': expected '{}', received '{}'",
+                        provider_event_id, pid, payment_id
+                    )));
+                }
+            }
+
             match existing.status {
                 WebhookStatus::Processed => {
                     return Ok(WebhookProcessingResult::AlreadyProcessed {
@@ -592,11 +682,45 @@ impl WebhookStore for InMemoryWebhookStore {
         let inbox_id = inbox_guard.get(&key).unwrap().id;
         drop(inbox_guard);
 
-        // Transition payment entity
+        // Transition payment entity with strict mismatch validation
         let mut payments_guard = self.payments.lock();
-        let mut payment_entity = payments_guard.get(payment_id).cloned().unwrap_or_else(|| {
+        let mut payment_entity = if let Some(existing) = payments_guard.get(payment_id) {
+            if existing.currency != currency {
+                let err_msg = format!(
+                    "Currency mismatch for payment '{}': expected '{}', received '{}'",
+                    payment_id, existing.currency, currency
+                );
+                let mut inbox_guard = self.inbox.lock();
+                if let Some(record) = inbox_guard.get_mut(&key) {
+                    record.status = WebhookStatus::Failed;
+                    record.error_message = Some(err_msg.clone());
+                }
+                return Err(WebhookStoreError::Mismatch(err_msg));
+            }
+
+            let amount_matches = if refund_amount_minor.is_some() {
+                amount_minor == existing.amount_minor || Some(amount_minor) == refund_amount_minor
+            } else {
+                amount_minor == existing.amount_minor
+            };
+
+            if !amount_matches {
+                let err_msg = format!(
+                    "Amount mismatch for payment '{}': expected {} minor units, received {} minor units",
+                    payment_id, existing.amount_minor, amount_minor
+                );
+                let mut inbox_guard = self.inbox.lock();
+                if let Some(record) = inbox_guard.get_mut(&key) {
+                    record.status = WebhookStatus::Failed;
+                    record.error_message = Some(err_msg.clone());
+                }
+                return Err(WebhookStoreError::Mismatch(err_msg));
+            }
+
+            existing.clone()
+        } else {
             PaymentEntity::new(payment_id.to_string(), amount_minor, currency.to_string())
-        });
+        };
 
         let transition =
             match payment_entity.apply_event(provider_event_id, &event_type, refund_amount_minor) {
@@ -822,6 +946,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_in_memory_mismatch_rejections() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": true});
+
+        // 1. Initial capture
+        let p1 = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_mismatch_001",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_mismatch_100",
+            amount_minor: 5000,
+            currency: "INR",
+            refund_amount_minor: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p1).await.unwrap();
+
+        // 2. Second event for same payment with different currency -> rejected Mismatch
+        let p_bad_curr = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_mismatch_002",
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: "pay_mismatch_100",
+            amount_minor: 5000,
+            currency: "USD", // Mismatch!
+            refund_amount_minor: Some(1000),
+            payload: &payload,
+        };
+        let res_curr = store.process_webhook_event(&p_bad_curr).await;
+        assert!(matches!(res_curr, Err(WebhookStoreError::Mismatch(_))));
+
+        // 3. Second event for same payment with different original amount -> rejected Mismatch
+        let p_bad_amt = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_mismatch_003",
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: "pay_mismatch_100",
+            amount_minor: 99999, // Mismatch!
+            currency: "INR",
+            refund_amount_minor: Some(1000),
+            payload: &payload,
+        };
+        let res_amt = store.process_webhook_event(&p_bad_amt).await;
+        assert!(matches!(res_amt, Err(WebhookStoreError::Mismatch(_))));
+
+        // 4. Existing event ID claimed with a different payment_id -> rejected Mismatch
+        let p_bad_pid = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_mismatch_001", // Reused event ID
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_different_200", // Different payment ID!
+            amount_minor: 5000,
+            currency: "INR",
+            refund_amount_minor: None,
+            payload: &payload,
+        };
+        let res_pid = store.process_webhook_event(&p_bad_pid).await;
+        assert!(matches!(res_pid, Err(WebhookStoreError::Mismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_invalid_transition_persistence() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": true});
+
+        // 1. Initial capture for 5000 paise
+        let p1 = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_inv_001",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_inv_100",
+            amount_minor: 5000,
+            currency: "INR",
+            refund_amount_minor: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p1).await.unwrap();
+
+        // 2. Over-refund (attempt to refund 10000 paise on 5000 paise payment)
+        let p_invalid = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_inv_002",
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: "pay_inv_100",
+            amount_minor: 5000,
+            currency: "INR",
+            refund_amount_minor: Some(10000), // Exceeds balance!
+            payload: &payload,
+        };
+        let res = store.process_webhook_event(&p_invalid).await;
+        assert!(matches!(res, Err(WebhookStoreError::PaymentState(_))));
+
+        // Inbox record must be recorded as 'failed'
+        let inbox = store
+            .get_inbox_record("razorpay", "evt_inv_002")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox.status, WebhookStatus::Failed);
+        assert!(inbox.error_message.is_some());
+
+        // Payment record must remain Captured (untampered)
+        let payment = store
+            .get_payment_record("pay_inv_100")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payment.state, PaymentState::Captured);
+        assert_eq!(payment.refunded_amount_minor, 0);
+    }
+
+    #[tokio::test]
     async fn test_postgres_integration_if_configured() {
         let db_url = match std::env::var("DATABASE_URL") {
             Ok(url) if !url.is_empty() && url != "memory" => url,
@@ -837,7 +1073,7 @@ mod tests {
             .await
             .expect("Schema init must succeed");
 
-        let store = PostgresWebhookStore::new(pool.clone());
+        let store = Arc::new(PostgresWebhookStore::new(pool.clone()));
         let unique_event_id = format!("evt_pg_test_{}", uuid::Uuid::new_v4());
         let payment_id = format!("pay_pg_test_{}", uuid::Uuid::new_v4());
         let payload = serde_json::json!({"pg_test": true});
@@ -885,7 +1121,75 @@ mod tests {
             _ => panic!("Expected AlreadyProcessed"),
         }
 
-        // 3. Verify record in database
+        // 3. Mismatch rejection on Postgres
+        let bad_currency_event_id = format!("evt_pg_curr_{}", uuid::Uuid::new_v4());
+        let bad_currency_params = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &bad_currency_event_id,
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: &payment_id,
+            amount_minor: 7500,
+            currency: "USD", // Mismatch!
+            refund_amount_minor: Some(1000),
+            payload: &payload,
+        };
+        let res_mismatch = store.process_webhook_event(&bad_currency_params).await;
+        assert!(matches!(res_mismatch, Err(WebhookStoreError::Mismatch(_))));
+
+        // 4. Invalid transition handling: deadlock-free failure persistence
+        let invalid_trans_event_id = format!("evt_pg_inv_{}", uuid::Uuid::new_v4());
+        let invalid_params = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &invalid_trans_event_id,
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: &payment_id,
+            amount_minor: 7500,
+            currency: "INR",
+            refund_amount_minor: Some(99999), // Exceeds balance!
+            payload: &payload,
+        };
+        let res_inv = store.process_webhook_event(&invalid_params).await;
+        assert!(matches!(res_inv, Err(WebhookStoreError::PaymentState(_))));
+
+        let failed_inbox = store
+            .get_inbox_record("razorpay", &invalid_trans_event_id)
+            .await
+            .unwrap()
+            .expect("Inbox record for invalid transition must be persisted as failed");
+        assert_eq!(failed_inbox.status, WebhookStatus::Failed);
+
+        // 5. Concurrent event serialization when payment_records has no row yet
+        let empty_payment_id = format!("pay_concurrent_empty_{}", uuid::Uuid::new_v4());
+        let mut handles = Vec::new();
+        for i in 0..6 {
+            let s = Arc::clone(&store);
+            let pid = empty_payment_id.clone();
+            let eid = format!("evt_conc_empty_{}_{}", i, uuid::Uuid::new_v4());
+            let p = payload.clone();
+            handles.push(tokio::spawn(async move {
+                let params = WebhookEventParams {
+                    provider: "razorpay",
+                    provider_event_id: &eid,
+                    event_type: PaymentEventType::PaymentCaptured,
+                    payment_id: &pid,
+                    amount_minor: 12000,
+                    currency: "INR",
+                    refund_amount_minor: None,
+                    payload: &p,
+                };
+                s.process_webhook_event(&params).await
+            }));
+        }
+
+        for h in handles {
+            let res = h.await.unwrap();
+            assert!(
+                res.is_ok(),
+                "Concurrent processing on empty payment row must succeed without deadlock"
+            );
+        }
+
+        // 6. Verify record in database
         let payment = store
             .get_payment_record(&payment_id)
             .await
