@@ -59,6 +59,20 @@ pub enum PaymentError {
         currency: String,
         method: String,
     },
+    #[error("Conflicting refund amount for refund '{refund_id}': existing {existing_amount} minor units, received {received_amount} minor units.")]
+    ConflictingRefundAmount {
+        refund_id: String,
+        existing_amount: u64,
+        received_amount: u64,
+    },
+    #[error("Contradictory refund event type '{event_type}' and explicit status '{status}' for refund '{refund_id}'.")]
+    ContradictoryRefundStatus {
+        refund_id: String,
+        event_type: String,
+        status: String,
+    },
+    #[error("Invalid refund status: '{status}'. Valid statuses are: pending, processed, failed.")]
+    InvalidRefundStatus { status: String },
 }
 
 /// Universally valid ISO-4217 Currency Metadata.
@@ -712,6 +726,30 @@ pub enum TransitionOutcome {
     },
 }
 
+/// Representation of an individual refund against a payment transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefundEntity {
+    pub refund_id: String,
+    pub amount_minor: u64,
+    pub currency: String,
+    pub status: String, // "pending", "processed", "failed"
+    #[serde(default)]
+    pub applied_to_balance: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Internal arguments bundle for executing a refund transition safely.
+#[derive(Debug, Clone, Copy)]
+pub struct RefundTransitionParams<'a> {
+    pub event_type: &'a PaymentEventType,
+    pub refund_amount_minor: Option<u64>,
+    pub refund_id: Option<&'a str>,
+    pub refund_status: Option<&'a str>,
+    pub previous_state: PaymentState,
+    pub now: DateTime<Utc>,
+}
+
 /// Representation of a managed payment transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentEntity {
@@ -721,6 +759,8 @@ pub struct PaymentEntity {
     pub currency: String,
     pub refunded_amount_minor: u64,
     pub events_seen: Vec<String>,
+    #[serde(default)]
+    pub refunds: Vec<RefundEntity>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -735,23 +775,40 @@ impl PaymentEntity {
             currency,
             refunded_amount_minor: 0,
             events_seen: Vec::new(),
+            refunds: Vec::new(),
             created_at: now,
             updated_at: now,
         }
     }
 
-    /// Process a payment event and transition state safely.
-    ///
-    /// Guarantees:
-    /// 1. Idempotency: Repeated event IDs return `TransitionOutcome::DuplicateIgnored` immediately
-    ///    without any secondary transitions or side-effects (e.g. repeated refunds).
-    /// 2. Fault Isolation: Rejected transitions NEVER record the event ID into `events_seen`.
-    /// 3. Refund Bounding: Refunds of zero or refunds exceeding remaining captured balance are strictly rejected.
+    /// Backwards-compatible convenience wrapper delegating to `apply_event_with_refund`.
     pub fn apply_event(
         &mut self,
         event_id: &str,
         event_type: &PaymentEventType,
         refund_amount_minor: Option<u64>,
+    ) -> Result<TransitionOutcome, PaymentError> {
+        self.apply_event_with_refund(event_id, event_type, refund_amount_minor, None, None)
+    }
+
+    /// Process a payment event and transition state safely.
+    ///
+    /// Guarantees:
+    /// 1. Delivery Idempotency: Repeated event IDs return `TransitionOutcome::DuplicateIgnored` immediately
+    ///    without any secondary transitions or side-effects.
+    /// 2. Refund Entity Idempotency: Different event deliveries referring to the same `refund_id`
+    ///    only apply the refund amount at most once. Pending or failed refunds NEVER increment the completed
+    ///    refunded balance.
+    /// 3. Out-of-order Resilience: Stale or late pending/failed events never downgrade an already processed refund.
+    /// 4. Fault Isolation: Rejected transitions NEVER record the event ID into `events_seen`.
+    /// 5. Refund Bounding: Refunds of zero or refunds exceeding remaining captured balance are strictly rejected.
+    pub fn apply_event_with_refund(
+        &mut self,
+        event_id: &str,
+        event_type: &PaymentEventType,
+        refund_amount_minor: Option<u64>,
+        refund_id: Option<&str>,
+        refund_status: Option<&str>,
     ) -> Result<TransitionOutcome, PaymentError> {
         let clean_event_id = event_id.trim();
         if clean_event_id.is_empty() {
@@ -764,7 +821,7 @@ impl PaymentEntity {
             });
         }
 
-        // 1. CRITICAL IDEMPOTENCY CHECK:
+        // 1. CRITICAL DELIVERY IDEMPOTENCY CHECK:
         // A repeated event ID MUST NOT cause a second state transition or any side effect!
         if self.events_seen.iter().any(|id| id == clean_event_id) {
             return Ok(TransitionOutcome::DuplicateIgnored {
@@ -775,6 +832,15 @@ impl PaymentEntity {
 
         let previous_state = self.state;
         let now = Utc::now();
+
+        let refund_params = RefundTransitionParams {
+            event_type,
+            refund_amount_minor,
+            refund_id,
+            refund_status,
+            previous_state,
+            now,
+        };
 
         // 2. Perform state transition and side-effect calculation
         let outcome = match (self.state, event_type) {
@@ -810,7 +876,13 @@ impl PaymentEntity {
                     reason: "Payment attempt failed".to_string(),
                 }
             }
-            (PaymentState::Created, PaymentEventType::RefundCreated) => {
+            (
+                PaymentState::Created,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => {
                 self.state = PaymentState::PendingReconciliation;
                 self.updated_at = now;
                 TransitionOutcome::ReconciliationRequired {
@@ -848,7 +920,13 @@ impl PaymentEntity {
                     reason: "Payment authorization failed or voided".to_string(),
                 }
             }
-            (PaymentState::Authorized, PaymentEventType::RefundCreated) => {
+            (
+                PaymentState::Authorized,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => {
                 self.state = PaymentState::PendingReconciliation;
                 self.updated_at = now;
                 TransitionOutcome::ReconciliationRequired {
@@ -881,55 +959,13 @@ impl PaymentEntity {
                     reason: "Delayed failure event cannot downgrade a confirmed capture".to_string(),
                 }
             }
-            (PaymentState::Captured, PaymentEventType::RefundCreated) => {
-                let remaining_captured =
-                    self.amount_minor.saturating_sub(self.refunded_amount_minor);
-                let refund = match refund_amount_minor {
-                    Some(0) => {
-                        return Err(PaymentError::ZeroRefundAmount {
-                            payment_id: self.payment_id.clone(),
-                        });
-                    }
-                    Some(amt) if amt > remaining_captured => {
-                        return Err(PaymentError::RefundExceedsBalance {
-                            payment_id: self.payment_id.clone(),
-                            refund_amount_minor: amt,
-                            remaining_balance: remaining_captured,
-                        });
-                    }
-                    Some(amt) => amt,
-                    None => {
-                        if remaining_captured == 0 {
-                            return Err(PaymentError::ZeroRefundAmount {
-                                payment_id: self.payment_id.clone(),
-                            });
-                        }
-                        remaining_captured
-                    }
-                };
-
-                self.refunded_amount_minor = self.refunded_amount_minor.saturating_add(refund);
-                self.updated_at = now;
-
-                if self.refunded_amount_minor >= self.amount_minor {
-                    self.state = PaymentState::Refunded;
-                    TransitionOutcome::Applied {
-                        previous_state,
-                        new_state: self.state,
-                        reason: "Payment fully refunded".to_string(),
-                    }
-                } else {
-                    self.state = PaymentState::PartiallyRefunded;
-                    TransitionOutcome::Applied {
-                        previous_state,
-                        new_state: self.state,
-                        reason: format!(
-                            "Payment partially refunded ({} of {} minor units)",
-                            self.refunded_amount_minor, self.amount_minor
-                        ),
-                    }
-                }
-            }
+            (
+                PaymentState::Captured,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => self.process_refund_transition(&refund_params)?,
 
             // ==================== PARTIALLY REFUNDED ====================
             (
@@ -950,62 +986,22 @@ impl PaymentEntity {
                         .to_string(),
                 }
             }
-            (PaymentState::PartiallyRefunded, PaymentEventType::RefundCreated) => {
-                let remaining_captured =
-                    self.amount_minor.saturating_sub(self.refunded_amount_minor);
-                let refund = match refund_amount_minor {
-                    Some(0) => {
-                        return Err(PaymentError::ZeroRefundAmount {
-                            payment_id: self.payment_id.clone(),
-                        });
-                    }
-                    Some(amt) if amt > remaining_captured => {
-                        return Err(PaymentError::RefundExceedsBalance {
-                            payment_id: self.payment_id.clone(),
-                            refund_amount_minor: amt,
-                            remaining_balance: remaining_captured,
-                        });
-                    }
-                    Some(amt) => amt,
-                    None => {
-                        if remaining_captured == 0 {
-                            return Err(PaymentError::ZeroRefundAmount {
-                                payment_id: self.payment_id.clone(),
-                            });
-                        }
-                        remaining_captured
-                    }
-                };
-
-                self.refunded_amount_minor = self.refunded_amount_minor.saturating_add(refund);
-                self.updated_at = now;
-
-                if self.refunded_amount_minor >= self.amount_minor {
-                    self.state = PaymentState::Refunded;
-                    TransitionOutcome::Applied {
-                        previous_state,
-                        new_state: self.state,
-                        reason: "Payment fully refunded after additional refund".to_string(),
-                    }
-                } else {
-                    TransitionOutcome::Applied {
-                        previous_state,
-                        new_state: self.state,
-                        reason: format!(
-                            "Additional partial refund applied (total: {} of {} minor units)",
-                            self.refunded_amount_minor, self.amount_minor
-                        ),
-                    }
-                }
-            }
+            (
+                PaymentState::PartiallyRefunded,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => self.process_refund_transition(&refund_params)?,
 
             // ==================== REFUNDED (TERMINAL) ====================
-            (PaymentState::Refunded, PaymentEventType::RefundCreated) => {
-                TransitionOutcome::DuplicateIgnored {
-                    current_state: self.state,
-                    reason: "Payment already fully refunded".to_string(),
-                }
-            }
+            (
+                PaymentState::Refunded,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => self.process_refund_transition(&refund_params)?,
             (PaymentState::Refunded, event) => {
                 return Err(PaymentError::ProhibitedTransition {
                     payment_id: self.payment_id.clone(),
@@ -1051,12 +1047,18 @@ impl PaymentEntity {
                     reason: "Authoritative provider capture received after previous failure; marked for ledger reconciliation".to_string(),
                 }
             }
-            (PaymentState::Failed, PaymentEventType::RefundCreated) => {
+            (
+                PaymentState::Failed,
+                PaymentEventType::RefundCreated
+                | PaymentEventType::RefundProcessed
+                | PaymentEventType::RefundFailed
+                | PaymentEventType::RefundSpeedChanged,
+            ) => {
                 return Err(PaymentError::ProhibitedTransition {
                     payment_id: self.payment_id.clone(),
                     from: PaymentState::Failed,
                     to: PaymentState::Refunded,
-                    event: "refund.created".to_string(),
+                    event: format!("{:?}", event_type),
                     reason: "Cannot refund a payment that failed without being captured"
                         .to_string(),
                 });
@@ -1076,6 +1078,382 @@ impl PaymentEntity {
         self.events_seen.push(clean_event_id.to_string());
 
         Ok(outcome)
+    }
+
+    fn process_refund_transition(
+        &mut self,
+        params: &RefundTransitionParams<'_>,
+    ) -> Result<TransitionOutcome, PaymentError> {
+        let event_type = params.event_type;
+        let refund_amount_minor = params.refund_amount_minor;
+        let refund_id = params.refund_id;
+        let refund_status = params.refund_status;
+        let previous_state = params.previous_state;
+        let now = params.now;
+        if event_type == &PaymentEventType::RefundSpeedChanged {
+            if let Some(r_id) = refund_id {
+                let clean_r_id = r_id.trim();
+                if !clean_r_id.is_empty() {
+                    if let Some(existing) =
+                        self.refunds.iter_mut().find(|r| r.refund_id == clean_r_id)
+                    {
+                        existing.updated_at = now;
+                    }
+                }
+            }
+            return Ok(TransitionOutcome::Applied {
+                previous_state,
+                new_state: self.state,
+                reason: "Refund processing speed updated; monetary balance unchanged".to_string(),
+            });
+        }
+
+        // Validate explicit refund status against event type to reject contradictory combinations
+        if let Some(st) = refund_status {
+            match st {
+                "processed" | "pending" | "failed" => {}
+                other => {
+                    return Err(PaymentError::InvalidRefundStatus {
+                        status: other.to_string(),
+                    });
+                }
+            }
+
+            match event_type {
+                PaymentEventType::RefundProcessed if st == "failed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundProcessed".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                PaymentEventType::RefundFailed if st == "processed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundFailed".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                PaymentEventType::RefundCreated if st == "failed" => {
+                    return Err(PaymentError::ContradictoryRefundStatus {
+                        refund_id: refund_id.unwrap_or_default().to_string(),
+                        event_type: "RefundCreated".to_string(),
+                        status: st.to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let is_processed = event_type == &PaymentEventType::RefundProcessed
+            || (event_type == &PaymentEventType::RefundCreated
+                && refund_status == Some("processed"));
+        let is_failed = event_type == &PaymentEventType::RefundFailed;
+
+        if let Some(r_id) = refund_id {
+            let clean_r_id = r_id.trim();
+            if !clean_r_id.is_empty() {
+                if let Some(existing) = self.refunds.iter_mut().find(|r| r.refund_id == clean_r_id)
+                {
+                    // 1. Conflict check on amount
+                    if let Some(amt) = refund_amount_minor {
+                        if amt != existing.amount_minor {
+                            return Err(PaymentError::ConflictingRefundAmount {
+                                refund_id: clean_r_id.to_string(),
+                                existing_amount: existing.amount_minor,
+                                received_amount: amt,
+                            });
+                        }
+                    }
+
+                    // 2. State machine on existing refund
+                    match existing.status.as_str() {
+                        "processed" => {
+                            if refund_status == Some("pending")
+                                || refund_status == Some("failed")
+                                || event_type == &PaymentEventType::RefundFailed
+                            {
+                                return Ok(TransitionOutcome::LateEventIgnored {
+                                    current_state: self.state,
+                                    reason: format!(
+                                        "Refund '{}' is already processed; stale or out-of-order '{}' event ignored without downgrading",
+                                        clean_r_id,
+                                        refund_status.unwrap_or("unknown")
+                                    ),
+                                });
+                            } else {
+                                return Ok(TransitionOutcome::DuplicateIgnored {
+                                    current_state: self.state,
+                                    reason: format!(
+                                        "Refund '{}' has already been processed and applied to balance",
+                                        clean_r_id
+                                    ),
+                                });
+                            }
+                        }
+                        "pending" => {
+                            if is_processed {
+                                let remaining =
+                                    self.amount_minor.saturating_sub(self.refunded_amount_minor);
+                                if existing.amount_minor > remaining {
+                                    return Err(PaymentError::RefundExceedsBalance {
+                                        payment_id: self.payment_id.clone(),
+                                        refund_amount_minor: existing.amount_minor,
+                                        remaining_balance: remaining,
+                                    });
+                                }
+                                self.refunded_amount_minor = self
+                                    .refunded_amount_minor
+                                    .saturating_add(existing.amount_minor);
+                                existing.status = "processed".to_string();
+                                existing.applied_to_balance = true;
+                                existing.updated_at = now;
+                                self.updated_at = now;
+                                if self.refunded_amount_minor >= self.amount_minor {
+                                    self.state = PaymentState::Refunded;
+                                } else {
+                                    self.state = PaymentState::PartiallyRefunded;
+                                }
+                                return Ok(TransitionOutcome::Applied {
+                                    previous_state,
+                                    new_state: self.state,
+                                    reason: format!(
+                                        "Pending refund '{}' successfully transitioned to processed",
+                                        clean_r_id
+                                    ),
+                                });
+                            } else if is_failed {
+                                existing.status = "failed".to_string();
+                                existing.applied_to_balance = false;
+                                existing.updated_at = now;
+                                self.updated_at = now;
+                                return Ok(TransitionOutcome::Applied {
+                                    previous_state,
+                                    new_state: self.state,
+                                    reason: format!(
+                                        "Pending refund '{}' transitioned to failed; payment balance unchanged",
+                                        clean_r_id
+                                    ),
+                                });
+                            } else {
+                                return Ok(TransitionOutcome::DuplicateIgnored {
+                                    current_state: self.state,
+                                    reason: format!(
+                                        "Refund '{}' is already recorded as pending",
+                                        clean_r_id
+                                    ),
+                                });
+                            }
+                        }
+                        "failed" => {
+                            if is_processed {
+                                let remaining =
+                                    self.amount_minor.saturating_sub(self.refunded_amount_minor);
+                                if existing.amount_minor > remaining {
+                                    return Err(PaymentError::RefundExceedsBalance {
+                                        payment_id: self.payment_id.clone(),
+                                        refund_amount_minor: existing.amount_minor,
+                                        remaining_balance: remaining,
+                                    });
+                                }
+                                self.refunded_amount_minor = self
+                                    .refunded_amount_minor
+                                    .saturating_add(existing.amount_minor);
+                                existing.status = "processed".to_string();
+                                existing.applied_to_balance = true;
+                                existing.updated_at = now;
+                                self.updated_at = now;
+                                if self.refunded_amount_minor >= self.amount_minor {
+                                    self.state = PaymentState::Refunded;
+                                } else {
+                                    self.state = PaymentState::PartiallyRefunded;
+                                }
+                                return Ok(TransitionOutcome::Applied {
+                                    previous_state,
+                                    new_state: self.state,
+                                    reason: format!(
+                                        "Previously failed refund '{}' reprocessed and applied to balance",
+                                        clean_r_id
+                                    ),
+                                });
+                            } else {
+                                return Ok(TransitionOutcome::LateEventIgnored {
+                                    current_state: self.state,
+                                    reason: format!(
+                                        "Refund '{}' is already marked as failed; stale or duplicate event ignored without downgrading",
+                                        clean_r_id
+                                    ),
+                                });
+                            }
+                        }
+                        _ => {
+                            return Ok(TransitionOutcome::DuplicateIgnored {
+                                current_state: self.state,
+                                reason: format!(
+                                    "Refund '{}' is in status '{}'",
+                                    clean_r_id, existing.status
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                // First time seeing this refund_id
+                let refund = match refund_amount_minor {
+                    Some(0) => {
+                        return Err(PaymentError::ZeroRefundAmount {
+                            payment_id: self.payment_id.clone(),
+                        });
+                    }
+                    Some(amt) => amt,
+                    None => {
+                        return Err(PaymentError::ZeroRefundAmount {
+                            payment_id: self.payment_id.clone(),
+                        });
+                    }
+                };
+
+                if is_processed {
+                    let remaining = self.amount_minor.saturating_sub(self.refunded_amount_minor);
+                    if refund > remaining {
+                        return Err(PaymentError::RefundExceedsBalance {
+                            payment_id: self.payment_id.clone(),
+                            refund_amount_minor: refund,
+                            remaining_balance: remaining,
+                        });
+                    }
+                    self.refunded_amount_minor = self.refunded_amount_minor.saturating_add(refund);
+                    self.refunds.push(RefundEntity {
+                        refund_id: clean_r_id.to_string(),
+                        amount_minor: refund,
+                        currency: self.currency.clone(),
+                        status: "processed".to_string(),
+                        applied_to_balance: true,
+                        created_at: now,
+                        updated_at: now,
+                    });
+                    self.updated_at = now;
+                    if self.refunded_amount_minor >= self.amount_minor {
+                        self.state = PaymentState::Refunded;
+                    } else {
+                        self.state = PaymentState::PartiallyRefunded;
+                    }
+                    return Ok(TransitionOutcome::Applied {
+                        previous_state,
+                        new_state: self.state,
+                        reason: format!(
+                            "Refund '{}' processed and applied to balance ({} minor units)",
+                            clean_r_id, refund
+                        ),
+                    });
+                } else if is_failed {
+                    self.refunds.push(RefundEntity {
+                        refund_id: clean_r_id.to_string(),
+                        amount_minor: refund,
+                        currency: self.currency.clone(),
+                        status: "failed".to_string(),
+                        applied_to_balance: false,
+                        created_at: now,
+                        updated_at: now,
+                    });
+                    self.updated_at = now;
+                    return Ok(TransitionOutcome::Applied {
+                        previous_state,
+                        new_state: self.state,
+                        reason: format!(
+                            "Refund '{}' recorded as failed; payment balance unchanged",
+                            clean_r_id
+                        ),
+                    });
+                } else {
+                    // Pending
+                    self.refunds.push(RefundEntity {
+                        refund_id: clean_r_id.to_string(),
+                        amount_minor: refund,
+                        currency: self.currency.clone(),
+                        status: "pending".to_string(),
+                        applied_to_balance: false,
+                        created_at: now,
+                        updated_at: now,
+                    });
+                    self.updated_at = now;
+                    return Ok(TransitionOutcome::Applied {
+                        previous_state,
+                        new_state: self.state,
+                        reason: format!(
+                            "Refund '{}' created in pending status; payment balance unchanged",
+                            clean_r_id
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Fallback when refund_id is not supplied (e.g. legacy/synthetic tests)
+        let is_pending =
+            event_type == &PaymentEventType::RefundCreated && refund_status == Some("pending");
+
+        if is_failed {
+            return Ok(TransitionOutcome::Applied {
+                previous_state,
+                new_state: self.state,
+                reason: "Refund marked as failed; balance unchanged".to_string(),
+            });
+        }
+        if is_pending {
+            return Ok(TransitionOutcome::Applied {
+                previous_state,
+                new_state: self.state,
+                reason: "Refund created in pending status; balance unchanged".to_string(),
+            });
+        }
+
+        let remaining_captured = self.amount_minor.saturating_sub(self.refunded_amount_minor);
+        let refund = match refund_amount_minor {
+            Some(0) => {
+                return Err(PaymentError::ZeroRefundAmount {
+                    payment_id: self.payment_id.clone(),
+                });
+            }
+            Some(amt) if amt > remaining_captured => {
+                return Err(PaymentError::RefundExceedsBalance {
+                    payment_id: self.payment_id.clone(),
+                    refund_amount_minor: amt,
+                    remaining_balance: remaining_captured,
+                });
+            }
+            Some(amt) => amt,
+            None => {
+                if remaining_captured == 0 {
+                    return Err(PaymentError::ZeroRefundAmount {
+                        payment_id: self.payment_id.clone(),
+                    });
+                }
+                remaining_captured
+            }
+        };
+
+        self.refunded_amount_minor = self.refunded_amount_minor.saturating_add(refund);
+        self.updated_at = now;
+
+        if self.refunded_amount_minor >= self.amount_minor {
+            self.state = PaymentState::Refunded;
+            Ok(TransitionOutcome::Applied {
+                previous_state,
+                new_state: self.state,
+                reason: "Payment fully refunded".to_string(),
+            })
+        } else {
+            self.state = PaymentState::PartiallyRefunded;
+            Ok(TransitionOutcome::Applied {
+                previous_state,
+                new_state: self.state,
+                reason: format!(
+                    "Payment partially refunded ({} of {} minor units)",
+                    self.refunded_amount_minor, self.amount_minor
+                ),
+            })
+        }
     }
 }
 
@@ -1840,5 +2218,177 @@ mod tests {
             conflict,
             Err(PaymentError::ConflictingAmountInputs { .. })
         ));
+    }
+
+    #[test]
+    fn test_refund_contradictory_status_and_speed_changed_semantics() {
+        let mut payment = PaymentEntity::new("pay_refund_semantics".into(), 10000, "INR".into());
+        payment
+            .apply_event("evt_cap", &PaymentEventType::PaymentCaptured, None)
+            .unwrap();
+
+        // 1. RefundProcessed with explicitly "failed" status -> rejected
+        let err1 = payment.apply_event_with_refund(
+            "evt_proc_fail",
+            &PaymentEventType::RefundProcessed,
+            Some(3000),
+            Some("rfnd_contra_1"),
+            Some("failed"),
+        );
+        assert_eq!(
+            err1,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_1".into(),
+                event_type: "RefundProcessed".into(),
+                status: "failed".into(),
+            })
+        );
+        assert_eq!(payment.refunded_amount_minor, 0);
+        assert!(payment.refunds.is_empty());
+        assert!(!payment.events_seen.contains(&"evt_proc_fail".to_string()));
+
+        // 2. RefundFailed with explicitly "processed" status -> rejected
+        let err2 = payment.apply_event_with_refund(
+            "evt_fail_proc",
+            &PaymentEventType::RefundFailed,
+            Some(3000),
+            Some("rfnd_contra_2"),
+            Some("processed"),
+        );
+        assert_eq!(
+            err2,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_2".into(),
+                event_type: "RefundFailed".into(),
+                status: "processed".into(),
+            })
+        );
+        assert_eq!(payment.refunded_amount_minor, 0);
+        assert!(payment.refunds.is_empty());
+
+        // 3. RefundCreated with explicitly "failed" status -> rejected
+        let err3 = payment.apply_event_with_refund(
+            "evt_cre_fail",
+            &PaymentEventType::RefundCreated,
+            Some(3000),
+            Some("rfnd_contra_3"),
+            Some("failed"),
+        );
+        assert_eq!(
+            err3,
+            Err(PaymentError::ContradictoryRefundStatus {
+                refund_id: "rfnd_contra_3".into(),
+                event_type: "RefundCreated".into(),
+                status: "failed".into(),
+            })
+        );
+
+        // 4. Unknown/unsupported status string -> rejected
+        let err4 = payment.apply_event_with_refund(
+            "evt_bad_st",
+            &PaymentEventType::RefundProcessed,
+            Some(3000),
+            Some("rfnd_contra_4"),
+            Some("bogus_state"),
+        );
+        assert_eq!(
+            err4,
+            Err(PaymentError::InvalidRefundStatus {
+                status: "bogus_state".into(),
+            })
+        );
+
+        // 5. RefundSpeedChanged on unknown refund: creates NO refund record, does not alter balance
+        let res_spd_unknown = payment.apply_event_with_refund(
+            "evt_spd_unk",
+            &PaymentEventType::RefundSpeedChanged,
+            Some(2000),
+            Some("rfnd_unknown_speed"),
+            Some("pending"),
+        );
+        assert!(matches!(
+            res_spd_unknown,
+            Ok(TransitionOutcome::Applied { .. })
+        ));
+        assert_eq!(
+            payment.refunded_amount_minor, 0,
+            "Speed change for unknown refund must not alter balance"
+        );
+        assert!(
+            payment.refunds.is_empty(),
+            "Speed change for unknown refund must not create a refund record"
+        );
+        assert!(payment.events_seen.contains(&"evt_spd_unk".to_string()));
+
+        // 6. Valid RefundCreated with status "processed" (e.g. instant refund)
+        let res_inst = payment.apply_event_with_refund(
+            "evt_inst_cre",
+            &PaymentEventType::RefundCreated,
+            Some(4000),
+            Some("rfnd_inst_1"),
+            Some("processed"),
+        );
+        assert!(matches!(res_inst, Ok(TransitionOutcome::Applied { .. })));
+        assert_eq!(payment.refunded_amount_minor, 4000);
+        assert_eq!(payment.state, PaymentState::PartiallyRefunded);
+        let rf_inst = payment
+            .refunds
+            .iter()
+            .find(|r| r.refund_id == "rfnd_inst_1")
+            .unwrap();
+        assert_eq!(rf_inst.status, "processed");
+        assert!(rf_inst.applied_to_balance);
+
+        // 7. Subsequent RefundProcessed for the already-processed instant refund is a duplicate ignored
+        let res_inst_proc = payment.apply_event_with_refund(
+            "evt_inst_proc",
+            &PaymentEventType::RefundProcessed,
+            Some(4000),
+            Some("rfnd_inst_1"),
+            Some("processed"),
+        );
+        assert!(matches!(
+            res_inst_proc,
+            Ok(TransitionOutcome::DuplicateIgnored { .. })
+        ));
+        assert_eq!(
+            payment.refunded_amount_minor, 4000,
+            "Duplicate RefundProcessed must not double count"
+        );
+
+        // 8. RefundSpeedChanged on existing processed refund preserves its status & applied_to_balance
+        let res_spd_exist = payment.apply_event_with_refund(
+            "evt_spd_exist",
+            &PaymentEventType::RefundSpeedChanged,
+            Some(4000),
+            Some("rfnd_inst_1"),
+            Some("processed"),
+        );
+        assert!(matches!(
+            res_spd_exist,
+            Ok(TransitionOutcome::Applied { .. })
+        ));
+        let rf_after_spd = payment
+            .refunds
+            .iter()
+            .find(|r| r.refund_id == "rfnd_inst_1")
+            .unwrap();
+        assert_eq!(rf_after_spd.status, "processed");
+        assert!(rf_after_spd.applied_to_balance);
+        assert_eq!(payment.refunded_amount_minor, 4000);
+
+        // 9. Repeated speed-change events do not alter completed refunded balance
+        let res_spd_repeat = payment.apply_event_with_refund(
+            "evt_spd_repeat",
+            &PaymentEventType::RefundSpeedChanged,
+            Some(4000),
+            Some("rfnd_inst_1"),
+            None,
+        );
+        assert!(matches!(
+            res_spd_repeat,
+            Ok(TransitionOutcome::Applied { .. })
+        ));
+        assert_eq!(payment.refunded_amount_minor, 4000);
     }
 }
