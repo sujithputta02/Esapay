@@ -1040,7 +1040,7 @@ impl WebhookStore for InMemoryWebhookStore {
                             return Err(WebhookStoreError::Mismatch(err_msg));
                         }
                     }
-                } else {
+                } else if event_type != PaymentEventType::RefundSpeedChanged {
                     // Atomically reserve the (provider, refund_id) to serialize concurrent requests for different payments
                     refunds_guard.insert(
                         refund_key.clone(),
@@ -1133,12 +1133,12 @@ impl WebhookStore for InMemoryWebhookStore {
             let clean_r_id = r_id.trim();
             if !clean_r_id.is_empty() {
                 let refund_key = (provider.to_string(), clean_r_id.to_string());
+                let mut refunds_guard = self.refunds.lock();
                 if let Some(rf_entity) = payment_entity
                     .refunds
                     .iter()
                     .find(|r| r.refund_id == clean_r_id)
                 {
-                    let mut refunds_guard = self.refunds.lock();
                     refunds_guard.insert(
                         refund_key,
                         InMemoryRefundEntry {
@@ -1151,6 +1151,8 @@ impl WebhookStore for InMemoryWebhookStore {
                             applied_to_balance: rf_entity.applied_to_balance,
                         },
                     );
+                } else if created_refund_reservation {
+                    refunds_guard.remove(&refund_key);
                 }
             }
         }
@@ -2311,15 +2313,17 @@ mod tests {
             "speed_changed must not modify monetary balance"
         );
         assert_eq!(pay_1.state, PaymentState::Captured);
+        assert!(
+            pay_1.refunds.is_empty(),
+            "speed_changed for an unknown refund must NOT create a refund entity"
+        );
         let rf_1 = store
             .get_refund_record("razorpay", "rfnd_spd_01")
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(rf_1.status, "pending");
         assert!(
-            !rf_1.applied_to_balance,
-            "speed_changed must not mark refund as applied to balance"
+            rf_1.is_none(),
+            "speed_changed for an unknown refund must NOT create a refund record"
         );
 
         // 2. refund.processed arrives
@@ -2872,15 +2876,14 @@ mod tests {
             pay1.refunded_amount_minor, 0,
             "Postgres: speed_changed must not modify balance"
         );
-        let rf1 = store
-            .get_refund_record("razorpay", &rfnd_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(rf1.status, "pending");
         assert!(
-            !rf1.applied_to_balance,
-            "Postgres: speed_changed must have applied_to_balance = false"
+            pay1.refunds.is_empty(),
+            "Postgres: speed_changed for unknown refund must not create refund in payment record"
+        );
+        let rf1 = store.get_refund_record("razorpay", &rfnd_id).await.unwrap();
+        assert!(
+            rf1.is_none(),
+            "Postgres: speed_changed for unknown refund must not create a refund record"
         );
 
         // 2. refund.processed arrives
@@ -3060,5 +3063,279 @@ mod tests {
         assert_eq!(rf_rec.amount_minor, 2000);
         assert_eq!(rf_rec.currency, "INR");
         assert_eq!(rf_rec.payment_id, pay_a_id);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_contradictory_refund_event_status_rejected() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": true});
+
+        let p_cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_cap_contra",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_contra_mem",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_cap).await.unwrap();
+
+        // 1. refund.processed with status failed -> rejected
+        let p_proc_failed = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_proc_fail_1",
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: "pay_contra_mem",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some("rfnd_contra_mem_1"),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("failed"),
+            payload: &payload,
+        };
+        let res1 = store.process_webhook_event(&p_proc_failed).await;
+        assert!(matches!(
+            res1,
+            Err(WebhookStoreError::PaymentState(
+                PaymentError::ContradictoryRefundStatus { .. }
+            ))
+        ));
+        let pay1 = store
+            .get_payment_record("pay_contra_mem")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay1.refunded_amount_minor, 0);
+        assert!(pay1.refunds.is_empty());
+        assert!(store
+            .get_refund_record("razorpay", "rfnd_contra_mem_1")
+            .await
+            .unwrap()
+            .is_none());
+
+        // 2. refund.failed with status processed -> rejected
+        let p_fail_proc = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_fail_proc_1",
+            event_type: PaymentEventType::RefundFailed,
+            payment_id: "pay_contra_mem",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some("rfnd_contra_mem_2"),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        let res2 = store.process_webhook_event(&p_fail_proc).await;
+        assert!(matches!(
+            res2,
+            Err(WebhookStoreError::PaymentState(
+                PaymentError::ContradictoryRefundStatus { .. }
+            ))
+        ));
+        let pay2 = store
+            .get_payment_record("pay_contra_mem")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay2.refunded_amount_minor, 0);
+        assert!(pay2.refunds.is_empty());
+        assert!(store
+            .get_refund_record("razorpay", "rfnd_contra_mem_2")
+            .await
+            .unwrap()
+            .is_none());
+
+        // 3. Valid refund.created with status "processed" (instant refund)
+        let p_inst = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_inst_cre_1",
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: "pay_contra_mem",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some("rfnd_contra_mem_3"),
+            refund_amount_minor: Some(4000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_inst).await.unwrap();
+
+        let pay3 = store
+            .get_payment_record("pay_contra_mem")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay3.refunded_amount_minor, 4000);
+        assert_eq!(pay3.state, PaymentState::PartiallyRefunded);
+        let rf3 = store
+            .get_refund_record("razorpay", "rfnd_contra_mem_3")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf3.status, "processed");
+        assert!(rf3.applied_to_balance);
+
+        // 4. Subsequent refund.processed for the instant refund is ignored as duplicate without double counting
+        let p_inst_proc = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_inst_proc_1",
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: "pay_contra_mem",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some("rfnd_contra_mem_3"),
+            refund_amount_minor: Some(4000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_inst_proc).await.unwrap();
+
+        let pay4 = store
+            .get_payment_record("pay_contra_mem")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pay4.refunded_amount_minor, 4000,
+            "Subsequent refund.processed must not double-apply balance"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_postgres_contradictory_refund_event_status_rejected() {
+        let pool = match get_test_postgres_pool().await {
+            Some(p) => p,
+            None => return,
+        };
+        let store = PostgresWebhookStore::new(pool);
+        let pay_id = format!("pay_contra_{}", uuid::Uuid::new_v4());
+        let rfnd_1 = format!("rfnd_contra_1_{}", uuid::Uuid::new_v4());
+        let rfnd_2 = format!("rfnd_contra_2_{}", uuid::Uuid::new_v4());
+        let rfnd_3 = format!("rfnd_inst_{}", uuid::Uuid::new_v4());
+        let payload = serde_json::json!({"test": true});
+
+        let cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_cap_{}", uuid::Uuid::new_v4()),
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&cap).await.unwrap();
+
+        // 1. refund.processed with status failed -> rejected
+        let proc_failed = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_proc_fail_{}", uuid::Uuid::new_v4()),
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some(&rfnd_1),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("failed"),
+            payload: &payload,
+        };
+        let res1 = store.process_webhook_event(&proc_failed).await;
+        assert!(matches!(
+            res1,
+            Err(WebhookStoreError::PaymentState(
+                PaymentError::ContradictoryRefundStatus { .. }
+            ))
+        ));
+        let pay1 = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(pay1.refunded_amount_minor, 0);
+        assert!(pay1.refunds.is_empty());
+        assert!(store
+            .get_refund_record("razorpay", &rfnd_1)
+            .await
+            .unwrap()
+            .is_none());
+
+        // 2. refund.failed with status processed -> rejected
+        let fail_proc = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_fail_proc_{}", uuid::Uuid::new_v4()),
+            event_type: PaymentEventType::RefundFailed,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some(&rfnd_2),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        let res2 = store.process_webhook_event(&fail_proc).await;
+        assert!(matches!(
+            res2,
+            Err(WebhookStoreError::PaymentState(
+                PaymentError::ContradictoryRefundStatus { .. }
+            ))
+        ));
+        let pay2 = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(pay2.refunded_amount_minor, 0);
+        assert!(pay2.refunds.is_empty());
+        assert!(store
+            .get_refund_record("razorpay", &rfnd_2)
+            .await
+            .unwrap()
+            .is_none());
+
+        // 3. Valid refund.created with status "processed" (instant refund)
+        let inst = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_inst_{}", uuid::Uuid::new_v4()),
+            event_type: PaymentEventType::RefundCreated,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some(&rfnd_3),
+            refund_amount_minor: Some(4000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&inst).await.unwrap();
+
+        let pay3 = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(pay3.refunded_amount_minor, 4000);
+        assert_eq!(pay3.state, PaymentState::PartiallyRefunded);
+        let rf3 = store
+            .get_refund_record("razorpay", &rfnd_3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf3.status, "processed");
+        assert!(rf3.applied_to_balance);
+
+        // 4. Subsequent refund.processed for the instant refund is ignored as duplicate without double counting
+        let inst_proc = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_inst_proc_{}", uuid::Uuid::new_v4()),
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some(&rfnd_3),
+            refund_amount_minor: Some(4000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&inst_proc).await.unwrap();
+
+        let pay4 = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(
+            pay4.refunded_amount_minor, 4000,
+            "Subsequent refund.processed must not double-apply balance"
+        );
     }
 }

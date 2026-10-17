@@ -28,6 +28,8 @@ pub enum WebhookError {
     UnsupportedEvent(String),
     #[error("unsupported payment status: {0}")]
     UnsupportedStatus(String),
+    #[error("contradictory refund event '{event}' and status '{status}'")]
+    ContradictoryRefundStatus { event: String, status: String },
     #[error("merchant account ID mismatch: expected '{expected}', got '{actual}'")]
     MerchantMismatch { expected: String, actual: String },
     #[error("invalid currency: {0}")]
@@ -243,21 +245,47 @@ pub fn parse_webhook_payload_detailed(
                 _ => "pending",
             };
 
-            let st = refund_entity
+            let explicit_status = refund_entity
                 .get("status")
                 .and_then(|v| v.as_str())
-                .unwrap_or(default_status)
-                .trim()
-                .to_string();
+                .map(|s| s.trim());
 
-            // Validate refund status
-            match st.as_str() {
-                "processed" | "pending" | "failed" => {}
-                other => {
-                    warn!("Unsupported refund status: {}", other);
-                    return Err(WebhookError::UnsupportedStatus(other.to_string()));
+            if let Some(explicit) = explicit_status {
+                match explicit {
+                    "processed" | "pending" | "failed" => {}
+                    other => {
+                        warn!("Unsupported refund status: {}", other);
+                        return Err(WebhookError::UnsupportedStatus(other.to_string()));
+                    }
+                }
+
+                match event_type {
+                    PaymentEventType::RefundProcessed if explicit == "failed" => {
+                        warn!("Contradictory refund event 'refund.processed' with status 'failed'");
+                        return Err(WebhookError::ContradictoryRefundStatus {
+                            event: "refund.processed".to_string(),
+                            status: explicit.to_string(),
+                        });
+                    }
+                    PaymentEventType::RefundFailed if explicit == "processed" => {
+                        warn!("Contradictory refund event 'refund.failed' with status 'processed'");
+                        return Err(WebhookError::ContradictoryRefundStatus {
+                            event: "refund.failed".to_string(),
+                            status: explicit.to_string(),
+                        });
+                    }
+                    PaymentEventType::RefundCreated if explicit == "failed" => {
+                        warn!("Contradictory refund event 'refund.created' with status 'failed'");
+                        return Err(WebhookError::ContradictoryRefundStatus {
+                            event: "refund.created".to_string(),
+                            status: explicit.to_string(),
+                        });
+                    }
+                    _ => {}
                 }
             }
+
+            let st = explicit_status.unwrap_or(default_status).to_string();
 
             let m = root
                 .pointer("/payload/payment/entity/method")
@@ -1056,5 +1084,182 @@ mod tests {
         let body = serde_json::to_vec(&payload).unwrap();
         let res = parse_webhook_payload_detailed(&body, None, None);
         assert!(matches!(res, Err(WebhookError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn test_refund_contradictory_and_valid_status_combinations() {
+        // 1. refund.processed with explicitly failed status -> rejected
+        let payload_proc_failed = serde_json::json!({
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_1",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_1",
+                        "status": "failed"
+                    }
+                }
+            }
+        });
+        let res1 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_proc_failed).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res1,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.processed" && status == "failed"
+        ));
+
+        // 2. refund.failed with explicitly processed status -> rejected
+        let payload_fail_proc = serde_json::json!({
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_2",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_2",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+        let res2 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_fail_proc).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res2,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.failed" && status == "processed"
+        ));
+
+        // 3. refund.created with explicitly failed status -> rejected
+        let payload_created_failed = serde_json::json!({
+            "event": "refund.created",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_contra_3",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_contra_3",
+                        "status": "failed"
+                    }
+                }
+            }
+        });
+        let res3 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_created_failed).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(
+            res3,
+            Err(WebhookError::ContradictoryRefundStatus {
+                ref event,
+                ref status
+            }) if event == "refund.created" && status == "failed"
+        ));
+
+        // 4. refund.created with explicitly processed status -> supported (instant refund)
+        let payload_created_proc = serde_json::json!({
+            "event": "refund.created",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_valid_inst",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_valid_inst",
+                        "status": "processed"
+                    }
+                }
+            }
+        });
+        let res4 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_created_proc).unwrap(),
+            None,
+            None,
+        );
+        assert!(res4.is_ok());
+        let parsed4 = res4.unwrap();
+        assert_eq!(parsed4.event_type, PaymentEventType::RefundCreated);
+        assert_eq!(parsed4.status, "processed");
+
+        // 5. Unknown status string -> unsupported status error
+        let payload_unknown_st = serde_json::json!({
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_unknown_st",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_unknown_st",
+                        "status": "bogus_status"
+                    }
+                }
+            }
+        });
+        let res5 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_unknown_st).unwrap(),
+            None,
+            None,
+        );
+        assert!(matches!(res5, Err(WebhookError::UnsupportedStatus(_))));
+
+        // 6. Legitimate omitted status defaults
+        let payload_proc_no_st = serde_json::json!({
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_def_proc",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_def_proc"
+                    }
+                }
+            }
+        });
+        let parsed6 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_proc_no_st).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed6.status, "processed");
+
+        let payload_fail_no_st = serde_json::json!({
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_def_fail",
+                        "amount": 1000,
+                        "currency": "INR",
+                        "payment_id": "pay_def_fail"
+                    }
+                }
+            }
+        });
+        let parsed7 = parse_webhook_payload_detailed(
+            &serde_json::to_vec(&payload_fail_no_st).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed7.status, "failed");
     }
 }

@@ -1174,6 +1174,16 @@ async fn razorpay_webhook(
             )
                 .into_response();
         }
+        Err(WebhookError::ContradictoryRefundStatus { event, status }) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "contradictory_refund_status",
+                    "message": format!("Contradictory refund event '{}' with status '{}'", event, status)
+                })),
+            )
+                .into_response();
+        }
     };
 
     let payload_val: serde_json::Value = match serde_json::from_slice(body.as_ref()) {
