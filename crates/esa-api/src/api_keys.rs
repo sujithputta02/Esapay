@@ -68,11 +68,18 @@ pub struct CallerIdentity {
 }
 
 impl CallerIdentity {
-    #[allow(dead_code)]
-    pub fn has_scope(&self, required_scope: &str) -> bool {
+    pub fn is_admin(&self) -> bool {
         self.role == "service_role"
             || self.role == "admin"
-            || self.scopes.iter().any(|s| s == required_scope || s == "*")
+            || self.scopes.iter().any(|s| s == "admin" || s == "*")
+    }
+
+    pub fn has_scope(&self, required_scope: &str) -> bool {
+        self.is_admin() || self.scopes.iter().any(|s| s == required_scope)
+    }
+
+    pub fn has_any_scope(&self, scopes: &[&str]) -> bool {
+        self.is_admin() || scopes.iter().any(|req| self.has_scope(req))
     }
 }
 
@@ -908,6 +915,37 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
 
     let input_hash = hash_api_key(clean);
 
+    // Admin key check
+    if let Ok(env_admin) = std::env::var("ESA_ADMIN_API_KEY") {
+        let clean_admin = env_admin.trim();
+        if !clean_admin.is_empty()
+            && constant_time_eq(input_hash.as_bytes(), hash_api_key(clean_admin).as_bytes())
+        {
+            return Some(CallerIdentity {
+                user_id: "admin_root".to_string(),
+                merchant_id: "admin_root".to_string(),
+                email: None,
+                role: "admin".to_string(),
+                auth_type: "api_key".to_string(),
+                environment: "live".to_string(),
+                scopes: vec![
+                    "payments:write".to_string(),
+                    "payments:read".to_string(),
+                    "telemetry:read".to_string(),
+                    "telemetry:admin".to_string(),
+                    "gateways:toggle".to_string(),
+                    "gateways:read".to_string(),
+                    "workloads:write".to_string(),
+                    "workloads:read".to_string(),
+                    "audit:read".to_string(),
+                    "audit:replay".to_string(),
+                    "admin".to_string(),
+                    "*".to_string(),
+                ],
+            });
+        }
+    }
+
     // Live production key check
     if let Ok(env_live) = std::env::var("ESA_LIVE_API_KEY") {
         let clean_live = env_live.trim();
@@ -926,7 +964,9 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
                     "gateways:toggle".to_string(),
+                    "gateways:read".to_string(),
                     "workloads:write".to_string(),
+                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -950,6 +990,8 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
                     "gateways:toggle".to_string(),
+                    "gateways:read".to_string(),
+                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -977,6 +1019,8 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:write".to_string(),
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
+                    "gateways:read".to_string(),
+                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -986,11 +1030,9 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
 }
 
 /// Unified authentication: verifies either a cryptographically signed Supabase JWT
-/// or a verified API key. Fails closed without worker blocking.
-pub async fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
-    let token = extract_token(headers).ok_or(AuthError::MissingToken)?;
-    let clean = token.trim();
-
+/// or a verified API key from a raw token string. Fails closed.
+pub async fn authenticate_token_str(raw_token: &str) -> Result<CallerIdentity, AuthError> {
+    let clean = raw_token.trim();
     if clean.is_empty() {
         return Err(AuthError::MissingToken);
     }
@@ -1014,10 +1056,16 @@ pub async fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, 
             "payments:read".to_string(),
             "telemetry:read".to_string(),
             "gateways:toggle".to_string(),
+            "gateways:read".to_string(),
+            "workloads:read".to_string(),
         ];
         if is_admin {
             scopes.push("workloads:write".to_string());
+            scopes.push("audit:read".to_string());
+            scopes.push("audit:replay".to_string());
+            scopes.push("telemetry:admin".to_string());
             scopes.push("admin".to_string());
+            scopes.push("*".to_string());
         }
 
         return Ok(CallerIdentity {
@@ -1039,6 +1087,13 @@ pub async fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, 
     Err(AuthError::InvalidApiKey)
 }
 
+/// Unified authentication: verifies either a cryptographically signed Supabase JWT
+/// or a verified API key. Fails closed without worker blocking.
+pub async fn authenticate_caller(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
+    let token = extract_token(headers).ok_or(AuthError::MissingToken)?;
+    authenticate_token_str(&token).await
+}
+
 /// Synchronous blocking wrapper for authenticate_caller
 #[allow(dead_code)]
 pub fn authenticate_caller_blocking(headers: &HeaderMap) -> Result<CallerIdentity, AuthError> {
@@ -1056,6 +1111,7 @@ pub fn authenticate_caller_blocking(headers: &HeaderMap) -> Result<CallerIdentit
 }
 
 /// Check if an API key or Supabase JWT is valid asynchronously
+#[allow(dead_code)]
 pub async fn is_key_authorized_async(key: &str) -> bool {
     let clean = key.trim();
     if clean.is_empty() {
