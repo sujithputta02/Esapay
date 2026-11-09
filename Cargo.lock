@@ -784,6 +784,7 @@ name = "esa-state"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dashmap 5.5.3",
  "esa-core",

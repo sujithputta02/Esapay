@@ -20,6 +20,7 @@ pub struct RazorpayConfig {
     pub test_mode_only: bool,
     pub webhook_rate_limit_per_sec: u32,
     pub api_rate_limit_per_sec: u32,
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +65,8 @@ impl RazorpayConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
 
+        let account_id = env::var("RAZORPAY_ACCOUNT_ID").ok().map(clean_secret);
+
         Ok(Self {
             key_id,
             key_secret,
@@ -72,6 +75,7 @@ impl RazorpayConfig {
             test_mode_only,
             webhook_rate_limit_per_sec,
             api_rate_limit_per_sec,
+            account_id,
         })
     }
 
@@ -87,6 +91,7 @@ impl RazorpayConfig {
             "mode": if self.test_mode_only { "test" } else { "live" },
             "key_id": self.key_id,
             "key_id_prefix": self.key_id.chars().take(12).collect::<String>() + "...",
+            "account_id": self.account_id,
             "webhook_rate_limit_per_sec": self.webhook_rate_limit_per_sec,
             "api_rate_limit_per_sec": self.api_rate_limit_per_sec,
         })
