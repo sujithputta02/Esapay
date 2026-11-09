@@ -369,11 +369,21 @@ impl PostgresWebhookStore {
                         "Reconciliation failed: Unknown unapplied event type '{}'",
                         u_event_type_str
                     );
-                    let _ = sqlx::query("UPDATE webhook_inbox SET status = 'failed', error_message = $1, processed_at = NOW() WHERE id = $2;")
-                        .bind(&err_msg)
-                        .bind(u_inbox_id)
-                        .execute(&mut **tx)
-                        .await;
+                    let update_res = sqlx::query(
+                        "UPDATE webhook_inbox SET status = 'failed', error_message = $1, processed_at = NOW() WHERE id = $2;",
+                    )
+                    .bind(&err_msg)
+                    .bind(u_inbox_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                    if update_res.rows_affected() == 0 {
+                        return Err(WebhookStoreError::Database(format!(
+                            "Failed to update unapplied inbox record {}: row not found",
+                            u_inbox_id
+                        )));
+                    }
                     continue;
                 }
             };
@@ -425,37 +435,49 @@ impl PostgresWebhookStore {
                 .map_err(|e| WebhookStoreError::Database(e.to_string()))?
             };
 
-            let (r_id, r_amount, r_currency, r_status) = match refund_record_opt {
-                Some(ref r_row) => {
-                    let rid: String = r_row.get("refund_id");
-                    let amt: i64 = r_row.get("amount_minor");
-                    let curr: String = r_row.get("currency");
-                    let st: String = r_row.get("status");
-                    (rid, amt as u64, curr, st)
-                }
-                None => {
-                    let rid = refund_id_str.unwrap_or_else(|| format!("rfnd_recon_{}", u_event_id));
-                    let amt = u_payload
-                        .pointer("/payload/refund/entity/amount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let curr = u_payload
-                        .pointer("/payload/refund/entity/currency")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&payment_entity.currency)
-                        .to_string();
-                    let st = u_payload
-                        .pointer("/payload/refund/entity/status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(match u_event_type {
-                            PaymentEventType::RefundProcessed => "processed",
-                            PaymentEventType::RefundFailed => "failed",
-                            _ => "pending",
-                        })
-                        .to_string();
-                    (rid, amt, curr, st)
-                }
-            };
+            let (r_id, r_amount, r_currency, r_event_status, db_status, db_applied) =
+                match refund_record_opt {
+                    Some(ref r_row) => {
+                        let rid: String = r_row.get("refund_id");
+                        let amt: i64 = r_row.get("amount_minor");
+                        let curr: String = r_row.get("currency");
+                        let st: String = r_row.get("status");
+                        let applied: bool = r_row.get("applied_to_balance");
+                        let evt_st = u_payload
+                            .pointer("/payload/refund/entity/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(match u_event_type {
+                                PaymentEventType::RefundProcessed => "processed",
+                                PaymentEventType::RefundFailed => "failed",
+                                _ => "pending",
+                            })
+                            .to_string();
+                        (rid, amt as u64, curr, evt_st, Some(st), applied)
+                    }
+                    None => {
+                        let rid =
+                            refund_id_str.unwrap_or_else(|| format!("rfnd_recon_{}", u_event_id));
+                        let amt = u_payload
+                            .pointer("/payload/refund/entity/amount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let curr = u_payload
+                            .pointer("/payload/refund/entity/currency")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&payment_entity.currency)
+                            .to_string();
+                        let evt_st = u_payload
+                            .pointer("/payload/refund/entity/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(match u_event_type {
+                                PaymentEventType::RefundProcessed => "processed",
+                                PaymentEventType::RefundFailed => "failed",
+                                _ => "pending",
+                            })
+                            .to_string();
+                        (rid, amt, curr, evt_st, None, false)
+                    }
+                };
 
             // Currency validation against authoritative payment currency
             if r_currency != payment_entity.currency {
@@ -463,11 +485,21 @@ impl PostgresWebhookStore {
                     "Reconciliation failed: Refund '{}' currency '{}' mismatches payment currency '{}'",
                     r_id, r_currency, payment_entity.currency
                 );
-                let _ = sqlx::query("UPDATE webhook_inbox SET status = 'failed', error_message = $1, processed_at = NOW() WHERE id = $2;")
-                    .bind(&err_msg)
-                    .bind(u_inbox_id)
-                    .execute(&mut **tx)
-                    .await;
+                let update_res = sqlx::query(
+                    "UPDATE webhook_inbox SET status = 'failed', error_message = $1, processed_at = NOW() WHERE id = $2;",
+                )
+                .bind(&err_msg)
+                .bind(u_inbox_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                if update_res.rows_affected() == 0 {
+                    return Err(WebhookStoreError::Database(format!(
+                        "Failed to update unapplied inbox record {}: row not found",
+                        u_inbox_id
+                    )));
+                }
                 continue;
             }
 
@@ -477,21 +509,34 @@ impl PostgresWebhookStore {
                 &u_event_type,
                 Some(r_amount),
                 Some(&r_id),
-                Some(&r_status),
+                Some(&r_event_status),
             ) {
                 Ok(_) => {
                     if let Some(rf_entity) =
                         payment_entity.refunds.iter().find(|r| r.refund_id == r_id)
                     {
-                        let _ = sqlx::query(
+                        let resolved_status = match db_status {
+                            Some(ref cur_st) => {
+                                resolve_refund_status_precedence(cur_st, &rf_entity.status)
+                            }
+                            None => rf_entity.status.as_str(),
+                        };
+                        let resolved_applied = db_applied || rf_entity.applied_to_balance;
+
+                        let upsert_res = sqlx::query(
                             r#"
                             INSERT INTO payment_refunds (
                                 provider, refund_id, payment_id, amount_minor, currency, status, applied_to_balance, created_at, updated_at
                             )
                             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                             ON CONFLICT (provider, refund_id) DO UPDATE SET
-                                status = EXCLUDED.status,
-                                applied_to_balance = EXCLUDED.applied_to_balance,
+                                status = CASE 
+                                    WHEN payment_refunds.status = 'processed' THEN 'processed'
+                                    WHEN EXCLUDED.status = 'processed' THEN 'processed'
+                                    WHEN payment_refunds.status = 'failed' AND EXCLUDED.status != 'processed' THEN 'failed'
+                                    ELSE EXCLUDED.status
+                                END,
+                                applied_to_balance = payment_refunds.applied_to_balance OR EXCLUDED.applied_to_balance,
                                 updated_at = NOW();
                             "#,
                         )
@@ -500,13 +545,21 @@ impl PostgresWebhookStore {
                         .bind(payment_id)
                         .bind(rf_entity.amount_minor as i64)
                         .bind(&rf_entity.currency)
-                        .bind(&rf_entity.status)
-                        .bind(rf_entity.applied_to_balance)
+                        .bind(resolved_status)
+                        .bind(resolved_applied)
                         .execute(&mut **tx)
-                        .await;
+                        .await
+                        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                        if upsert_res.rows_affected() == 0 {
+                            return Err(WebhookStoreError::Database(format!(
+                                "Failed to persist refund '{}': 0 rows affected",
+                                r_id
+                            )));
+                        }
                     }
 
-                    let _ = sqlx::query(
+                    let inbox_res = sqlx::query(
                         r#"
                         UPDATE webhook_inbox
                         SET status = 'processed', error_message = NULL, processed_at = NOW()
@@ -515,11 +568,19 @@ impl PostgresWebhookStore {
                     )
                     .bind(u_inbox_id)
                     .execute(&mut **tx)
-                    .await;
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                    if inbox_res.rows_affected() == 0 {
+                        return Err(WebhookStoreError::Database(format!(
+                            "Failed to update unapplied inbox record {}: 0 rows affected",
+                            u_inbox_id
+                        )));
+                    }
                 }
                 Err(e) => {
                     let err_msg = format!("Reconciliation failed: {}", e);
-                    let _ = sqlx::query(
+                    let fail_res = sqlx::query(
                         r#"
                         UPDATE webhook_inbox
                         SET status = 'failed', error_message = $1, processed_at = NOW()
@@ -529,7 +590,15 @@ impl PostgresWebhookStore {
                     .bind(&err_msg)
                     .bind(u_inbox_id)
                     .execute(&mut **tx)
-                    .await;
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                    if fail_res.rows_affected() == 0 {
+                        return Err(WebhookStoreError::Database(format!(
+                            "Failed to update failed inbox record {}: 0 rows affected",
+                            u_inbox_id
+                        )));
+                    }
                 }
             }
         }
@@ -554,6 +623,7 @@ impl PostgresWebhookStore {
             let amt: i64 = r_row.get("amount_minor");
             let curr: String = r_row.get("currency");
             let st: String = r_row.get("status");
+            let cur_applied: bool = r_row.get("applied_to_balance");
 
             if payment_entity
                 .refunds
@@ -586,19 +656,30 @@ impl PostgresWebhookStore {
             {
                 if let Some(rf_entity) = payment_entity.refunds.iter().find(|r| r.refund_id == rid)
                 {
-                    let _ = sqlx::query(
+                    let resolved_status = resolve_refund_status_precedence(&st, &rf_entity.status);
+                    let resolved_applied = cur_applied || rf_entity.applied_to_balance;
+
+                    let update_res = sqlx::query(
                         r#"
                         UPDATE payment_refunds
                         SET status = $1, applied_to_balance = $2, updated_at = NOW()
                         WHERE provider = $3 AND refund_id = $4;
                         "#,
                     )
-                    .bind(&rf_entity.status)
-                    .bind(rf_entity.applied_to_balance)
+                    .bind(resolved_status)
+                    .bind(resolved_applied)
                     .bind(provider)
                     .bind(&rid)
                     .execute(&mut **tx)
-                    .await;
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                    if update_res.rows_affected() == 0 {
+                        return Err(WebhookStoreError::Database(format!(
+                            "Failed to update unapplied payment_refund row for '{}': 0 rows affected",
+                            rid
+                        )));
+                    }
                 }
             }
         }
@@ -933,16 +1014,19 @@ impl WebhookStore for PostgresWebhookStore {
 
                         if let Some(ref rf_row) = existing_refund_row {
                             let existing_status: String = rf_row.get("status");
+                            let existing_applied: bool = rf_row.get("applied_to_balance");
                             let target_status =
                                 resolve_refund_status_precedence(&existing_status, actual_status);
-                            let _ = sqlx::query(
+                            let target_applied = existing_applied;
+                            let update_res = sqlx::query(
                                 r#"
                                 UPDATE payment_refunds
-                                SET status = $1, applied_to_balance = false, updated_at = NOW()
-                                WHERE provider = $2 AND refund_id = $3 AND payment_id = $4 AND currency = $5;
+                                SET status = $1, applied_to_balance = $2, updated_at = NOW()
+                                WHERE provider = $3 AND refund_id = $4 AND payment_id = $5 AND currency = $6;
                                 "#,
                             )
                             .bind(target_status)
+                            .bind(target_applied)
                             .bind(provider)
                             .bind(clean_r_id)
                             .bind(payment_id)
@@ -950,14 +1034,31 @@ impl WebhookStore for PostgresWebhookStore {
                             .execute(&mut *tx)
                             .await
                             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                            if update_res.rows_affected() == 0 {
+                                let _ = tx.rollback().await;
+                                return Err(WebhookStoreError::Database(format!(
+                                    "Failed to update existing unapplied refund '{}': 0 rows affected",
+                                    clean_r_id
+                                )));
+                            }
                         } else {
                             let ref_amt = refund_amount_minor.unwrap_or(amount_minor);
-                            sqlx::query(
+                            let insert_res = sqlx::query(
                                 r#"
                                 INSERT INTO payment_refunds (
                                     provider, refund_id, payment_id, amount_minor, currency, status, applied_to_balance, created_at, updated_at
                                 )
-                                VALUES ($1, $2, $3, $4, $5, $6, false, NOW(), NOW());
+                                VALUES ($1, $2, $3, $4, $5, $6, false, NOW(), NOW())
+                                ON CONFLICT (provider, refund_id) DO UPDATE SET
+                                    status = CASE 
+                                        WHEN payment_refunds.status = 'processed' THEN 'processed'
+                                        WHEN EXCLUDED.status = 'processed' THEN 'processed'
+                                        WHEN payment_refunds.status = 'failed' AND EXCLUDED.status != 'processed' THEN 'failed'
+                                        ELSE EXCLUDED.status
+                                    END,
+                                    applied_to_balance = payment_refunds.applied_to_balance OR EXCLUDED.applied_to_balance,
+                                    updated_at = NOW();
                                 "#,
                             )
                             .bind(provider)
@@ -969,18 +1070,34 @@ impl WebhookStore for PostgresWebhookStore {
                             .execute(&mut *tx)
                             .await
                             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                            if insert_res.rows_affected() == 0 {
+                                let _ = tx.rollback().await;
+                                return Err(WebhookStoreError::Database(format!(
+                                    "Failed to insert unapplied refund '{}': 0 rows affected",
+                                    clean_r_id
+                                )));
+                            }
                         }
                     }
                 }
 
                 // 3. Mark webhook_inbox as unapplied lifecycle state
-                sqlx::query(
+                let inbox_res = sqlx::query(
                     "UPDATE webhook_inbox SET status = 'unapplied', processed_at = NOW() WHERE id = $1;",
                 )
                 .bind(inbox_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                if inbox_res.rows_affected() == 0 {
+                    let _ = tx.rollback().await;
+                    return Err(WebhookStoreError::Database(format!(
+                        "Failed to update webhook_inbox record {} to unapplied: 0 rows affected",
+                        inbox_id
+                    )));
+                }
 
                 tx.commit()
                     .await
@@ -1494,36 +1611,51 @@ impl InMemoryWebhookStore {
                 }
             };
 
-            let (r_id, r_amount, r_currency, r_status) = match refund_entry_opt {
-                Some(entry) => (
-                    entry.refund_id,
-                    entry.amount_minor,
-                    entry.currency,
-                    entry.status,
-                ),
-                None => {
-                    let rid = refund_id_str.unwrap_or_else(|| format!("rfnd_recon_{}", u_event_id));
-                    let amt = u_payload
-                        .pointer("/payload/refund/entity/amount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let curr = u_payload
-                        .pointer("/payload/refund/entity/currency")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&payment_entity.currency)
-                        .to_string();
-                    let st = u_payload
-                        .pointer("/payload/refund/entity/status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(match u_event_type {
-                            PaymentEventType::RefundProcessed => "processed",
-                            PaymentEventType::RefundFailed => "failed",
-                            _ => "pending",
-                        })
-                        .to_string();
-                    (rid, amt, curr, st)
-                }
-            };
+            let (r_id, r_amount, r_currency, r_event_status, cur_status, cur_applied) =
+                match refund_entry_opt {
+                    Some(entry) => {
+                        let evt_st = u_payload
+                            .pointer("/payload/refund/entity/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(match u_event_type {
+                                PaymentEventType::RefundProcessed => "processed",
+                                PaymentEventType::RefundFailed => "failed",
+                                _ => "pending",
+                            })
+                            .to_string();
+                        (
+                            entry.refund_id,
+                            entry.amount_minor,
+                            entry.currency,
+                            evt_st,
+                            Some(entry.status),
+                            entry.applied_to_balance,
+                        )
+                    }
+                    None => {
+                        let rid =
+                            refund_id_str.unwrap_or_else(|| format!("rfnd_recon_{}", u_event_id));
+                        let amt = u_payload
+                            .pointer("/payload/refund/entity/amount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let curr = u_payload
+                            .pointer("/payload/refund/entity/currency")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&payment_entity.currency)
+                            .to_string();
+                        let evt_st = u_payload
+                            .pointer("/payload/refund/entity/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(match u_event_type {
+                                PaymentEventType::RefundProcessed => "processed",
+                                PaymentEventType::RefundFailed => "failed",
+                                _ => "pending",
+                            })
+                            .to_string();
+                        (rid, amt, curr, evt_st, None, false)
+                    }
+                };
 
             if r_currency != payment_entity.currency {
                 let mut inbox_guard = store.inbox.lock();
@@ -1543,12 +1675,18 @@ impl InMemoryWebhookStore {
                 &u_event_type,
                 Some(r_amount),
                 Some(&r_id),
-                Some(&r_status),
+                Some(&r_event_status),
             ) {
                 Ok(_) => {
                     if let Some(rf_entity) =
                         payment_entity.refunds.iter().find(|r| r.refund_id == r_id)
                     {
+                        let resolved_status = match cur_status {
+                            Some(ref cs) => resolve_refund_status_precedence(cs, &rf_entity.status),
+                            None => rf_entity.status.as_str(),
+                        };
+                        let resolved_applied = cur_applied || rf_entity.applied_to_balance;
+
                         let mut refunds_guard = store.refunds.lock();
                         refunds_guard.insert(
                             (provider.to_string(), r_id.clone()),
@@ -1558,8 +1696,8 @@ impl InMemoryWebhookStore {
                                 payment_id: payment_id.to_string(),
                                 amount_minor: rf_entity.amount_minor,
                                 currency: rf_entity.currency.clone(),
-                                status: rf_entity.status.clone(),
-                                applied_to_balance: rf_entity.applied_to_balance,
+                                status: resolved_status.to_string(),
+                                applied_to_balance: resolved_applied,
                             },
                         );
                     }
@@ -1628,6 +1766,10 @@ impl InMemoryWebhookStore {
                     .iter()
                     .find(|r| r.refund_id == entry.refund_id)
                 {
+                    let resolved_status =
+                        resolve_refund_status_precedence(&entry.status, &rf_entity.status);
+                    let resolved_applied = entry.applied_to_balance || rf_entity.applied_to_balance;
+
                     let mut refunds_guard = store.refunds.lock();
                     refunds_guard.insert(
                         (provider.to_string(), entry.refund_id.clone()),
@@ -1637,8 +1779,8 @@ impl InMemoryWebhookStore {
                             payment_id: payment_id.to_string(),
                             amount_minor: rf_entity.amount_minor,
                             currency: rf_entity.currency.clone(),
-                            status: rf_entity.status.clone(),
-                            applied_to_balance: rf_entity.applied_to_balance,
+                            status: resolved_status.to_string(),
+                            applied_to_balance: resolved_applied,
                         },
                     );
                 }
@@ -5089,6 +5231,118 @@ mod tests {
             .unwrap();
         assert_eq!(rf_final.status, "processed");
         assert!(rf_final.applied_to_balance);
+
+        // Verify all relevant inbox records reached final processed state
+        let in_proc = store
+            .get_inbox_record("razorpay", evt_processed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_proc.status, WebhookStatus::Processed);
+
+        let in_created = store
+            .get_inbox_record("razorpay", evt_stale_created)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_created.status, WebhookStatus::Processed);
+
+        let in_failed = store
+            .get_inbox_record("razorpay", evt_stale_failed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_failed.status, WebhookStatus::Processed);
+
+        let in_cap = store
+            .get_inbox_record("razorpay", evt_capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_cap.status, WebhookStatus::Processed);
+
+        // 5. Test failed-to-processed recovery before capture
+        let recov_pay_id = "pay_inmem_recov_01";
+        let recov_rfnd_id = "rfnd_inmem_recov_01";
+        let evt_recov_f = "evt_inmem_recov_failed";
+        let evt_recov_p = "evt_inmem_recov_processed";
+        let evt_recov_cap = "evt_inmem_recov_capture";
+
+        // A. refund.failed arrives before capture
+        let p_fail_first = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_recov_f,
+            event_type: PaymentEventType::RefundFailed,
+            payment_id: recov_pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(recov_rfnd_id),
+            refund_amount_minor: Some(2000),
+            refund_status: Some("failed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_fail_first).await.unwrap();
+
+        let rf_f = store
+            .get_refund_record("razorpay", recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_f.status, "failed");
+        assert!(!rf_f.applied_to_balance);
+
+        // B. refund.processed arrives before capture for same refund -> recovers to processed!
+        let p_proc_second = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_recov_p,
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: recov_pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(recov_rfnd_id),
+            refund_amount_minor: Some(2000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_proc_second).await.unwrap();
+
+        let rf_p = store
+            .get_refund_record("razorpay", recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_p.status, "processed");
+        assert!(!rf_p.applied_to_balance);
+
+        // C. Capture arrives -> reconciles successfully
+        let p_cap_recov = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: evt_recov_cap,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: recov_pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_cap_recov).await.unwrap();
+
+        let pay_recov = store
+            .get_payment_record(recov_pay_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay_recov.refunded_amount_minor, 2000);
+
+        let rf_recov_final = store
+            .get_refund_record("razorpay", recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_recov_final.status, "processed");
+        assert!(rf_recov_final.applied_to_balance);
     }
 
     #[tokio::test]
@@ -5527,6 +5781,299 @@ mod tests {
             .unwrap();
         assert_eq!(rf_final.status, "processed");
         assert!(rf_final.applied_to_balance);
+
+        // Verify all relevant inbox records reached final processed state in PostgreSQL
+        let in_proc = store
+            .get_inbox_record("razorpay", &evt_processed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_proc.status, WebhookStatus::Processed);
+
+        let in_created = store
+            .get_inbox_record("razorpay", &evt_stale_created)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_created.status, WebhookStatus::Processed);
+
+        let in_failed = store
+            .get_inbox_record("razorpay", &evt_stale_failed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_failed.status, WebhookStatus::Processed);
+
+        let in_cap = store
+            .get_inbox_record("razorpay", &evt_capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_cap.status, WebhookStatus::Processed);
+
+        // 5. Test failed-to-processed recovery before capture in PostgreSQL
+        let recov_pay_id = format!("pay_pg_recov_{}", unique_suffix);
+        let recov_rfnd_id = format!("rfnd_pg_recov_{}", unique_suffix);
+        let evt_recov_f = format!("evt_pg_recov_f_{}", unique_suffix);
+        let evt_recov_p = format!("evt_pg_recov_p_{}", unique_suffix);
+        let evt_recov_cap = format!("evt_pg_recov_cap_{}", unique_suffix);
+
+        // A. refund.failed arrives before capture
+        let p_fail_first = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_recov_f,
+            event_type: PaymentEventType::RefundFailed,
+            payment_id: &recov_pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(&recov_rfnd_id),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("failed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_fail_first).await.unwrap();
+
+        let rf_f = store
+            .get_refund_record("razorpay", &recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_f.status, "failed");
+        assert!(!rf_f.applied_to_balance);
+
+        // B. refund.processed arrives before capture for same refund -> recovers to processed!
+        let p_proc_second = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_recov_p,
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: &recov_pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(&recov_rfnd_id),
+            refund_amount_minor: Some(2500),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_proc_second).await.unwrap();
+
+        let rf_p = store
+            .get_refund_record("razorpay", &recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_p.status, "processed");
+        assert!(!rf_p.applied_to_balance);
+
+        // C. Capture arrives -> automatically reconciles as completed processed refund
+        let p_cap_recov = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_recov_cap,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &recov_pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&p_cap_recov).await.unwrap();
+
+        let pay_recov = store
+            .get_payment_record(&recov_pay_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay_recov.refunded_amount_minor, 2500);
+
+        let rf_recov_final = store
+            .get_refund_record("razorpay", &recov_rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_recov_final.status, "processed");
+        assert!(rf_recov_final.applied_to_balance);
+    }
+
+    #[tokio::test]
+    async fn test_postgres_reconciliation_write_failure_rollback_and_retry_recovery() {
+        let pool = match get_test_postgres_pool().await {
+            Some(p) => p,
+            None => return,
+        };
+        let store = Arc::new(PostgresWebhookStore::new(pool.clone()));
+        let unique_suffix = uuid::Uuid::new_v4();
+        let pay_id = format!("pay_pg_wb_fail_{}", unique_suffix);
+        let rfnd_id = format!("rfnd_pg_wb_sim_fail_{}", unique_suffix);
+        let evt_refund = format!("evt_pg_wb_rfnd_{}", unique_suffix);
+        let evt_capture = format!("evt_pg_wb_cap_{}", unique_suffix);
+        let payload = serde_json::json!({"pg_test": "write_fail"});
+
+        // 1. Deliver unapplied refund before capture
+        let p_rfnd = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_refund,
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: &pay_id,
+            amount_minor: 0,
+            currency: "INR",
+            refund_id: Some(&rfnd_id),
+            refund_amount_minor: Some(3000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        let res1 = store.process_webhook_event(&p_rfnd).await.unwrap();
+        assert!(matches!(res1, WebhookProcessingResult::Unapplied { .. }));
+
+        let rf_initial = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_initial.status, "processed");
+        assert!(!rf_initial.applied_to_balance);
+
+        let inbox_rf_initial = store
+            .get_inbox_record("razorpay", &evt_refund)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_rf_initial.status, WebhookStatus::Unapplied);
+
+        // 2. Install a test-only trigger on payment_refunds that fails updates on this simulated refund ID
+        let fn_name = format!("fail_recon_wb_{}", unique_suffix.simple());
+        let trg_name = format!("trg_fail_wb_{}", unique_suffix.simple());
+        sqlx::query(&format!(
+            r#"
+            CREATE OR REPLACE FUNCTION {}() RETURNS TRIGGER AS $$
+            BEGIN
+                IF NEW.refund_id = '{}' AND NEW.applied_to_balance = true THEN
+                    RAISE EXCEPTION 'Simulated reconciliation database write failure for test';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            "#,
+            fn_name, rfnd_id
+        ))
+        .execute(&pool)
+        .await
+        .expect("Function setup must succeed");
+
+        sqlx::query(&format!(
+            r#"
+            CREATE TRIGGER {}
+            BEFORE UPDATE OR INSERT ON payment_refunds
+            FOR EACH ROW EXECUTE FUNCTION {}();
+            "#,
+            trg_name, fn_name
+        ))
+        .execute(&pool)
+        .await
+        .expect("Trigger setup must succeed");
+
+        // 3. Deliver payment.captured -> reconciliation write fails
+        let p_cap = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_capture,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &pay_id,
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        let res_cap = store.process_webhook_event(&p_cap).await;
+
+        // Transaction reports failure (propagated from database write failure)
+        assert!(
+            matches!(res_cap, Err(WebhookStoreError::Database(ref msg)) if msg.contains("Simulated reconciliation database write failure")),
+            "Expected Database error from write failure, got: {:?}",
+            res_cap
+        );
+
+        // Verify transaction rolled back completely:
+        // Payment record was NOT committed
+        let pay_record = store.get_payment_record(&pay_id).await.unwrap();
+        assert!(
+            pay_record.is_none(),
+            "Payment record must NOT be committed on write failure"
+        );
+
+        // Refund row was NOT left inconsistent (still status 'processed', applied_to_balance = false)
+        let rf_after_fail = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_after_fail.status, "processed");
+        assert!(
+            !rf_after_fail.applied_to_balance,
+            "Refund must NOT be left applied_to_balance = true"
+        );
+
+        // Refund inbox record is NOT incorrectly marked processed (remains unapplied)
+        let inbox_rf_after_fail = store
+            .get_inbox_record("razorpay", &evt_refund)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_rf_after_fail.status, WebhookStatus::Unapplied);
+
+        // Capture inbox record was not committed as processed
+        let inbox_cap_after_fail = store
+            .get_inbox_record("razorpay", &evt_capture)
+            .await
+            .unwrap();
+        assert!(
+            inbox_cap_after_fail.is_none()
+                || inbox_cap_after_fail.unwrap().status != WebhookStatus::Processed,
+            "Capture inbox record must not be committed as processed"
+        );
+
+        // 4. Remove the failure trigger
+        let _ = sqlx::query(&format!(
+            "DROP TRIGGER IF EXISTS {} ON payment_refunds;",
+            trg_name
+        ))
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS {}();", fn_name))
+            .execute(&pool)
+            .await;
+
+        // 5. Retry the capture delivery -> succeeds and cleanly reconciles
+        let retry_res = store.process_webhook_event(&p_cap).await.unwrap();
+        assert!(matches!(retry_res, WebhookProcessingResult::Applied { .. }));
+
+        let pay_recovered = store.get_payment_record(&pay_id).await.unwrap().unwrap();
+        assert_eq!(pay_recovered.state, PaymentState::PartiallyRefunded);
+        assert_eq!(pay_recovered.amount_minor, 10000);
+        assert_eq!(pay_recovered.refunded_amount_minor, 3000);
+
+        let rf_recovered = store
+            .get_refund_record("razorpay", &rfnd_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rf_recovered.status, "processed");
+        assert!(rf_recovered.applied_to_balance);
+
+        let inbox_rf_final = store
+            .get_inbox_record("razorpay", &evt_refund)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_rf_final.status, WebhookStatus::Processed);
+
+        let inbox_cap_final = store
+            .get_inbox_record("razorpay", &evt_capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox_cap_final.status, WebhookStatus::Processed);
     }
 
     #[tokio::test]
