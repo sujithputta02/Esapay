@@ -963,7 +963,6 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:write".to_string(),
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
-                    "gateways:toggle".to_string(),
                     "gateways:read".to_string(),
                 ],
             });
@@ -987,7 +986,6 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:write".to_string(),
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
-                    "gateways:toggle".to_string(),
                     "gateways:read".to_string(),
                 ],
             });
@@ -1051,10 +1049,10 @@ pub async fn authenticate_token_str(raw_token: &str) -> Result<CallerIdentity, A
             "payments:write".to_string(),
             "payments:read".to_string(),
             "telemetry:read".to_string(),
-            "gateways:toggle".to_string(),
             "gateways:read".to_string(),
         ];
         if is_admin {
+            scopes.push("gateways:toggle".to_string());
             scopes.push("workloads:write".to_string());
             scopes.push("workloads:read".to_string());
             scopes.push("audit:read".to_string());
@@ -1326,7 +1324,7 @@ pub(crate) mod tests {
         Some((priv_pem, pub_pem))
     }
 
-    fn create_hs256_token(secret: &str, claims: &serde_json::Value) -> String {
+    pub(crate) fn create_hs256_token(secret: &str, claims: &serde_json::Value) -> String {
         encode(
             &Header::new(Algorithm::HS256),
             claims,

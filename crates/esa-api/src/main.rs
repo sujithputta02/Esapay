@@ -1046,15 +1046,29 @@ async fn health_handler() -> impl IntoResponse {
     }))
 }
 
-async fn get_fluid_reasoner_status(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_fluid_reasoner_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for fluid reasoner status: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
     let available = state.fluid_reasoner.is_available().await;
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": if available { "online" } else { "offline" },
         "service": "arc_fluid_reasoner",
         "port": 5005,
         "available": available,
         "fallback_tier_order": ["FluidReasoner (Local port 5005)", "Ollama LLM (mistral)", "Deterministic Rules"]
-    }))
+    })))
 }
 
 async fn list_workloads(
@@ -1761,14 +1775,25 @@ struct TriggerSpikeRequest {
     multiplier: f64,
 }
 
-async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+async fn seed_demo_data(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for demo seeding: {}", e))
+    })?;
+    if !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Administrative privileges required for demo seeding".into(),
+        ));
+    }
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Demo seeding is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
 
-    info!("Seeding demo data");
+    info!(caller = %caller.user_id, "Seeding demo data");
 
     use chrono::Utc;
 
@@ -1876,8 +1901,17 @@ async fn seed_demo_data(State(state): State<AppState>) -> Result<impl IntoRespon
 
 async fn trigger_spike(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<TriggerSpikeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for demo spike: {}", e))
+    })?;
+    if !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Administrative privileges required for demo spike".into(),
+        ));
+    }
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Demo spike endpoints are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
@@ -1893,6 +1927,7 @@ async fn trigger_spike(
     let multiplier = req.multiplier.clamp(1.0, 20.0);
 
     info!(
+        caller = %caller.user_id,
         "🧪 Manual spike test triggered with multiplier {}",
         multiplier
     );
@@ -2611,8 +2646,20 @@ async fn get_verdict_stats(
 }
 
 // Intent & Constraints Endpoints
-async fn get_active_intents(State(_state): State<AppState>) -> impl IntoResponse {
-    Json(serde_json::json!({
+async fn get_active_intents(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for active intents: {}", e))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
         "intents": [
             {
                 "intent_id": "intent-001",
@@ -2646,13 +2693,28 @@ async fn get_active_intents(State(_state): State<AppState>) -> impl IntoResponse
             }
         ],
         "total": 1
-    }))
+    })))
 }
 
-async fn get_constraint_violations(State(_state): State<AppState>) -> impl IntoResponse {
+async fn get_constraint_violations(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for constraint violations: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
+
     use chrono::Utc;
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "violations": [
             {
                 "violation_id": "violation-001",
@@ -2674,7 +2736,7 @@ async fn get_constraint_violations(State(_state): State<AppState>) -> impl IntoR
             "MEDIUM": 0,
             "HIGH": 1
         }
-    }))
+    })))
 }
 
 // Demo Scenario Triggers
@@ -2686,9 +2748,21 @@ struct ScenarioRequest {
 
 async fn trigger_scenario(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(scenario): Path<String>,
     Json(req): Json<ScenarioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for demo scenario triggers: {}",
+            e
+        ))
+    })?;
+    if !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Administrative privileges required for demo scenario triggers".into(),
+        ));
+    }
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Demo scenario triggers are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
@@ -3222,16 +3296,17 @@ async fn toggle_gateway(
         }
     };
 
-    if !caller
-        .scopes
-        .iter()
-        .any(|s| s == "gateways:toggle" || s == "admin" || s == "*")
+    if !caller.is_admin()
+        && !caller
+            .scopes
+            .iter()
+            .any(|s| s == "gateways:toggle" || s == "gateways:admin" || s == "admin" || s == "*")
     {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": "forbidden",
-                "message": "Caller lacks required 'gateways:toggle' scope"
+                "message": "Administrative privileges required to toggle global gateway status"
             })),
         ));
     }
@@ -3794,24 +3869,165 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_toggle_gateway_with_valid_key_succeeds() {
+    async fn test_toggle_gateway_access_control_and_state_isolation() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        std::env::set_var("ESA_TEST_API_KEY", "esa_test_gateway_toggle_key_9999");
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ADMIN_API_KEY", "esa_admin_toggle_secret");
+        std::env::set_var("ESA_LIVE_API_KEY", "esa_live_merchant_toggle");
+        std::env::set_var("ESA_TEST_API_KEY", "esa_test_merchant_toggle");
+        std::env::set_var("SUPABASE_JWT_SECRET", "test_mock_jwt_secret_toggle");
+        std::env::set_var("SUPABASE_URL", "https://test.supabase.co");
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
 
         let state = create_test_state();
         let app = build_app(state.clone());
 
-        let req = Request::builder()
+        let now = chrono::Utc::now().timestamp();
+        let merchant_jwt = api_keys::tests::create_hs256_token(
+            "test_mock_jwt_secret_toggle",
+            &serde_json::json!({
+                "sub": "b2c1d3e4-5f6a-7b8c-9d0e-1f2a3b4c5d6e",
+                "email": "merchant@example.com",
+                "role": "authenticated",
+                "aud": "authenticated",
+                "exp": now + 3600,
+                "nbf": now - 10,
+                "iss": "https://test.supabase.co/auth/v1"
+            }),
+        );
+
+        let toggle_routes = vec![
+            "/api/gateways/razorpay/toggle",
+            "/api/v1/gateways/razorpay/toggle",
+        ];
+
+        // 1. Anonymous caller: 401 Unauthorized
+        for uri in &toggle_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 2. Ordinary merchant using ESA_TEST_API_KEY: 403 Forbidden
+        for uri in &toggle_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("x-api-key", "esa_test_merchant_toggle")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 3. Ordinary merchant using ESA_LIVE_API_KEY: 403 Forbidden
+        for uri in &toggle_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("x-api-key", "esa_live_merchant_toggle")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 4. Standard merchant JWT: 403 Forbidden
+        for uri in &toggle_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("authorization", format!("Bearer {}", merchant_jwt))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 5. Merchant must still be able to read /api/gateways and /api/v1/gateways
+        for uri in &["/api/gateways", "/api/v1/gateways"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "esa_test_merchant_toggle")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let req_jwt = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("authorization", format!("Bearer {}", merchant_jwt))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp_jwt = app.clone().oneshot(req_jwt).await.unwrap();
+            assert_eq!(resp_jwt.status(), StatusCode::OK);
+        }
+
+        // 6. Rejected toggle requests must not modify global gateway overrides or change checkout routing decisions
+        {
+            let overrides = state.gateway_overrides.read().unwrap();
+            assert_eq!(overrides.get("razorpay"), None);
+        }
+        let checkout_req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("x-api-key", "esa_test_merchant_toggle")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "amount": 5000,
+                    "currency": "INR",
+                    "gateway": "razorpay"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let checkout_resp = app.clone().oneshot(checkout_req).await.unwrap();
+        assert_eq!(checkout_resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(checkout_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let checkout_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(checkout_json["routed_gateway"], "razorpay");
+        assert_eq!(checkout_json["failover_triggered"], false);
+
+        // 7. Authorized administrator: 200 OK
+        let admin_req = Request::builder()
             .method("POST")
             .uri("/api/gateways/razorpay/toggle")
-            .header("x-api-key", "esa_test_gateway_toggle_key_9999")
+            .header("x-api-key", "esa_admin_toggle_secret")
             .body(axum::body::Body::empty())
             .unwrap();
+        let admin_resp = app.clone().oneshot(admin_req).await.unwrap();
+        assert_eq!(admin_resp.status(), StatusCode::OK);
 
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        {
+            let overrides = state.gateway_overrides.read().unwrap();
+            assert_eq!(overrides.get("razorpay"), Some(&false));
+        }
 
-        std::env::remove_var("ESA_TEST_API_KEY");
+        // Toggling back via v1 alias as administrator: 200 OK
+        let admin_req_v1 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/gateways/razorpay/toggle")
+            .header("x-api-key", "esa_admin_toggle_secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let admin_resp_v1 = app.clone().oneshot(admin_req_v1).await.unwrap();
+        assert_eq!(admin_resp_v1.status(), StatusCode::OK);
+
+        {
+            let overrides = state.gateway_overrides.read().unwrap();
+            assert_eq!(overrides.get("razorpay"), Some(&true));
+        }
+
+        clear_mode_env_vars();
     }
 
     #[tokio::test]
@@ -3832,6 +4048,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_demo_spike_disabled_in_production() {
         let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-spike-key-prod");
 
         let make_spike_req = || {
             let req_body = serde_json::to_string(&serde_json::json!({
@@ -3843,6 +4060,7 @@ mod integration_tests {
                 .method("POST")
                 .uri("/api/demo/trigger-spike")
                 .header("content-type", "application/json")
+                .header("x-api-key", "admin-spike-key-prod")
                 .body(axum::body::Body::from(req_body))
                 .unwrap()
         };
@@ -3887,6 +4105,206 @@ mod integration_tests {
             let app = build_app(state);
             let resp = app.oneshot(make_spike_req()).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
+            clear_mode_env_vars();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_demo_mutation_endpoints_access_control() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ADMIN_API_KEY", "esa_admin_demo_secret");
+        std::env::set_var("ESA_TEST_API_KEY", "esa_test_merchant_demo");
+
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        let endpoints: Vec<(&str, Option<serde_json::Value>)> = vec![
+            (
+                "/api/demo/trigger-spike",
+                Some(serde_json::json!({ "multiplier": 2.0 })),
+            ),
+            (
+                "/api/v1/demo/trigger-spike",
+                Some(serde_json::json!({ "multiplier": 2.0 })),
+            ),
+            ("/api/demo/seed", None),
+            ("/api/v1/demo/seed", None),
+            (
+                "/api/demo/scenario/burst-spike",
+                Some(serde_json::json!({ "intensity": 1.0 })),
+            ),
+            (
+                "/api/v1/demo/scenario/burst-spike",
+                Some(serde_json::json!({ "intensity": 1.0 })),
+            ),
+        ];
+
+        let make_req =
+            |uri: &str, body_val: &Option<serde_json::Value>, auth_header: Option<(&str, &str)>| {
+                let mut builder = Request::builder().method("POST").uri(uri);
+                if let Some((k, v)) = auth_header {
+                    builder = builder.header(k, v);
+                }
+                if let Some(val) = body_val {
+                    builder = builder.header("content-type", "application/json");
+                    builder
+                        .body(axum::body::Body::from(serde_json::to_string(val).unwrap()))
+                        .unwrap()
+                } else {
+                    builder.body(axum::body::Body::empty()).unwrap()
+                }
+            };
+
+        // 1. Anonymous + simulation enabled: 401 Unauthorized
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            for (uri, body) in &endpoints {
+                let initial_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                let mut rx = state.broadcaster.subscribe();
+
+                let req = make_req(uri, body, None);
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "Expected 401 for anonymous access to {}",
+                    uri
+                );
+
+                let current_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                assert_eq!(
+                    initial_workloads, current_workloads,
+                    "Workloads must not mutate on rejected anonymous call to {}",
+                    uri
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "No telemetry message should broadcast on rejected anonymous call to {}",
+                    uri
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 2. Merchant + simulation enabled: 403 Forbidden
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            for (uri, body) in &endpoints {
+                let initial_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                let mut rx = state.broadcaster.subscribe();
+
+                let req = make_req(uri, body, Some(("x-api-key", "esa_test_merchant_demo")));
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "Expected 403 for merchant access to {}",
+                    uri
+                );
+
+                let current_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                assert_eq!(
+                    initial_workloads, current_workloads,
+                    "Workloads must not mutate on rejected merchant call to {}",
+                    uri
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "No telemetry message should broadcast on rejected merchant call to {}",
+                    uri
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 3. Admin + production mode: 403 Forbidden
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ENVIRONMENT", "production");
+            for (uri, body) in &endpoints {
+                let initial_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                let mut rx = state.broadcaster.subscribe();
+
+                let req = make_req(uri, body, Some(("x-api-key", "esa_admin_demo_secret")));
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "Expected 403 for admin in production mode on {}",
+                    uri
+                );
+
+                let current_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                assert_eq!(
+                    initial_workloads, current_workloads,
+                    "Workloads must not mutate on production call to {}",
+                    uri
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "No telemetry message should broadcast on production call to {}",
+                    uri
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 4. Admin + unconfigured mode: 403 Forbidden
+        {
+            clear_mode_env_vars();
+            for (uri, body) in &endpoints {
+                let initial_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                let mut rx = state.broadcaster.subscribe();
+
+                let req = make_req(uri, body, Some(("x-api-key", "esa_admin_demo_secret")));
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "Expected 403 for admin in unconfigured mode on {}",
+                    uri
+                );
+
+                let current_workloads =
+                    serde_json::to_value(state.state_fabric.list_workloads()).unwrap();
+                assert_eq!(
+                    initial_workloads, current_workloads,
+                    "Workloads must not mutate on unconfigured call to {}",
+                    uri
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "No telemetry message should broadcast on unconfigured call to {}",
+                    uri
+                );
+            }
+            clear_mode_env_vars();
+        }
+
+        // 5. Admin + simulation enabled: 200 OK
+        {
+            clear_mode_env_vars();
+            std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+            for (uri, body) in &endpoints {
+                let req = make_req(uri, body, Some(("x-api-key", "esa_admin_demo_secret")));
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "Expected 200 for admin with simulation enabled on {}",
+                    uri
+                );
+            }
             clear_mode_env_vars();
         }
     }
@@ -7248,6 +7666,12 @@ mod integration_tests {
             "/api/v1/benchmark/latest",
             "/api/benchmark/ablations",
             "/api/v1/benchmark/ablations",
+            "/api/agents/fluid-reasoner/status",
+            "/api/v1/agents/fluid-reasoner/status",
+            "/api/intent/active",
+            "/api/v1/intent/active",
+            "/api/intent/violations",
+            "/api/v1/intent/violations",
         ];
 
         let all_routes: Vec<&str> = global_workload_routes
