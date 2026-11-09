@@ -746,13 +746,21 @@ export function LandingPage() {
           if (npmCliCount === 0) npmCliCount = 485;
         }
 
-        // 4. PyPI downloads (esapay Python SDK)
+        // 4. PyPI downloads (esapay Python SDK via CORS-friendly shields.io API)
         try {
-          const pypiRes = await fetch('https://pypistats.org/api/packages/esapay/recent');
+          const pypiRes = await fetch('https://img.shields.io/pypi/dm/esapay.json');
           if (pypiRes.ok) {
             const pypiData = await pypiRes.json();
-            if (pypiData?.data?.last_month) {
-              pypiCount = pypiData.data.last_month;
+            const raw = typeof pypiData?.message === 'string' ? pypiData.message : typeof pypiData?.value === 'string' ? pypiData.value : '';
+            const match = raw.match(/([0-9,.]+)\s*([kKmM]?)/);
+            if (match) {
+              let val = parseFloat(match[1].replace(/,/g, ''));
+              const unit = (match[2] || '').toLowerCase();
+              if (unit === 'k') val *= 1000;
+              else if (unit === 'm') val *= 1000000;
+              if (!isNaN(val) && val > 0) {
+                pypiCount = Math.round(val);
+              }
             }
           }
         } catch {
@@ -2371,6 +2379,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             </label>
                             <input
                               type="email"
+                              autoComplete="email"
                               placeholder="merchant@company.com"
                               value={authEmail}
                               onChange={(e) => setAuthEmail(e.target.value)}
@@ -2385,6 +2394,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             <div className="relative">
                               <input
                                 type={showAuthPassword ? 'text' : 'password'}
+                                autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
                                 placeholder={
                                   authMode === 'signup'
                                     ? '8+ chars, upper, lower, number, symbol'
@@ -2415,6 +2425,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                                 <div className="relative">
                                   <input
                                     type={showAuthConfirmPassword ? 'text' : 'password'}
+                                    autoComplete="new-password"
                                     placeholder="Re-enter root credential"
                                     value={authConfirmPassword}
                                     onChange={(e) => setAuthConfirmPassword(e.target.value)}
@@ -2448,6 +2459,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                                 </label>
                                 <input
                                   type="text"
+                                  autoComplete="organization"
                                   placeholder="e.g. Acme FinTech Technologies Pvt Ltd"
                                   value={authOrg}
                                   onChange={(e) => setAuthOrg(e.target.value)}

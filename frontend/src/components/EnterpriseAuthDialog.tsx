@@ -353,6 +353,7 @@ export function EnterpriseAuthDialog({
                   <input
                     type="text"
                     required
+                    autoComplete="email"
                     value={ssoDomain}
                     onChange={(e) => setSsoDomain(e.target.value)}
                     placeholder="name@company.com or company.com"
@@ -412,6 +413,7 @@ export function EnterpriseAuthDialog({
                   <input
                     type="email"
                     required
+                    autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="Insert email"
@@ -429,6 +431,7 @@ export function EnterpriseAuthDialog({
                     <input
                       type="text"
                       required
+                      autoComplete="organization"
                       value={organization}
                       onChange={(e) => setOrganization(e.target.value)}
                       placeholder="e.g. Acme FinTech Private Limited"
@@ -460,6 +463,7 @@ export function EnterpriseAuthDialog({
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
+                      autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="Your password"
@@ -531,6 +535,7 @@ export function EnterpriseAuthDialog({
                       <input
                         type={showConfirmPassword ? 'text' : 'password'}
                         required
+                        autoComplete="new-password"
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
                         placeholder="Re-enter your password"
