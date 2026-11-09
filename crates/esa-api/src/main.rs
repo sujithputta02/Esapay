@@ -262,6 +262,55 @@ pub(crate) fn is_demo_mutation_allowed() -> bool {
     matches!(detect_checkout_mode(), PaymentCheckoutMode::Simulated)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedOrigin {
+    pub scheme: String,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+fn parse_origin(origin: &str) -> Option<ParsedOrigin> {
+    let clean = origin.trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    let uri: axum::http::Uri = clean.parse().ok()?;
+    let scheme = uri.scheme_str()?.to_lowercase();
+    let host = uri.host()?.to_lowercase();
+    let port = uri.port_u16();
+
+    // An Origin header must not contain a path (other than empty or "/"), query, or fragment
+    let path = uri.path();
+    if !path.is_empty() && path != "/" {
+        return None;
+    }
+    if uri.query().is_some() {
+        return None;
+    }
+
+    Some(ParsedOrigin { scheme, host, port })
+}
+
+fn is_loopback_or_localhost(host: &str) -> bool {
+    let h = host.trim().to_lowercase();
+    let h_clean = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&h);
+    if h_clean == "localhost"
+        || h_clean.ends_with(".localhost")
+        || h_clean == "127.0.0.1"
+        || h_clean == "::1"
+    {
+        return true;
+    }
+    if let Ok(ip) = h_clean.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
     pub is_production: bool,
@@ -292,41 +341,68 @@ impl CorsConfig {
 
     pub fn is_origin_allowed(&self, origin: &str) -> bool {
         let origin_clean = origin.trim();
-        let origin_lower = origin_clean.to_lowercase();
-
-        // 1. Exact production HTTPS origin is always allowed
-        if origin_lower == "https://esapay.vercel.app" {
-            return true;
-        }
-
-        // 2. Reject HTTP production origin
-        if origin_lower == "http://esapay.vercel.app" {
+        if origin_clean.is_empty() || origin_clean == "*" {
             return false;
         }
 
-        // 3. Explicitly configured allowed origins (e.g. specific preview URLs)
-        // Strictly reject wildcard '*' because credentials are enabled
-        for allowed in &self.allowed_origins {
-            let allowed_clean = allowed.trim();
-            if allowed_clean == "*" {
-                // Wildcard forbidden with credentials to prevent credentialed cross-origin data exposure
-                continue;
-            }
-            if allowed_clean.eq_ignore_ascii_case(origin_clean) {
-                return true;
-            }
+        let parsed = match parse_origin(origin_clean) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        let is_loopback = is_loopback_or_localhost(&parsed.host);
+
+        // 1. In production mode, reject all localhost and loopback origins,
+        // EVEN IF explicitly present in ALLOWED_ORIGINS.
+        if self.is_production && is_loopback {
+            return false;
         }
 
-        // 4. Localhost and loopback origins allowed ONLY in non-production mode
-        if !self.is_production
-            && (origin_lower.starts_with("http://localhost:")
-                || origin_lower == "http://localhost"
-                || origin_lower.starts_with("http://127.0.0.1:")
-                || origin_lower == "http://127.0.0.1"
-                || origin_lower.starts_with("https://localhost:")
-                || origin_lower == "https://localhost")
-        {
+        // 2. In non-production (development) mode, allow localhost and loopback origins (http or https)
+        if !self.is_production && is_loopback {
+            return parsed.scheme == "http" || parsed.scheme == "https";
+        }
+
+        // 3. Exact production HTTPS origin is always allowed
+        if parsed.scheme == "https" && parsed.host == "esapay.vercel.app" && parsed.port.is_none() {
             return true;
+        }
+
+        // 4. Reject unencrypted HTTP production origin unconditionally
+        if parsed.host == "esapay.vercel.app" && parsed.scheme != "https" {
+            return false;
+        }
+
+        // 5. Explicitly configured allowed origins (e.g. preview deployments)
+        for allowed in &self.allowed_origins {
+            let allowed_clean = allowed.trim();
+            if allowed_clean.is_empty() || allowed_clean == "*" {
+                // Strictly reject wildcard '*' with credentialed requests
+                continue;
+            }
+
+            let parsed_allowed = match parse_origin(allowed_clean) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // In production, require configured production and preview origins to use HTTPS
+            if self.is_production && parsed_allowed.scheme != "https" {
+                continue;
+            }
+
+            // In production, reject localhost/loopback in allowed origins configuration
+            if self.is_production && is_loopback_or_localhost(&parsed_allowed.host) {
+                continue;
+            }
+
+            // Exact parsed match (scheme, host, and port)
+            if parsed.scheme == parsed_allowed.scheme
+                && parsed.host == parsed_allowed.host
+                && parsed.port == parsed_allowed.port
+            {
+                return true;
+            }
         }
 
         false
@@ -6311,7 +6387,7 @@ mod integration_tests {
         // 1. Exact production HTTPS origin succeeds
         assert!(prod_cors.is_origin_allowed("https://esapay.vercel.app"));
 
-        // 2. Explicitly configured preview origin succeeds
+        // 2. Explicitly configured HTTPS preview origin succeeds
         assert!(prod_cors.is_origin_allowed("https://esapay-preview-pr-19.vercel.app"));
 
         // 3. Unrelated *.vercel.app origin fails (suffix matching forbidden)
@@ -6321,13 +6397,36 @@ mod integration_tests {
         // 4. HTTP production origin fails
         assert!(!prod_cors.is_origin_allowed("http://esapay.vercel.app"));
 
-        // 5. Localhost fails in production mode
+        // 5. Localhost and loopback origins fail in production mode
         assert!(!prod_cors.is_origin_allowed("http://localhost:3000"));
         assert!(!prod_cors.is_origin_allowed("http://localhost:5173"));
         assert!(!prod_cors.is_origin_allowed("http://127.0.0.1:8080"));
         assert!(!prod_cors.is_origin_allowed("https://localhost"));
 
-        // 6. Non-production (development) mode allows localhost
+        // 6. Explicitly configured localhost in ALLOWED_ORIGINS must FAIL in production mode
+        let prod_cors_with_local = CorsConfig::new(
+            true,
+            vec![
+                "http://localhost:3000".to_string(),
+                "https://localhost:3000".to_string(),
+                "http://127.0.0.1:8080".to_string(),
+                "https://esapay-preview-pr-19.vercel.app".to_string(),
+            ],
+        );
+        assert!(!prod_cors_with_local.is_origin_allowed("http://localhost:3000"));
+        assert!(!prod_cors_with_local.is_origin_allowed("https://localhost:3000"));
+        assert!(!prod_cors_with_local.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(prod_cors_with_local.is_origin_allowed("https://esapay-preview-pr-19.vercel.app"));
+
+        // 7. Explicit HTTP preview origins in production must FAIL
+        let prod_cors_with_http_preview = CorsConfig::new(
+            true,
+            vec!["http://esapay-preview-pr-19.vercel.app".to_string()],
+        );
+        assert!(!prod_cors_with_http_preview
+            .is_origin_allowed("http://esapay-preview-pr-19.vercel.app"));
+
+        // 8. Non-production (development) mode allows localhost
         let dev_cors = CorsConfig::new(false, vec![]);
         assert!(dev_cors.is_origin_allowed("https://esapay.vercel.app"));
         assert!(dev_cors.is_origin_allowed("http://localhost:3000"));
@@ -6338,8 +6437,9 @@ mod integration_tests {
         assert!(!dev_cors.is_origin_allowed("https://random-attacker.vercel.app"));
         assert!(!dev_cors.is_origin_allowed("http://esapay.vercel.app"));
 
-        // 7. Wildcard configuration '*' cannot enable credentialed access
+        // 9. Wildcard configuration '*' cannot enable credentialed access
         let wildcard_cors = CorsConfig::new(true, vec!["*".to_string()]);
+        assert!(!wildcard_cors.is_origin_allowed("*"));
         assert!(!wildcard_cors.is_origin_allowed("https://attacker.com"));
         assert!(!wildcard_cors.is_origin_allowed("https://evil.vercel.app"));
         assert!(!wildcard_cors.is_origin_allowed("http://localhost:3000"));
