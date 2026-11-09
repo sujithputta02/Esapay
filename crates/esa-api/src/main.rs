@@ -782,6 +782,7 @@ async fn main() -> anyhow::Result<()> {
         last_ablation: Arc::new(std::sync::RwLock::new(None)),
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         webhook_store,
+        order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let app = build_app(app_state);
@@ -1011,6 +1012,7 @@ struct AppState {
     last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
     gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
     webhook_store: Arc<dyn WebhookStore>,
+    order_merchants: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1601,6 +1603,12 @@ async fn razorpay_create_order(
 
     let order_id = order.get("id").and_then(|v| v.as_str()).unwrap_or_default();
 
+    if !order_id.is_empty() {
+        if let Ok(mut map) = state.order_merchants.write() {
+            map.insert(order_id.to_string(), caller.merchant_id.clone());
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "order_id": order_id,
         "amount": order.get("amount").and_then(|v| v.as_u64()).unwrap_or(req.amount_cents),
@@ -1647,39 +1655,63 @@ async fn razorpay_confirm_payment(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Validate payment ownership: payment.notes.esa_merchant_id or associated order.notes.esa_merchant_id
-    let payment_merchant_id = payment
-        .get("notes")
-        .and_then(|n| n.get("esa_merchant_id"))
+    // 1. Obtain the actual order_id from the Razorpay payment entity.
+    let order_id = payment
+        .get("order_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
 
-    let merchant_id = match payment_merchant_id {
-        Some(m) if !m.is_empty() => Some(m),
-        _ => {
-            if let Some(order_id) = payment.get("order_id").and_then(|v| v.as_str()) {
-                if !order_id.is_empty() {
-                    let order = adapter.client().get_order(order_id).await.map_err(|e| {
-                        AppError::Internal(format!("Failed to retrieve order {}: {}", order_id, e))
-                    })?;
-                    order
-                        .get("notes")
-                        .and_then(|n| n.get("esa_merchant_id"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+    let order_id = match order_id {
+        Some(id) => id,
+        None => {
+            return Err(AppError::Forbidden(
+                "Payment has no associated order_id; cannot verify merchant ownership".into(),
+            ));
         }
     };
 
-    let payment_owner = merchant_id.as_deref().unwrap_or("");
-    if payment_owner.is_empty() || (payment_owner != caller.merchant_id && !caller.is_admin()) {
+    // 2. Retrieve that order using the Razorpay API.
+    let order = adapter.client().get_order(order_id).await.map_err(|e| {
+        AppError::Forbidden(format!(
+            "Failed to retrieve order {} for verification: {}",
+            order_id, e
+        ))
+    })?;
+
+    // 3. Use the server-created order.notes.esa_merchant_id as the ownership authority.
+    // Never treat payment.notes.esa_merchant_id as proof of ownership.
+    let order_merchant_id = order
+        .get("notes")
+        .and_then(|n| n.get("esa_merchant_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let authoritative_owner = match order_merchant_id {
+        Some(m) => m,
+        None => {
+            return Err(AppError::Forbidden(
+                "Authoritative order lacks merchant ownership metadata".into(),
+            ));
+        }
+    };
+
+    // 4. Verify against durable server-owned order-to-merchant mapping if tracked locally.
+    if let Ok(map) = state.order_merchants.read() {
+        if let Some(tracked_merchant) = map.get(order_id) {
+            if tracked_merchant != authoritative_owner {
+                return Err(AppError::Forbidden(
+                    "Order ownership metadata conflicts with server-tracked order mapping".into(),
+                ));
+            }
+        }
+    }
+
+    // 5. Enforce ownership: authoritative order merchant must match caller (or caller is admin).
+    if authoritative_owner != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
-            "Payment does not belong to the authenticated merchant".into(),
+            "Payment order does not belong to the authenticated merchant".into(),
         ));
     }
 
@@ -1899,7 +1931,18 @@ async fn get_token_metrics(State(state): State<AppState>) -> impl IntoResponse {
     Json(stats)
 }
 
-async fn get_agent_activity(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_agent_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for agent activity: {}", e))
+    })?;
+    if !caller.has_scope("audit:read") {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'audit:read' scope".into(),
+        ));
+    }
     let metrics = state.ollama_client.get_recent_inference_metrics(20);
 
     let ai_thinking: Vec<serde_json::Value> = metrics
@@ -1916,9 +1959,9 @@ async fn get_agent_activity(State(state): State<AppState>) -> impl IntoResponse 
         })
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "ai_thinking": ai_thinking
-    }))
+    })))
 }
 
 async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -2040,9 +2083,9 @@ async fn get_recent_actions(
     let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required for recent actions: {}", e))
     })?;
-    if !caller.has_any_scope(&["audit:read", "workloads:read"]) {
+    if !caller.has_scope("audit:read") {
         return Err(AppError::Forbidden(
-            "Caller lacks required 'audit:read' or 'workloads:read' scope".into(),
+            "Caller lacks required 'audit:read' scope".into(),
         ));
     }
     let records = state.audit_store.list_recent(50);
@@ -2292,7 +2335,21 @@ async fn get_benchmark_ablations(
 }
 
 // Effect Measurement Endpoints
-async fn get_effect_measurements(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_effect_measurements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for effect measurements: {}",
+            e
+        ))
+    })?;
+    if !caller.has_scope("audit:read") {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'audit:read' scope".into(),
+        ));
+    }
     let records = state.audit_store.list_recent(50);
     let measurements: Vec<serde_json::Value> =
         records.iter().filter_map(effect_measurement_json).collect();
@@ -2307,14 +2364,25 @@ async fn get_effect_measurements(State(state): State<AppState>) -> impl IntoResp
             / measurements.len() as f64
     };
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "measurements": measurements,
         "total": measurements.len(),
         "avg_effectiveness": avg_effectiveness
-    }))
+    })))
 }
 
-async fn get_recent_effects(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_recent_effects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for recent effects: {}", e))
+    })?;
+    if !caller.has_scope("audit:read") {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'audit:read' scope".into(),
+        ));
+    }
     let records = state.audit_store.list_recent(10);
     let recent_effects: Vec<serde_json::Value> = records
         .iter()
@@ -2332,9 +2400,9 @@ async fn get_recent_effects(State(state): State<AppState>) -> impl IntoResponse 
         })
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "recent_effects": recent_effects
-    }))
+    })))
 }
 
 // AI Cost Endpoints
@@ -2380,14 +2448,28 @@ async fn get_costs_per_agent(State(state): State<AppState>) -> impl IntoResponse
 }
 
 // Policy Verdict Endpoints
-async fn get_recent_verdicts(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_recent_verdicts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for policy verdicts: {}",
+            e
+        ))
+    })?;
+    if !caller.has_scope("audit:read") {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'audit:read' scope".into(),
+        ));
+    }
     let records = state.audit_store.list_recent(50);
     let verdicts: Vec<serde_json::Value> = records.iter().map(verdict_record_json).collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "verdicts": verdicts,
         "total": verdicts.len()
-    }))
+    })))
 }
 
 async fn get_verdict_stats(State(state): State<AppState>) -> impl IntoResponse {
@@ -3384,6 +3466,7 @@ mod integration_tests {
             last_ablation: Arc::new(std::sync::RwLock::new(None)),
             gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             webhook_store: Arc::new(InMemoryWebhookStore::new()),
+            order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -6926,19 +7009,33 @@ mod integration_tests {
         state.state_fabric.upsert_workload(dummy_workload).unwrap();
         let app = build_app(state);
 
-        let introspection_routes = vec![
+        let workload_gateway_routes = vec![
             "/api/workloads",
             "/api/v1/workloads",
             "/api/workloads/payment-upi-india-south",
             "/api/v1/workloads/payment-upi-india-south",
             "/api/gateways",
             "/api/v1/gateways",
-            "/api/actions/recent",
-            "/api/v1/actions/recent",
         ];
 
-        // 1. Anonymous requests fail closed with 401 Unauthorized
-        for uri in &introspection_routes {
+        let sensitive_audit_routes = vec![
+            "/api/actions/recent",
+            "/api/v1/actions/recent",
+            "/api/agents/activity",
+            "/api/v1/agents/activity",
+            "/api/verdicts/recent",
+            "/api/v1/verdicts/recent",
+            "/api/effects/measurements",
+            "/api/v1/effects/measurements",
+            "/api/effects/recent",
+            "/api/v1/effects/recent",
+        ];
+
+        // 1. Anonymous requests fail closed with 401 Unauthorized for all routes
+        for uri in workload_gateway_routes
+            .iter()
+            .chain(sensitive_audit_routes.iter())
+        {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -6953,8 +7050,8 @@ mod integration_tests {
             );
         }
 
-        // 2. Merchant with valid read scopes succeeds with 200 OK
-        for uri in &introspection_routes {
+        // 2. Merchant with valid read scopes (workloads:read, gateways:read) succeeds with 200 OK on workload/gateway routes
+        for uri in &workload_gateway_routes {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -6970,8 +7067,28 @@ mod integration_tests {
             );
         }
 
-        // 3. Admin key succeeds with 200 OK on all introspection routes
-        for uri in &introspection_routes {
+        // 3. Merchant lacking audit:read fails closed with 403 Forbidden on sensitive audit/introspection routes
+        for uri in &sensitive_audit_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "test-merchant-key-intro")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Expected 403 Forbidden for merchant without audit:read accessing {}",
+                uri
+            );
+        }
+
+        // 4. Admin key succeeds with 200 OK on all routes (workloads, gateways, and sensitive audit)
+        for uri in workload_gateway_routes
+            .iter()
+            .chain(sensitive_audit_routes.iter())
+        {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -7105,12 +7222,59 @@ mod integration_tests {
                 }),
             )
             .route(
-                "/payments/pay_matching",
+                "/orders/order_matching",
                 axum::routing::get(|| async move {
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
-                            "id": "pay_matching",
+                            "id": "order_matching",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "notes": {
+                                "esa_merchant_id": "merchant_sandbox_01"
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/orders/order_other",
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "order_other",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "notes": {
+                                "esa_merchant_id": "other_merchant_999"
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/orders/order_no_notes",
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "order_no_notes",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "notes": {}
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/payments/pay_matching_both",
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "pay_matching_both",
+                            "order_id": "order_matching",
                             "amount": 5000,
                             "currency": "INR",
                             "status": "captured",
@@ -7123,12 +7287,32 @@ mod integration_tests {
                 }),
             )
             .route(
-                "/payments/pay_mismatched",
+                "/payments/pay_notes_spoofed",
                 axum::routing::get(|| async move {
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
-                            "id": "pay_mismatched",
+                            "id": "pay_notes_spoofed",
+                            "order_id": "order_other",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi",
+                            "notes": {
+                                "esa_merchant_id": "merchant_sandbox_01"
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/payments/pay_order_wins",
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "pay_order_wins",
+                            "order_id": "order_matching",
                             "amount": 5000,
                             "currency": "INR",
                             "status": "captured",
@@ -7141,31 +7325,17 @@ mod integration_tests {
                 }),
             )
             .route(
-                "/payments/pay_fallback_order",
+                "/payments/pay_missing_order_notes",
                 axum::routing::get(|| async move {
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
-                            "id": "pay_fallback_order",
-                            "order_id": "order_linked_001",
+                            "id": "pay_missing_order_notes",
+                            "order_id": "order_no_notes",
                             "amount": 5000,
                             "currency": "INR",
                             "status": "captured",
                             "method": "upi",
-                            "notes": {}
-                        })),
-                    )
-                }),
-            )
-            .route(
-                "/orders/order_linked_001",
-                axum::routing::get(|| async move {
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "id": "order_linked_001",
-                            "amount": 5000,
-                            "currency": "INR",
                             "notes": {
                                 "esa_merchant_id": "merchant_sandbox_01"
                             }
@@ -7174,17 +7344,19 @@ mod integration_tests {
                 }),
             )
             .route(
-                "/payments/pay_missing_merchant",
+                "/payments/pay_missing_order_id",
                 axum::routing::get(|| async move {
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
-                            "id": "pay_missing_merchant",
+                            "id": "pay_missing_order_id",
                             "amount": 5000,
                             "currency": "INR",
                             "status": "captured",
                             "method": "upi",
-                            "notes": {}
+                            "notes": {
+                                "esa_merchant_id": "merchant_sandbox_01"
+                            }
                         })),
                     )
                 }),
@@ -7208,9 +7380,9 @@ mod integration_tests {
             account_id: None,
         };
         state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
-        let app = build_app(state);
+        let app = build_app(state.clone());
 
-        // 1. Test Razorpay Order Creation binds caller's merchant_id to notes
+        // 1. Test Razorpay Order Creation binds caller's merchant_id to notes and durable mapping
         let req_body = serde_json::json!({
             "amount_cents": 5000,
             "region": "IN-SOUTH",
@@ -7227,10 +7399,15 @@ mod integration_tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            state.order_merchants.read().unwrap().get("order_mock_001"),
+            Some(&"merchant_sandbox_01".to_string()),
+            "Created order ID must be recorded in durable order_merchants map"
+        );
 
-        // 2. Payment confirmation succeeds when payment.notes.esa_merchant_id matches caller
+        // Scenario 1: Payment notes and order notes both identify authenticated merchant -> 200 OK
         let confirm_req = serde_json::json!({
-            "payment_id": "pay_matching"
+            "payment_id": "pay_matching_both"
         });
         let req = Request::builder()
             .method("POST")
@@ -7244,25 +7421,9 @@ mod integration_tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // 3. Payment confirmation succeeds via associated order.notes.esa_merchant_id fallback
+        // Scenario 2: Payment notes claim authenticated merchant, but order notes identify another merchant -> 403 Forbidden
         let confirm_req = serde_json::json!({
-            "payment_id": "pay_fallback_order"
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/razorpay/confirm")
-            .header("content-type", "application/json")
-            .header("x-api-key", "test-merchant-key-rzp")
-            .body(axum::body::Body::from(
-                serde_json::to_vec(&confirm_req).unwrap(),
-            ))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        // 4. Payment confirmation fails closed (403 Forbidden) when merchant_id mismatches
-        let confirm_req = serde_json::json!({
-            "payment_id": "pay_mismatched"
+            "payment_id": "pay_notes_spoofed"
         });
         let req = Request::builder()
             .method("POST")
@@ -7276,9 +7437,133 @@ mod integration_tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-        // 5. Payment confirmation fails closed (403 Forbidden) when esa_merchant_id is missing entirely
+        // Scenario 3: Payment notes identify another merchant, but order notes identify authenticated merchant -> 200 OK
         let confirm_req = serde_json::json!({
-            "payment_id": "pay_missing_merchant"
+            "payment_id": "pay_order_wins"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-merchant-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Scenario 4: Missing order ownership metadata -> 403 Forbidden
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_missing_order_notes"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-merchant-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Scenario 5: Missing order ID on payment -> 403 Forbidden
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_missing_order_id"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-merchant-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Scenario 6: Verify rejected confirmation produces no payment-state mutation or telemetry/audit
+        let audit_count_before = state.audit_store.list_recent(100).len();
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_notes_spoofed"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-merchant-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let audit_count_after = state.audit_store.list_recent(100).len();
+        assert_eq!(
+            audit_count_before, audit_count_after,
+            "Rejected confirmation must not write to audit trail or mutate state"
+        );
+
+        // Scenario 7: Admin caller can confirm order belonging to another merchant -> 200 OK, but missing order/metadata still fails 403
+        // 7a: Admin confirms order belonging to other merchant -> 200 OK
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_notes_spoofed"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "admin-secret-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 7b: Admin confirms payment missing order ID -> 403 Forbidden
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_missing_order_id"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "admin-secret-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 7c: Admin confirms payment where order lacks merchant metadata -> 403 Forbidden
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_missing_order_notes"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "admin-secret-key-rzp")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&confirm_req).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Scenario 8: Conflicting server-tracked order mapping fails closed with 403 Forbidden
+        state
+            .order_merchants
+            .write()
+            .unwrap()
+            .insert("order_matching".to_string(), "rogue_merchant".to_string());
+        let confirm_req = serde_json::json!({
+            "payment_id": "pay_matching_both"
         });
         let req = Request::builder()
             .method("POST")
