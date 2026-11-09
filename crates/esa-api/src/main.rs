@@ -783,6 +783,7 @@ async fn main() -> anyhow::Result<()> {
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         webhook_store,
         order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let app = build_app(app_state);
@@ -1012,7 +1013,20 @@ struct AppState {
     last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
     gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
     webhook_store: Arc<dyn WebhookStore>,
+    /// Process-local in-memory consistency cache of order-to-merchant bindings created by this instance.
+    /// Note: This cache is process-local and non-durable across restarts or multiple replicas.
+    /// The authoritative source of merchant ownership is always the server-created order.notes.esa_merchant_id
+    /// returned directly by the upstream Razorpay API. Client-supplied payment notes are never trusted.
     order_merchants: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Concurrency control for benchmark execution to prevent duplicate concurrent runs.
+    benchmark_running: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct BenchmarkGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for BenchmarkGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1050,9 +1064,9 @@ async fn list_workloads(
     let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to list workloads: {}", e))
     })?;
-    if !caller.has_any_scope(&["workloads:read", "workloads:write"]) {
+    if !caller.is_admin() {
         return Err(AppError::Forbidden(
-            "Caller lacks required 'workloads:read' scope".into(),
+            "Access to global workloads is restricted to administrators".into(),
         ));
     }
     let workloads = state.state_fabric.list_workloads();
@@ -1067,9 +1081,9 @@ async fn get_workload(
     let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to get workload: {}", e))
     })?;
-    if !caller.has_any_scope(&["workloads:read", "workloads:write"]) {
+    if !caller.is_admin() {
         return Err(AppError::Forbidden(
-            "Caller lacks required 'workloads:read' scope".into(),
+            "Access to global workloads is restricted to administrators".into(),
         ));
     }
     state
@@ -1088,13 +1102,9 @@ async fn create_workload(
         AppError::Unauthorized(format!("Authentication required to create workload: {}", e))
     })?;
 
-    if !caller
-        .scopes
-        .iter()
-        .any(|s| s == "workloads:write" || s == "admin" || s == "*")
-    {
+    if !caller.is_admin() {
         return Err(AppError::Forbidden(
-            "Caller lacks required 'workloads:write' scope".into(),
+            "Workload creation is restricted to administrators".into(),
         ));
     }
 
@@ -1728,11 +1738,22 @@ async fn razorpay_confirm_payment(
     })))
 }
 
-async fn get_vitals_history(State(state): State<AppState>) -> impl IntoResponse {
-    Json(serde_json::json!({
+async fn get_vitals_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for vitals history: {}", e))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
+    Ok(Json(serde_json::json!({
         "snapshots": state.vitals.history(),
         "latest": state.vitals.latest(),
-    }))
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1926,9 +1947,20 @@ async fn trigger_spike(
     .into_response())
 }
 
-async fn get_token_metrics(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_token_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for token metrics: {}", e))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
     let stats = state.ollama_client.get_token_stats();
-    Json(stats)
+    Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
 async fn get_agent_activity(
@@ -1964,7 +1996,18 @@ async fn get_agent_activity(
     })))
 }
 
-async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_agents_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for agent status: {}", e))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
     let agent_status = state
         .agent_status
         .read()
@@ -2016,7 +2059,7 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
         "Waiting for proposals to review".to_string()
     };
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "agents": [
             {
                 "agent_id": "monitor",
@@ -2073,7 +2116,7 @@ async fn get_agents_status(State(state): State<AppState>) -> impl IntoResponse {
             "autonomous_mode": true,
             "last_cycle": agent_status.last_cycle_time.clone().unwrap_or_else(|| "Running...".to_string())
         }
-    }))
+    })))
 }
 
 async fn get_recent_actions(
@@ -2289,12 +2332,43 @@ async fn verify_audit_chain(
 
 async fn run_benchmark_ablations(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required to run benchmark ablations: {}",
+            e
+        ))
+    })?;
+    if !caller.is_admin() && !caller.has_scope("telemetry:admin") {
+        return Err(AppError::Forbidden(
+            "Administrative authorization required to run benchmark ablations".into(),
+        ));
+    }
+
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Benchmark ablations are disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
+
+    // Concurrency control: prevent duplicate concurrent runs
+    if state
+        .benchmark_running
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(AppError::Conflict(
+            "A benchmark is already running; duplicate concurrent benchmark runs are rejected"
+                .into(),
+        ));
+    }
+    let _guard = BenchmarkGuard(state.benchmark_running.clone());
 
     let result = benchmark_harness::run_ablation_study(
         state.state_fabric.clone(),
@@ -2312,26 +2386,36 @@ async fn run_benchmark_ablations(
 
 async fn get_benchmark_ablations(
     State(state): State<AppState>,
-) -> Result<Json<benchmark_harness::AblationStudyResult>, AppError> {
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for benchmark ablations: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
+
     if let Ok(guard) = state.last_ablation.read() {
         if let Some(res) = guard.as_ref() {
-            return Ok(Json(res.clone()));
+            return Ok(Json(serde_json::to_value(res).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "status": "error",
+                    "message": "Failed to serialize ablation results"
+                })
+            })));
         }
     }
 
-    // Auto-run if not executed yet
-    let result = benchmark_harness::run_ablation_study(
-        state.state_fabric.clone(),
-        state.orchestrator.clone(),
-    )
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    if let Ok(mut guard) = state.last_ablation.write() {
-        *guard = Some(result.clone());
-    }
-
-    Ok(Json(result))
+    // Strictly read-only: never invoke run_ablation_study() or mutate baseline from GET
+    Ok(Json(serde_json::json!({
+        "status": "not_available",
+        "message": "No ablation study results available. Run a benchmark ablation POST first."
+    })))
 }
 
 // Effect Measurement Endpoints
@@ -2406,11 +2490,22 @@ async fn get_recent_effects(
 }
 
 // AI Cost Endpoints
-async fn get_ai_costs(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_ai_costs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required for AI costs: {}", e))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
     let cost_tracker = state.ollama_client.get_cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "total_tokens": aggregated.total_tokens,
         "total_requests": aggregated.total_requests,
         "successful_requests": aggregated.successful_requests,
@@ -2420,10 +2515,24 @@ async fn get_ai_costs(State(state): State<AppState>) -> impl IntoResponse {
         "total_cost_usd": aggregated.total_cost_usd,
         "time_window_start": aggregated.time_window_start,
         "time_window_end": aggregated.time_window_end
-    }))
+    })))
 }
 
-async fn get_costs_per_agent(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_costs_per_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for per-agent costs: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
     let cost_tracker = state.ollama_client.get_cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
 
@@ -2440,11 +2549,11 @@ async fn get_costs_per_agent(State(state): State<AppState>) -> impl IntoResponse
         })
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "per_agent": agent_costs,
         "total_agents": aggregated.requests_per_agent.len(),
         "total_cost_usd": aggregated.total_cost_usd
-    }))
+    })))
 }
 
 // Policy Verdict Endpoints
@@ -2472,11 +2581,25 @@ async fn get_recent_verdicts(
     })))
 }
 
-async fn get_verdict_stats(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_verdict_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for verdict statistics: {}",
+            e
+        ))
+    })?;
+    if !caller.has_scope("audit:read") {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'audit:read' scope".into(),
+        ));
+    }
     let records = state.audit_store.list_recent(200);
     let stats = compute_verdict_stats(&records);
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "stats": stats,
         "by_verdict": {
             "ALLOW": stats.get("allow_count").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -2484,7 +2607,7 @@ async fn get_verdict_stats(State(state): State<AppState>) -> impl IntoResponse {
             "STALE_STATE": stats.get("stale_state_count").and_then(|v| v.as_u64()).unwrap_or(0),
             "REQUIRES_APPROVAL": stats.get("requires_approval_count").and_then(|v| v.as_u64()).unwrap_or(0),
         }
-    }))
+    })))
 }
 
 // Intent & Constraints Endpoints
@@ -2752,13 +2875,41 @@ fn default_multiplier() -> f64 {
 
 async fn run_benchmark(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<BenchmarkRequest>,
 ) -> Result<Json<benchmark::BenchmarkComparison>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to run benchmark: {}", e))
+    })?;
+    if !caller.is_admin() && !caller.has_scope("telemetry:admin") {
+        return Err(AppError::Forbidden(
+            "Administrative authorization required to run benchmark".into(),
+        ));
+    }
+
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Benchmark execution is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
+
+    // Concurrency control: prevent duplicate concurrent runs
+    if state
+        .benchmark_running
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(AppError::Conflict(
+            "A benchmark is already running; duplicate concurrent benchmark runs are rejected"
+                .into(),
+        ));
+    }
+    let _guard = BenchmarkGuard(state.benchmark_running.clone());
 
     let comparison = benchmark::run_comparison(
         Arc::clone(&state.state_fabric),
@@ -2778,14 +2929,29 @@ async fn run_benchmark(
     Ok(Json(comparison))
 }
 
-async fn get_benchmark_latest(State(state): State<AppState>) -> impl IntoResponse {
+async fn get_benchmark_latest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for benchmark results: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["telemetry:admin", "diagnostics:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'telemetry:admin' scope".into(),
+        ));
+    }
+
     let latest = state
         .last_benchmark
         .read()
         .ok()
         .and_then(|guard| guard.clone());
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "available": latest.is_some(),
         "comparison": latest,
         "scenarios": benchmark_harness::PERFORMANCE_SCENARIOS,
@@ -2793,7 +2959,7 @@ async fn get_benchmark_latest(State(state): State<AppState>) -> impl IntoRespons
         "controllers": ["B0_rules", "B1_adaptive", "B2_esa"],
         "endpoint": "POST /api/benchmark/run",
         "harness_endpoint": "POST /api/benchmark/harness",
-    }))
+    })))
 }
 
 #[derive(Deserialize)]
@@ -2804,13 +2970,44 @@ struct HarnessRequest {
 
 async fn run_benchmark_harness(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<HarnessRequest>,
 ) -> Result<Json<benchmark_harness::HarnessResult>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required to run benchmark harness: {}",
+            e
+        ))
+    })?;
+    if !caller.is_admin() && !caller.has_scope("telemetry:admin") {
+        return Err(AppError::Forbidden(
+            "Administrative authorization required to run benchmark harness".into(),
+        ));
+    }
+
     if !is_demo_mutation_allowed() {
         return Err(AppError::Forbidden(
             "Benchmark harness execution is disabled in production or unconfigured environments. Explicit simulation opt-in required (ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox).".to_string(),
         ));
     }
+
+    // Concurrency control: prevent duplicate concurrent runs
+    if state
+        .benchmark_running
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(AppError::Conflict(
+            "A benchmark is already running; duplicate concurrent benchmark runs are rejected"
+                .into(),
+        ));
+    }
+    let _guard = BenchmarkGuard(state.benchmark_running.clone());
 
     let ollama_url =
         std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
@@ -2840,6 +3037,7 @@ enum AppError {
     Internal(String),
     Unauthorized(String),
     Forbidden(String),
+    Conflict(String),
 }
 
 impl From<EsaError> for AppError {
@@ -2855,6 +3053,7 @@ impl IntoResponse for AppError {
             AppError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
             AppError::Forbidden(msg) => (axum::http::StatusCode::FORBIDDEN, msg),
+            AppError::Conflict(msg) => (axum::http::StatusCode::CONFLICT, msg),
         };
         (status, Json(serde_json::json!({ "error": err_msg }))).into_response()
     }
@@ -3467,6 +3666,7 @@ mod integration_tests {
             gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             webhook_store: Arc::new(InMemoryWebhookStore::new()),
             order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -7009,14 +7209,14 @@ mod integration_tests {
         state.state_fabric.upsert_workload(dummy_workload).unwrap();
         let app = build_app(state);
 
-        let workload_gateway_routes = vec![
+        let global_workload_routes = vec![
             "/api/workloads",
             "/api/v1/workloads",
             "/api/workloads/payment-upi-india-south",
             "/api/v1/workloads/payment-upi-india-south",
-            "/api/gateways",
-            "/api/v1/gateways",
         ];
+
+        let gateway_routes = vec!["/api/gateways", "/api/v1/gateways"];
 
         let sensitive_audit_routes = vec![
             "/api/actions/recent",
@@ -7025,17 +7225,41 @@ mod integration_tests {
             "/api/v1/agents/activity",
             "/api/verdicts/recent",
             "/api/v1/verdicts/recent",
+            "/api/verdicts/stats",
+            "/api/v1/verdicts/stats",
             "/api/effects/measurements",
             "/api/v1/effects/measurements",
             "/api/effects/recent",
             "/api/v1/effects/recent",
         ];
 
-        // 1. Anonymous requests fail closed with 401 Unauthorized for all routes
-        for uri in workload_gateway_routes
+        let diagnostic_telemetry_routes = vec![
+            "/api/agents/status",
+            "/api/v1/agents/status",
+            "/api/vitals/history",
+            "/api/v1/vitals/history",
+            "/api/metrics/tokens",
+            "/api/v1/metrics/tokens",
+            "/api/costs/ai",
+            "/api/v1/costs/ai",
+            "/api/costs/per-agent",
+            "/api/v1/costs/per-agent",
+            "/api/benchmark/latest",
+            "/api/v1/benchmark/latest",
+            "/api/benchmark/ablations",
+            "/api/v1/benchmark/ablations",
+        ];
+
+        let all_routes: Vec<&str> = global_workload_routes
             .iter()
+            .chain(gateway_routes.iter())
             .chain(sensitive_audit_routes.iter())
-        {
+            .chain(diagnostic_telemetry_routes.iter())
+            .copied()
+            .collect();
+
+        // 1. Anonymous requests fail closed with 401 Unauthorized for all routes
+        for uri in &all_routes {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -7050,8 +7274,8 @@ mod integration_tests {
             );
         }
 
-        // 2. Merchant with valid read scopes (workloads:read, gateways:read) succeeds with 200 OK on workload/gateway routes
-        for uri in &workload_gateway_routes {
+        // 2. Merchant key succeeds on gateway visibility (operational non-sensitive info)
+        for uri in &gateway_routes {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -7062,12 +7286,29 @@ mod integration_tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::OK,
-                "Expected 200 for merchant access with read scopes to {}",
+                "Expected 200 for merchant access with gateways:read to {}",
                 uri
             );
         }
 
-        // 3. Merchant lacking audit:read fails closed with 403 Forbidden on sensitive audit/introspection routes
+        // 3. Merchant key is rejected with 403 Forbidden for global workloads (tenant isolation)
+        for uri in &global_workload_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "test-merchant-key-intro")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Expected 403 Forbidden for non-admin merchant accessing global workload at {}",
+                uri
+            );
+        }
+
+        // 4. Merchant key lacking audit:read fails closed with 403 Forbidden on sensitive audit routes
         for uri in &sensitive_audit_routes {
             let req = Request::builder()
                 .method("GET")
@@ -7084,11 +7325,25 @@ mod integration_tests {
             );
         }
 
-        // 4. Admin key succeeds with 200 OK on all routes (workloads, gateways, and sensitive audit)
-        for uri in workload_gateway_routes
-            .iter()
-            .chain(sensitive_audit_routes.iter())
-        {
+        // 5. Merchant key lacking telemetry:admin fails closed with 403 Forbidden on diagnostic telemetry routes
+        for uri in &diagnostic_telemetry_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "test-merchant-key-intro")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Expected 403 Forbidden for merchant without telemetry:admin accessing {}",
+                uri
+            );
+        }
+
+        // 6. Admin key succeeds with 200 OK on all routes
+        for uri in &all_routes {
             let req = Request::builder()
                 .method("GET")
                 .uri(*uri)
@@ -7104,6 +7359,187 @@ mod integration_tests {
             );
         }
 
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_execution_and_ablation_access_control() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-bench-key");
+        std::env::set_var("ESA_TEST_API_KEY", "merchant-bench-key");
+
+        let state = create_test_state();
+        let dummy_workload = WorkloadEntity {
+            workload_id: "payment-upi-india-south".to_string(),
+            shard_id: "shard-1".to_string(),
+            state: WorkloadState::Healthy,
+            region: Region::IndiaSouth,
+            metrics: WorkloadMetrics {
+                rate_per_min: 100.0,
+                p50_latency_ms: 10.0,
+                p95_latency_ms: 20.0,
+                p99_latency_ms: 30.0,
+                error_rate: 0.0,
+                queue_depth: 0,
+                timestamp: chrono::Utc::now(),
+            },
+            replication: ReplicationPolicy {
+                min_replicas: 1,
+                max_replicas: 3,
+                current_replicas: 1,
+                consistency_mode: ConsistencyMode::Strong,
+            },
+            locality: LocalityPreference {
+                preferred_region: Region::IndiaSouth,
+                fallback_regions: vec![],
+            },
+            lifecycle: LifecycleState::Active,
+            version: 1,
+            updated_at: chrono::Utc::now(),
+        };
+        state.state_fabric.upsert_workload(dummy_workload).unwrap();
+        let app = build_app(state.clone());
+
+        let ablation_routes = ["/api/benchmark/ablations", "/api/v1/benchmark/ablations"];
+
+        // 1. Anonymous GET is rejected with 401 Unauthorized
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 2. Merchant GET is rejected with 403 Forbidden
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "merchant-bench-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 3. Admin GET succeeds with 200 OK and returns not_available without running benchmark
+        let workloads_before = state.state_fabric.list_workloads();
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("x-api-key", "admin-bench-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                body_json.get("status").and_then(|v| v.as_str()),
+                Some("not_available")
+            );
+        }
+        let workloads_after = state.state_fabric.list_workloads();
+        assert_eq!(
+            serde_json::to_value(&workloads_before).unwrap(),
+            serde_json::to_value(&workloads_after).unwrap(),
+            "GET must never mutate workload state or reset baseline"
+        );
+        assert!(
+            state.last_ablation.read().unwrap().is_none(),
+            "GET must never trigger benchmark execution"
+        );
+
+        // 4. Anonymous POST is rejected with 401 Unauthorized
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 5. Merchant POST is rejected with 403 Forbidden
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("x-api-key", "merchant-bench-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 6. Admin POST in production (without simulation opt-in) is rejected with 403 Forbidden
+        std::env::set_var("ENVIRONMENT", "production");
+        std::env::remove_var("ESA_ENABLE_SIMULATED_CHECKOUT");
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("x-api-key", "admin-bench-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+        clear_mode_env_vars();
+
+        // 7. Concurrent requests cannot launch duplicate benchmark runs (409 Conflict)
+        state
+            .benchmark_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        for uri in &ablation_routes {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("x-api-key", "admin-bench-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+        }
+        state
+            .benchmark_running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // 8. Benchmark run routes (/api/benchmark/run) access control
+        for uri in &["/api/benchmark/run", "/api/v1/benchmark/run"] {
+            // Anonymous rejected 401
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            // Merchant rejected 403
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .header("x-api-key", "merchant-bench-key")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        clear_mode_env_vars();
         std::env::remove_var("ESA_ADMIN_API_KEY");
         std::env::remove_var("ESA_TEST_API_KEY");
     }
@@ -7487,6 +7923,14 @@ mod integration_tests {
 
         // Scenario 6: Verify rejected confirmation produces no payment-state mutation or telemetry/audit
         let audit_count_before = state.audit_store.list_recent(100).len();
+        let mut telemetry_rx = state.broadcaster.subscribe();
+        let workloads_before = state.state_fabric.list_workloads();
+        let payment_inbox_before = state
+            .webhook_store
+            .get_payment_record("pay_notes_spoofed")
+            .await
+            .unwrap();
+
         let confirm_req = serde_json::json!({
             "payment_id": "pay_notes_spoofed"
         });
@@ -7501,10 +7945,30 @@ mod integration_tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
         let audit_count_after = state.audit_store.list_recent(100).len();
         assert_eq!(
             audit_count_before, audit_count_after,
-            "Rejected confirmation must not write to audit trail or mutate state"
+            "Rejected confirmation must not write to audit trail"
+        );
+        let workloads_after = state.state_fabric.list_workloads();
+        assert_eq!(
+            serde_json::to_value(&workloads_before).unwrap(),
+            serde_json::to_value(&workloads_after).unwrap(),
+            "Rejected confirmation must not mutate workload state"
+        );
+        let payment_inbox_after = state
+            .webhook_store
+            .get_payment_record("pay_notes_spoofed")
+            .await
+            .unwrap();
+        assert_eq!(
+            payment_inbox_before, payment_inbox_after,
+            "Rejected confirmation must not mutate payment state in store"
+        );
+        assert!(
+            telemetry_rx.try_recv().is_err(),
+            "Rejected confirmation must not publish telemetry"
         );
 
         // Scenario 7: Admin caller can confirm order belonging to another merchant -> 200 OK, but missing order/metadata still fails 403

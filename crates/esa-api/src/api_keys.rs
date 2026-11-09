@@ -965,8 +965,6 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "telemetry:read".to_string(),
                     "gateways:toggle".to_string(),
                     "gateways:read".to_string(),
-                    "workloads:write".to_string(),
-                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -991,7 +989,6 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "telemetry:read".to_string(),
                     "gateways:toggle".to_string(),
                     "gateways:read".to_string(),
-                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -1020,7 +1017,6 @@ pub fn verify_configured_api_key(raw_key: &str) -> Option<CallerIdentity> {
                     "payments:read".to_string(),
                     "telemetry:read".to_string(),
                     "gateways:read".to_string(),
-                    "workloads:read".to_string(),
                 ],
             });
         }
@@ -1057,10 +1053,10 @@ pub async fn authenticate_token_str(raw_token: &str) -> Result<CallerIdentity, A
             "telemetry:read".to_string(),
             "gateways:toggle".to_string(),
             "gateways:read".to_string(),
-            "workloads:read".to_string(),
         ];
         if is_admin {
             scopes.push("workloads:write".to_string());
+            scopes.push("workloads:read".to_string());
             scopes.push("audit:read".to_string());
             scopes.push("audit:replay".to_string());
             scopes.push("telemetry:admin".to_string());
