@@ -160,6 +160,7 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
 
     // 4. Syntax / validity check for provider modes
     let mut live_providers = Vec::new();
+    let mut non_live_providers = Vec::new();
     for (var, val) in provider_modes {
         let v = val.to_ascii_lowercase();
         if v == "live" || v == "production" || v == "prod" {
@@ -172,6 +173,7 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
             || v == "development"
         {
             // Recognized non-live provider mode
+            non_live_providers.push(format!("{var}={val}"));
         } else {
             return PaymentCheckoutMode::Misconfigured(format!(
                 "Invalid {} value '{}'. Expected 'live', 'test', or 'sandbox'.",
@@ -231,7 +233,11 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
     }
 
     // 7. SIMULATION OPT-IN CHECK
-    if explicit_sim_opt_in || esa_mode_sim || env_sim {
+    if explicit_sim_opt_in
+        || esa_mode_sim
+        || env_sim
+        || (!non_live_providers.is_empty() && !explicit_sim_disabled)
+    {
         return PaymentCheckoutMode::Simulated;
     }
 
@@ -4475,6 +4481,13 @@ mod integration_tests {
         std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
         std::env::set_var("ESA_PAYMENT_MODE", "sandbox");
         std::env::set_var("ENVIRONMENT", "sandbox");
+        assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Simulated);
+        assert!(!is_production_mode());
+        assert!(is_demo_mutation_allowed());
+
+        // Non-live provider mode alone (e.g. RAZORPAY_MODE=test) -> Simulated
+        clear_mode_env_vars();
+        std::env::set_var("RAZORPAY_MODE", "test");
         assert_eq!(detect_checkout_mode(), PaymentCheckoutMode::Simulated);
         assert!(!is_production_mode());
         assert!(is_demo_mutation_allowed());

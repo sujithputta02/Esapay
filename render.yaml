@@ -14,6 +14,10 @@ services:
         value: https://sujithputta-esa-ai-brain.hf.space
       - key: OLLAMA_MODEL
         value: qwen2.5:0.5b
+      - key: ESA_ENABLE_SIMULATED_CHECKOUT
+        value: "true"
+      - key: ESA_PAYMENT_MODE
+        value: sandbox
       - key: RAZORPAY_MODE
         value: test
       - key: RAZORPAY_KEY_ID

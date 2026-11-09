@@ -34,5 +34,10 @@ COPY --from=builder /app/target/release/esa-api /app/esa-api
 # Expose port
 EXPOSE 8080
 
+# Configure default sandbox simulation mode for demo clusters
+ENV ESA_ENABLE_SIMULATED_CHECKOUT=true
+ENV ESA_PAYMENT_MODE=sandbox
+ENV RAZORPAY_MODE=test
+
 # Run the binary
 CMD ["/app/esa-api"]
