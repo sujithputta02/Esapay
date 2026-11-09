@@ -16,8 +16,11 @@ const SUPABASE_ANON_KEY = rawSupabaseKey || 'placeholder-anon-key';
 export const isSupabaseConfigured = Boolean(
   SUPABASE_URL &&
   !SUPABASE_URL.includes('placeholder') &&
+  !SUPABASE_URL.includes('your-project') &&
+  !SUPABASE_URL.includes('yvmhffpbmtclskpwruwn') &&
   SUPABASE_ANON_KEY &&
-  !SUPABASE_ANON_KEY.includes('placeholder')
+  !SUPABASE_ANON_KEY.includes('placeholder') &&
+  !SUPABASE_ANON_KEY.includes('your_key_here')
 );
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
