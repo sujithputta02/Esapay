@@ -766,6 +766,17 @@ async fn main() -> anyhow::Result<()> {
     let webhook_store: Arc<dyn WebhookStore> =
         resolve_webhook_store(std::env::var("DATABASE_URL").ok().as_deref()).await?;
 
+    // Initialize sandbox API key store (durable in PostgreSQL if configured, in-memory fallback)
+    let sandbox_keys = if let Some(pool) = webhook_store.pg_pool() {
+        if let Err(e) = api_keys::SandboxKeyStore::init_schema_on_pool(pool).await {
+            warn!("Failed to initialize sandbox_api_keys schema on PostgreSQL: {e}");
+        }
+        Arc::new(api_keys::SandboxKeyStore::new_with_pool(pool.clone()))
+    } else {
+        Arc::new(api_keys::SandboxKeyStore::new_in_memory())
+    };
+    api_keys::set_global_sandbox_key_store(Arc::clone(&sandbox_keys));
+
     // Create app state
     let app_state = AppState {
         state_fabric,
@@ -784,6 +795,7 @@ async fn main() -> anyhow::Result<()> {
         webhook_store,
         order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sandbox_keys,
     };
 
     let app = build_app(app_state);
@@ -998,28 +1010,30 @@ fn build_app(app_state: AppState) -> Router {
 }
 
 #[derive(Clone)]
-struct AppState {
-    state_fabric: Arc<StateFabric>,
-    orchestrator: Arc<EsaOrchestrator>,
-    ollama_client: OllamaClient,
-    fluid_reasoner: esa_agents::FluidReasonerClient,
-    broadcaster: Arc<TelemetryBroadcaster>,
-    audit_store: Arc<AuditStore>,
-    agent_status: Arc<std::sync::RwLock<AgentStatusState>>,
-    razorpay: Option<Arc<RazorpayAdapter>>,
-    vitals: VitalsStore,
-    rate_limiter: rate_limiter::ApiRateLimiter,
-    last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
-    last_ablation: Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
-    gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
-    webhook_store: Arc<dyn WebhookStore>,
+pub(crate) struct AppState {
+    pub(crate) state_fabric: Arc<StateFabric>,
+    pub(crate) orchestrator: Arc<EsaOrchestrator>,
+    pub(crate) ollama_client: OllamaClient,
+    pub(crate) fluid_reasoner: esa_agents::FluidReasonerClient,
+    pub(crate) broadcaster: Arc<TelemetryBroadcaster>,
+    pub(crate) audit_store: Arc<AuditStore>,
+    pub(crate) agent_status: Arc<std::sync::RwLock<AgentStatusState>>,
+    pub(crate) razorpay: Option<Arc<RazorpayAdapter>>,
+    pub(crate) vitals: VitalsStore,
+    pub(crate) rate_limiter: rate_limiter::ApiRateLimiter,
+    pub(crate) last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
+    pub(crate) last_ablation:
+        Arc<std::sync::RwLock<Option<benchmark_harness::AblationStudyResult>>>,
+    pub(crate) gateway_overrides: Arc<std::sync::RwLock<std::collections::HashMap<String, bool>>>,
+    pub(crate) webhook_store: Arc<dyn WebhookStore>,
     /// Process-local in-memory consistency cache of order-to-merchant bindings created by this instance.
     /// Note: This cache is process-local and non-durable across restarts or multiple replicas.
     /// The authoritative source of merchant ownership is always the server-created order.notes.esa_merchant_id
     /// returned directly by the upstream Razorpay API. Client-supplied payment notes are never trusted.
-    order_merchants: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub(crate) order_merchants: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
     /// Concurrency control for benchmark execution to prevent duplicate concurrent runs.
-    benchmark_running: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) benchmark_running: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) sandbox_keys: Arc<api_keys::SandboxKeyStore>,
 }
 
 struct BenchmarkGuard(Arc<std::sync::atomic::AtomicBool>);
@@ -3368,6 +3382,20 @@ async fn universal_checkout(
         ));
     }
 
+    // Sandbox API keys are strictly forbidden from performing live payment operations.
+    if caller.environment == "sandbox"
+        && (is_production_mode()
+            || matches!(detect_checkout_mode(), PaymentCheckoutMode::Live { .. }))
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Sandbox API keys cannot perform live payment operations."
+            })),
+        ));
+    }
+
     // 3. Currency Validation against Supported Currency Registry
     let validated_currency = match esa_core::Currency::new(&req.currency) {
         Ok(c) => c,
@@ -3724,6 +3752,8 @@ mod integration_tests {
         let vitals = VitalsStore::new();
         let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
         let rate_limiter = rate_limiter::ApiRateLimiter::new();
+        let sandbox_keys = Arc::new(api_keys::SandboxKeyStore::new_in_memory());
+        api_keys::set_global_sandbox_key_store(Arc::clone(&sandbox_keys));
 
         AppState {
             state_fabric,
@@ -3742,6 +3772,7 @@ mod integration_tests {
             webhook_store: Arc::new(InMemoryWebhookStore::new()),
             order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_keys,
         }
     }
 
@@ -8467,6 +8498,344 @@ mod integration_tests {
 
         clear_mode_env_vars();
         std::env::remove_var("ESA_ADMIN_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_api_key_lifecycle_and_security_isolation() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        // 1. Generation via /api/keys/generate-sandbox and alias /api/v1/keys/generate-sandbox
+        let gen_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/generate-sandbox")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let gen_resp = app.clone().oneshot(gen_req).await.unwrap();
+        assert_eq!(gen_resp.status(), StatusCode::OK);
+        let gen_bytes = axum::body::to_bytes(gen_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let gen_json: serde_json::Value = serde_json::from_slice(&gen_bytes).unwrap();
+        let raw_key = gen_json["api_key"].as_str().unwrap().to_string();
+        assert!(raw_key.starts_with("esa_test_demo_"));
+        assert_eq!(gen_json["environment"], "sandbox");
+        assert_eq!(gen_json["expires_in"], "24h");
+
+        // Alias generation
+        let gen_req_v1 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/keys/generate-sandbox")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let gen_resp_v1 = app.clone().oneshot(gen_req_v1).await.unwrap();
+        assert_eq!(gen_resp_v1.status(), StatusCode::OK);
+
+        // Verify raw key is NOT stored plainly; only SHA-256 hash is in the store
+        let key_hash = api_keys::hash_api_key(&raw_key);
+        let record = state
+            .sandbox_keys
+            .get_key(&key_hash)
+            .await
+            .expect("Key record must exist by hash");
+        assert_eq!(record.key_hash, key_hash);
+        assert!(!record.revoked);
+        assert!(record.expires_at > chrono::Utc::now());
+
+        // 2. Validate endpoint (/api/keys/validate and /api/v1/keys/validate)
+        let val_body = serde_json::json!({ "api_key": raw_key });
+        let val_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&val_body).unwrap(),
+            ))
+            .unwrap();
+        let val_resp = app.clone().oneshot(val_req).await.unwrap();
+        assert_eq!(val_resp.status(), StatusCode::OK);
+        let val_bytes = axum::body::to_bytes(val_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let val_json: serde_json::Value = serde_json::from_slice(&val_bytes).unwrap();
+        assert_eq!(val_json["valid"], true);
+        assert_eq!(val_json["environment"], "sandbox");
+
+        // Alias validate
+        let val_req_v1 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&val_body).unwrap(),
+            ))
+            .unwrap();
+        let val_resp_v1 = app.clone().oneshot(val_req_v1).await.unwrap();
+        assert_eq!(val_resp_v1.status(), StatusCode::OK);
+
+        // 3. Authenticate with /api/auth/me using Bearer
+        let me_req = Request::builder()
+            .method("GET")
+            .uri("/api/auth/me")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let me_resp = app.clone().oneshot(me_req).await.unwrap();
+        assert_eq!(me_resp.status(), StatusCode::OK);
+        let me_bytes = axum::body::to_bytes(me_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let me_json: serde_json::Value = serde_json::from_slice(&me_bytes).unwrap();
+        assert_eq!(me_json["environment"], "sandbox");
+        let scopes = me_json["scopes"].as_array().unwrap();
+        assert!(scopes.iter().any(|s| s == "payments:write"));
+        assert!(scopes.iter().any(|s| s == "payments:read"));
+        assert!(scopes.iter().any(|s| s == "telemetry:read"));
+        assert!(scopes.iter().any(|s| s == "gateways:read"));
+        assert!(!scopes.iter().any(|s| s == "gateways:toggle"));
+        assert!(!scopes.iter().any(|s| s == "audit:read"));
+        assert!(!scopes.iter().any(|s| s == "admin"));
+
+        // 4. Checkout in simulated mode works
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        std::env::set_var("ESA_PAYMENT_MODE", "simulated");
+        let checkout_body = serde_json::json!({
+            "amount": 1000,
+            "currency": "INR",
+            "gateway": "auto"
+        });
+        let chk_req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&checkout_body).unwrap(),
+            ))
+            .unwrap();
+        let chk_resp = app.clone().oneshot(chk_req).await.unwrap();
+        assert_eq!(chk_resp.status(), StatusCode::OK);
+
+        // 5. Live payment mode rejects sandbox keys
+        clear_mode_env_vars();
+        std::env::set_var("ESA_PAYMENT_MODE", "live");
+        let chk_live_req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&checkout_body).unwrap(),
+            ))
+            .unwrap();
+        let chk_live_resp = app.clone().oneshot(chk_live_req).await.unwrap();
+        assert_eq!(chk_live_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 6. Production mode rejection
+        clear_mode_env_vars();
+        std::env::set_var("ENVIRONMENT", "production");
+
+        let val_prod_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&val_body).unwrap(),
+            ))
+            .unwrap();
+        let val_prod_resp = app.clone().oneshot(val_prod_req).await.unwrap();
+        assert_eq!(val_prod_resp.status(), StatusCode::UNAUTHORIZED);
+
+        let me_prod_req = Request::builder()
+            .method("GET")
+            .uri("/api/auth/me")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let me_prod_resp = app.clone().oneshot(me_prod_req).await.unwrap();
+        assert_eq!(me_prod_resp.status(), StatusCode::UNAUTHORIZED);
+
+        clear_mode_env_vars();
+
+        // 7. Admin & High-Privilege endpoint protection (403 Forbidden for sandbox keys)
+        let toggle_body = serde_json::json!({ "enabled": false });
+        let toggle_req = Request::builder()
+            .method("POST")
+            .uri("/api/gateways/razorpay/toggle")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&toggle_body).unwrap(),
+            ))
+            .unwrap();
+        let toggle_resp = app.clone().oneshot(toggle_req).await.unwrap();
+        assert_eq!(toggle_resp.status(), StatusCode::FORBIDDEN);
+
+        let audit_req = Request::builder()
+            .method("GET")
+            .uri("/api/audit/trail")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let audit_resp = app.clone().oneshot(audit_req).await.unwrap();
+        assert_eq!(audit_resp.status(), StatusCode::FORBIDDEN);
+
+        let spike_req = Request::builder()
+            .method("POST")
+            .uri("/api/demo/trigger-spike")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", raw_key))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "multiplier": 2.0 })).unwrap(),
+            ))
+            .unwrap();
+        let spike_resp = app.clone().oneshot(spike_req).await.unwrap();
+        assert_eq!(spike_resp.status(), StatusCode::FORBIDDEN);
+
+        // 8. Server-side Expiry
+        let expired_key_raw = format!("esa_test_demo_{}", uuid::Uuid::new_v4().simple());
+        let expired_hash = api_keys::hash_api_key(&expired_key_raw);
+        let expired_record = api_keys::SandboxKeyRecord {
+            key_hash: expired_hash.clone(),
+            key_prefix: expired_key_raw[..18].to_string(),
+            merchant_id: "test_merchant_expired".to_string(),
+            created_at: chrono::Utc::now() - chrono::Duration::hours(25),
+            expires_at: chrono::Utc::now() - chrono::Duration::hours(1),
+            revoked: false,
+        };
+        state
+            .sandbox_keys
+            .insert_key(&expired_record)
+            .await
+            .unwrap();
+
+        let exp_val_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "api_key": expired_key_raw })).unwrap(),
+            ))
+            .unwrap();
+        let exp_val_resp = app.clone().oneshot(exp_val_req).await.unwrap();
+        assert_eq!(exp_val_resp.status(), StatusCode::UNAUTHORIZED);
+
+        let exp_me_req = Request::builder()
+            .method("GET")
+            .uri("/api/auth/me")
+            .header("authorization", format!("Bearer {}", expired_key_raw))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let exp_me_resp = app.clone().oneshot(exp_me_req).await.unwrap();
+        assert_eq!(exp_me_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 9. Key Revocation
+        let revoked_key_raw = format!("esa_test_demo_{}", uuid::Uuid::new_v4().simple());
+        let revoked_hash = api_keys::hash_api_key(&revoked_key_raw);
+        let active_record = api_keys::SandboxKeyRecord {
+            key_hash: revoked_hash.clone(),
+            key_prefix: revoked_key_raw[..18].to_string(),
+            merchant_id: "test_merchant_revoked".to_string(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            revoked: false,
+        };
+        state.sandbox_keys.insert_key(&active_record).await.unwrap();
+        state.sandbox_keys.revoke_key(&revoked_hash).await.unwrap();
+
+        let rev_val_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "api_key": revoked_key_raw })).unwrap(),
+            ))
+            .unwrap();
+        let rev_val_resp = app.clone().oneshot(rev_val_req).await.unwrap();
+        assert_eq!(rev_val_resp.status(), StatusCode::UNAUTHORIZED);
+
+        let rev_me_req = Request::builder()
+            .method("GET")
+            .uri("/api/auth/me")
+            .header("authorization", format!("Bearer {}", revoked_key_raw))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let rev_me_resp = app.clone().oneshot(rev_me_req).await.unwrap();
+        assert_eq!(rev_me_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 10. Rate limiting test on key generation/validation
+        let mut rate_limited_state = create_test_state();
+        rate_limited_state.rate_limiter =
+            rate_limiter::ApiRateLimiter::new_with_quotas(10, 10, 10, 2, 10, 10);
+        let rate_app = build_app(rate_limited_state);
+
+        // Request 1: OK
+        let r1 = rate_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys/generate-sandbox")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+
+        // Request 2: OK
+        let r2 = rate_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys/generate-sandbox")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+
+        // Request 3: Burst exceeded -> 429 Too Many Requests
+        let r3 = rate_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys/generate-sandbox")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(r3.headers().contains_key("retry-after"));
+
+        // 11. Existing configured keys remain functional
+        std::env::set_var("ESA_TEST_API_KEY", "static_test_key_xyz");
+        let static_val_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "api_key": "static_test_key_xyz" }))
+                    .unwrap(),
+            ))
+            .unwrap();
+        let static_val_resp = app.clone().oneshot(static_val_req).await.unwrap();
+        assert_eq!(static_val_resp.status(), StatusCode::OK);
+
+        clear_mode_env_vars();
         std::env::remove_var("ESA_TEST_API_KEY");
     }
 }

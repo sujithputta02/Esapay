@@ -177,6 +177,11 @@ pub struct RefundRecord {
 
 #[async_trait]
 pub trait WebhookStore: Send + Sync {
+    /// Return reference to underlying PostgreSQL connection pool if backed by Postgres
+    fn pg_pool(&self) -> Option<&PgPool> {
+        None
+    }
+
     /// Process an incoming webhook event transactionally.
     /// Guarantees:
     /// - Atomically claims or records the webhook event in `webhook_inbox`
@@ -690,6 +695,10 @@ impl PostgresWebhookStore {
 
 #[async_trait]
 impl WebhookStore for PostgresWebhookStore {
+    fn pg_pool(&self) -> Option<&PgPool> {
+        Some(&self.pool)
+    }
+
     async fn process_webhook_event(
         &self,
         params: &WebhookEventParams<'_>,

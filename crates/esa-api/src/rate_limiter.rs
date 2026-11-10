@@ -11,22 +11,30 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ApiRateLimiter {
     checkout_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-    #[allow(dead_code)]
     keys_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     demo_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
 }
 
 impl ApiRateLimiter {
     pub fn new() -> Self {
-        // 30 requests/second for checkout transactions (burst up to 60)
-        let checkout_quota = Quota::per_second(NonZeroU32::new(30).unwrap())
-            .allow_burst(NonZeroU32::new(60).unwrap());
-        // 10 requests/second for API key generation & validation
-        let keys_quota = Quota::per_second(NonZeroU32::new(10).unwrap())
-            .allow_burst(NonZeroU32::new(20).unwrap());
-        // 5 requests/second for high-compute demo scenarios & benchmarks
-        let demo_quota = Quota::per_second(NonZeroU32::new(5).unwrap())
-            .allow_burst(NonZeroU32::new(10).unwrap());
+        Self::new_with_quotas(30, 60, 10, 20, 5, 10)
+    }
+
+    pub fn new_with_quotas(
+        checkout_rps: u32,
+        checkout_burst: u32,
+        keys_rps: u32,
+        keys_burst: u32,
+        demo_rps: u32,
+        demo_burst: u32,
+    ) -> Self {
+        // Token-bucket quotas for respective operations
+        let checkout_quota = Quota::per_second(NonZeroU32::new(checkout_rps).unwrap())
+            .allow_burst(NonZeroU32::new(checkout_burst).unwrap());
+        let keys_quota = Quota::per_second(NonZeroU32::new(keys_rps).unwrap())
+            .allow_burst(NonZeroU32::new(keys_burst).unwrap());
+        let demo_quota = Quota::per_second(NonZeroU32::new(demo_rps).unwrap())
+            .allow_burst(NonZeroU32::new(demo_burst).unwrap());
 
         Self {
             checkout_limiter: Arc::new(GovRateLimiter::direct(checkout_quota)),
@@ -50,7 +58,6 @@ impl ApiRateLimiter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn check_keys(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.keys_limiter.check().is_err() {
             Err((
@@ -58,7 +65,7 @@ impl ApiRateLimiter {
                 Json(json!({
                     "error": "rate_limit_exceeded",
                     "code": 429,
-                    "message": "API key operation rate limit exceeded. Too many key requests."
+                    "message": "API key operation rate limit exceeded. Too many requests, please back off and retry shortly."
                 })),
             ))
         } else {

@@ -1,4 +1,5 @@
 use axum::{
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
@@ -1078,7 +1079,262 @@ pub async fn authenticate_token_str(raw_token: &str) -> Result<CallerIdentity, A
         return Ok(identity);
     }
 
+    // Check sandbox keys
+    if let Some(identity) = verify_sandbox_api_key(clean).await? {
+        return Ok(identity);
+    }
+
     Err(AuthError::InvalidApiKey)
+}
+
+/// Persistent/in-memory representation of an issued sandbox API key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxKeyRecord {
+    pub key_hash: String,
+    pub key_prefix: String,
+    pub merchant_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub revoked: bool,
+}
+
+/// Durable and in-memory registry for sandbox evaluation API keys.
+/// When PostgreSQL is available, records are stored durably in `sandbox_api_keys` table.
+/// An in-memory cache provides high-performance lookup and fallback in test/dev modes.
+#[derive(Clone)]
+pub struct SandboxKeyStore {
+    pg_pool: Option<sqlx::PgPool>,
+    memory_store: Arc<parking_lot::RwLock<std::collections::HashMap<String, SandboxKeyRecord>>>,
+}
+
+impl SandboxKeyStore {
+    pub fn new_in_memory() -> Self {
+        Self {
+            pg_pool: None,
+            memory_store: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    pub fn new_with_pool(pool: sqlx::PgPool) -> Self {
+        Self {
+            pg_pool: Some(pool),
+            memory_store: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    pub async fn init_schema_on_pool(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sandbox_api_keys (
+                key_hash VARCHAR(64) PRIMARY KEY,
+                key_prefix VARCHAR(32) NOT NULL,
+                merchant_id VARCHAR(64) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                revoked BOOLEAN NOT NULL DEFAULT FALSE
+            );
+            CREATE INDEX IF NOT EXISTS idx_sandbox_api_keys_expires ON sandbox_api_keys(expires_at);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn insert_key(&self, record: &SandboxKeyRecord) -> Result<(), String> {
+        // Always store in memory cache
+        {
+            let mut mem = self.memory_store.write();
+            mem.insert(record.key_hash.clone(), record.clone());
+        }
+
+        // If PostgreSQL pool is available, persist durably
+        if let Some(pool) = &self.pg_pool {
+            sqlx::query(
+                r#"
+                INSERT INTO sandbox_api_keys (key_hash, key_prefix, merchant_id, created_at, expires_at, revoked)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (key_hash) DO UPDATE SET
+                    revoked = EXCLUDED.revoked,
+                    expires_at = EXCLUDED.expires_at;
+                "#,
+            )
+            .bind(&record.key_hash)
+            .bind(&record.key_prefix)
+            .bind(&record.merchant_id)
+            .bind(record.created_at)
+            .bind(record.expires_at)
+            .bind(record.revoked)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to persist sandbox key to PostgreSQL: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_key(&self, key_hash: &str) -> Option<SandboxKeyRecord> {
+        // First check in-memory cache
+        {
+            let mem = self.memory_store.read();
+            if let Some(record) = mem.get(key_hash) {
+                return Some(record.clone());
+            }
+        }
+
+        // If not found in memory and PostgreSQL is available, query DB
+        if let Some(pool) = &self.pg_pool {
+            if let Ok(Some(row)) = sqlx::query(
+                r#"
+                SELECT key_hash, key_prefix, merchant_id, created_at, expires_at, revoked
+                FROM sandbox_api_keys
+                WHERE key_hash = $1
+                "#,
+            )
+            .bind(key_hash)
+            .fetch_optional(pool)
+            .await
+            {
+                use sqlx::Row;
+                let record = SandboxKeyRecord {
+                    key_hash: row.get("key_hash"),
+                    key_prefix: row.get("key_prefix"),
+                    merchant_id: row.get("merchant_id"),
+                    created_at: row.get("created_at"),
+                    expires_at: row.get("expires_at"),
+                    revoked: row.get("revoked"),
+                };
+                let mut mem = self.memory_store.write();
+                mem.insert(key_hash.to_string(), record.clone());
+                return Some(record);
+            }
+        }
+
+        None
+    }
+
+    #[allow(dead_code)]
+    pub async fn revoke_key(&self, key_hash: &str) -> Result<bool, String> {
+        let mut found = false;
+        {
+            let mut mem = self.memory_store.write();
+            if let Some(record) = mem.get_mut(key_hash) {
+                record.revoked = true;
+                found = true;
+            }
+        }
+
+        if let Some(pool) = &self.pg_pool {
+            let res = sqlx::query(
+                r#"
+                UPDATE sandbox_api_keys
+                SET revoked = TRUE
+                WHERE key_hash = $1
+                "#,
+            )
+            .bind(key_hash)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to revoke sandbox key in PostgreSQL: {}", e))?;
+
+            if res.rows_affected() > 0 {
+                found = true;
+            }
+        }
+
+        Ok(found)
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_memory(&self) {
+        let mut mem = self.memory_store.write();
+        mem.clear();
+    }
+}
+
+static GLOBAL_SANDBOX_KEY_STORE: parking_lot::Mutex<Option<Arc<SandboxKeyStore>>> =
+    parking_lot::Mutex::new(None);
+
+pub fn set_global_sandbox_key_store(store: Arc<SandboxKeyStore>) {
+    let mut lock = GLOBAL_SANDBOX_KEY_STORE.lock();
+    *lock = Some(store);
+}
+
+pub fn get_global_sandbox_key_store() -> Arc<SandboxKeyStore> {
+    let mut lock = GLOBAL_SANDBOX_KEY_STORE.lock();
+    if let Some(store) = lock.as_ref() {
+        return store.clone();
+    }
+    let store = Arc::new(SandboxKeyStore::new_in_memory());
+    *lock = Some(store.clone());
+    store
+}
+
+/// Verify a sandbox API key against the SandboxKeyStore.
+/// Enforces:
+/// 1. Rejection in production mode or if ENVIRONMENT=production
+/// 2. Rejection of revoked keys
+/// 3. Rejection of expired keys (strict server-side 24-hour enforcement)
+/// 4. Isolation: Only ordinary non-admin merchant scopes are granted
+pub async fn verify_sandbox_api_key(raw_key: &str) -> Result<Option<CallerIdentity>, AuthError> {
+    let clean = raw_key.trim();
+    if clean.is_empty() {
+        return Ok(None);
+    }
+
+    let key_hash = hash_api_key(clean);
+    let store = get_global_sandbox_key_store();
+
+    if let Some(record) = store.get_key(&key_hash).await {
+        // Enforce production isolation: Sandbox keys MUST be rejected in production
+        if crate::is_production_mode()
+            || std::env::var("ENVIRONMENT")
+                .map(|v| v.eq_ignore_ascii_case("production"))
+                .unwrap_or(false)
+        {
+            warn!(
+                prefix = %record.key_prefix,
+                "Sandbox API key rejected in production mode"
+            );
+            return Err(AuthError::InvalidApiKey);
+        }
+
+        // Enforce revocation
+        if record.revoked {
+            warn!(
+                prefix = %record.key_prefix,
+                "Sandbox API key is revoked"
+            );
+            return Err(AuthError::ApiKeyRevoked);
+        }
+
+        // Enforce 24h expiration
+        if chrono::Utc::now() >= record.expires_at {
+            warn!(
+                prefix = %record.key_prefix,
+                "Sandbox API key has expired"
+            );
+            return Err(AuthError::ApiKeyExpired);
+        }
+
+        // Valid sandbox key: Return isolated non-admin merchant caller identity
+        return Ok(Some(CallerIdentity {
+            user_id: format!("sandbox_user_{}", record.merchant_id),
+            merchant_id: record.merchant_id,
+            email: None,
+            role: "merchant".to_string(),
+            auth_type: "api_key".to_string(),
+            environment: "sandbox".to_string(),
+            scopes: vec![
+                "payments:write".to_string(),
+                "payments:read".to_string(),
+                "telemetry:read".to_string(),
+                "gateways:read".to_string(),
+            ],
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Unified authentication: verifies either a cryptographically signed Supabase JWT
@@ -1118,7 +1374,14 @@ pub async fn is_key_authorized_async(key: &str) -> bool {
             .is_ok();
     }
 
-    verify_configured_api_key(clean).is_some()
+    if verify_configured_api_key(clean).is_some() {
+        return true;
+    }
+
+    verify_sandbox_api_key(clean)
+        .await
+        .unwrap_or(None)
+        .is_some()
 }
 
 /// Check if an API key or Supabase JWT is valid (fail-closed, no prefix-only bypasses)
@@ -1133,32 +1396,107 @@ pub fn is_key_authorized(key: &str) -> bool {
         return parse_supabase_jwt(clean).is_some();
     }
 
-    verify_configured_api_key(clean).is_some()
+    if verify_configured_api_key(clean).is_some() {
+        return true;
+    }
+
+    let key_hash = hash_api_key(clean);
+    let store = get_global_sandbox_key_store();
+    let mem = store.memory_store.read();
+    if let Some(record) = mem.get(&key_hash) {
+        if !record.revoked
+            && chrono::Utc::now() < record.expires_at
+            && !crate::is_production_mode()
+            && !std::env::var("ENVIRONMENT")
+                .map(|v| v.eq_ignore_ascii_case("production"))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// POST /api/v1/keys/generate-sandbox
-/// Issues an instant Sandbox Key with test prefix
-pub async fn generate_sandbox_key_handler() -> impl IntoResponse {
-    let random_suffix = Uuid::new_v4().simple().to_string();
-    let api_key = format!("esa_test_demo_{}", random_suffix);
-    let key_prefix = format!("esa_test_demo_{}...", &random_suffix[..6]);
+/// Issues an instant Sandbox Key with test prefix, stored durably as a hash with 24-hour server-side expiration.
+pub async fn generate_sandbox_key_handler(
+    State(state): State<crate::AppState>,
+) -> impl IntoResponse {
+    if let Err((status, err_json)) = state.rate_limiter.check_keys() {
+        return (status, [(axum::http::header::RETRY_AFTER, "1")], err_json).into_response();
+    }
 
-    Json(GenerateSandboxResponse {
-        api_key,
-        key_prefix,
-        environment: "sandbox".to_string(),
-        expires_in: "24h (Evaluation mode)".to_string(),
-        message:
-            "Sandbox Key active for local evaluation. In live mode, register keys in the ledger."
+    let random_suffix = Uuid::new_v4().simple().to_string();
+    let raw_key = format!("esa_test_demo_{}", random_suffix);
+    let key_prefix = format!("esa_test_demo_{}...", &random_suffix[..6]);
+    let key_hash = hash_api_key(&raw_key);
+    let merchant_id = format!("sbx_merchant_{}", &random_suffix[..8]);
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::hours(24);
+
+    let record = SandboxKeyRecord {
+        key_hash,
+        key_prefix: key_prefix.clone(),
+        merchant_id,
+        created_at: now,
+        expires_at,
+        revoked: false,
+    };
+
+    if let Err(e) = state.sandbox_keys.insert_key(&record).await {
+        tracing::error!("Failed to persist sandbox key: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "internal_error",
+                "message": "Failed to generate sandbox key"
+            })),
+        )
+            .into_response();
+    }
+
+    tracing::info!(prefix = %key_prefix, "Generated new sandbox API key (24h server-side expiry)");
+
+    (
+        StatusCode::OK,
+        Json(GenerateSandboxResponse {
+            api_key: raw_key,
+            key_prefix,
+            environment: "sandbox".to_string(),
+            expires_in: "24h".to_string(),
+            message: "Sandbox Key active for 24 hours. Valid for sandbox evaluation only."
                 .to_string(),
-    })
+        }),
+    )
+        .into_response()
 }
 
 /// POST /api/v1/keys/validate
-pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> impl IntoResponse {
+pub async fn validate_key_handler(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<ValidateKeyRequest>,
+) -> impl IntoResponse {
+    if let Err((status, err_json)) = state.rate_limiter.check_keys() {
+        return (
+            status,
+            [(axum::http::header::RETRY_AFTER, "1")],
+            Json(ValidateKeyResponse {
+                valid: false,
+                environment: "unknown".to_string(),
+                merchant_id: "anonymous".to_string(),
+                message: err_json["message"]
+                    .as_str()
+                    .unwrap_or("Rate limit exceeded")
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     let key = payload.api_key.trim();
 
-    // Check if token is Supabase JWT
+    // 1. Check if token is Supabase JWT
     if key.starts_with("eyJ") && key.split('.').count() == 3 {
         if let Ok(claims) =
             verify_supabase_jwt_with_key(key, SupabaseVerificationKey::FromEnvironment, None).await
@@ -1181,11 +1519,12 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
                     merchant_id: format!("usr_{}", short_id),
                     message: format!("Supabase JWT validated for {}", email),
                 }),
-            );
+            )
+                .into_response();
         }
     }
 
-    // Check API key
+    // 2. Check configured environment API keys
     if let Some(identity) = verify_configured_api_key(key) {
         return (
             StatusCode::OK,
@@ -1195,7 +1534,67 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
                 merchant_id: identity.merchant_id,
                 message: "API Key verified and active.".to_string(),
             }),
-        );
+        )
+            .into_response();
+    }
+
+    // 3. Check sandbox keys
+    let key_hash = hash_api_key(key);
+    if let Some(record) = state.sandbox_keys.get_key(&key_hash).await {
+        if crate::is_production_mode()
+            || std::env::var("ENVIRONMENT")
+                .map(|v| v.eq_ignore_ascii_case("production"))
+                .unwrap_or(false)
+        {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ValidateKeyResponse {
+                    valid: false,
+                    environment: "sandbox".to_string(),
+                    merchant_id: record.merchant_id,
+                    message: "Sandbox API keys are rejected in production environments."
+                        .to_string(),
+                }),
+            )
+                .into_response();
+        }
+
+        if record.revoked {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ValidateKeyResponse {
+                    valid: false,
+                    environment: "sandbox".to_string(),
+                    merchant_id: record.merchant_id,
+                    message: "Sandbox API key has been revoked.".to_string(),
+                }),
+            )
+                .into_response();
+        }
+
+        if chrono::Utc::now() >= record.expires_at {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ValidateKeyResponse {
+                    valid: false,
+                    environment: "sandbox".to_string(),
+                    merchant_id: record.merchant_id,
+                    message: "Sandbox API key has expired.".to_string(),
+                }),
+            )
+                .into_response();
+        }
+
+        return (
+            StatusCode::OK,
+            Json(ValidateKeyResponse {
+                valid: true,
+                environment: "sandbox".to_string(),
+                merchant_id: record.merchant_id,
+                message: "Sandbox API key verified and active.".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     (
@@ -1207,6 +1606,7 @@ pub async fn validate_key_handler(Json(payload): Json<ValidateKeyRequest>) -> im
             message: "Invalid, inactive, or unverified ESAPay API key.".to_string(),
         }),
     )
+        .into_response()
 }
 
 /// GET /api/v1/auth/me
