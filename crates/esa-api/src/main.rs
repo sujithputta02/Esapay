@@ -610,8 +610,9 @@ async fn main() -> anyhow::Result<()> {
         match RazorpayAdapter::try_from_env() {
             Ok(adapter) => {
                 info!(
-                    "Razorpay adapter enabled (mode: {})",
-                    if adapter.config().test_mode_only {
+                    "Razorpay adapter enabled (mode: {:?}, credentials: {})",
+                    adapter.config().mode,
+                    if adapter.config().is_test_credentials() {
                         "test"
                     } else {
                         "live"
@@ -620,8 +621,8 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(adapter))
             }
             Err(e) => {
-                error!("Razorpay config invalid — adapter disabled: {}", e);
-                None
+                error!("Razorpay config invalid: {}", e);
+                return Err(anyhow::anyhow!("Razorpay configuration error: {}", e));
             }
         }
     } else {
@@ -768,9 +769,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize sandbox API key store (durable in PostgreSQL if configured, in-memory fallback)
     let sandbox_keys = if let Some(pool) = webhook_store.pg_pool() {
-        if let Err(e) = api_keys::SandboxKeyStore::init_schema_on_pool(pool).await {
-            warn!("Failed to initialize sandbox_api_keys schema on PostgreSQL: {e}");
-        }
+        api_keys::SandboxKeyStore::init_schema_on_pool(pool)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to initialize sandbox_api_keys schema on PostgreSQL: {e}")
+            })?;
         Arc::new(api_keys::SandboxKeyStore::new_with_pool(pool.clone()))
     } else {
         Arc::new(api_keys::SandboxKeyStore::new_in_memory())
@@ -940,6 +943,8 @@ fn build_app(app_state: AppState) -> Router {
             post(api_keys::validate_key_handler),
         )
         .route("/api/keys/validate", post(api_keys::validate_key_handler))
+        .route("/api/v1/keys/revoke", post(api_keys::revoke_key_handler))
+        .route("/api/keys/revoke", post(api_keys::revoke_key_handler))
         // Authentication Identity (Supabase JWT & API Key introspection)
         .route("/api/v1/auth/me", get(api_keys::auth_me_handler))
         .route("/api/auth/me", get(api_keys::auth_me_handler))
@@ -1548,9 +1553,15 @@ async fn razorpay_webhook(
     }
 }
 
-async fn razorpay_status(State(state): State<AppState>) -> impl IntoResponse {
+async fn razorpay_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let caller = api_keys::authenticate_caller(&headers).await.ok();
+    let is_sandbox = caller
+        .as_ref()
+        .map(|c| c.environment == "sandbox")
+        .unwrap_or(true);
+
     if let Some(adapter) = &state.razorpay {
-        Json(adapter.status()).into_response()
+        Json(adapter.status_for_caller(is_sandbox)).into_response()
     } else {
         Json(serde_json::json!({
             "razorpay": {
@@ -1566,7 +1577,7 @@ async fn razorpay_verify_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let _caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!("Authentication required to verify keys: {}", e))
     })?;
 
@@ -1574,6 +1585,14 @@ async fn razorpay_verify_keys(
         .razorpay
         .as_ref()
         .ok_or_else(|| AppError::Internal("Razorpay adapter not configured".into()))?;
+
+    // Reject sandbox caller if adapter credentials are live or not sandbox compatible
+    if caller.environment == "sandbox" && !adapter.config().is_sandbox_compatible() {
+        return Err(AppError::Forbidden(
+            "Sandbox API keys cannot perform Razorpay operations against live adapter credentials."
+                .into(),
+        ));
+    }
 
     let api_ok = adapter.client().health_check().await.unwrap_or(false);
 
@@ -1615,6 +1634,14 @@ async fn razorpay_create_order(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Razorpay adapter not configured".into()))?;
 
+    // Reject sandbox caller if adapter credentials are live or not sandbox compatible
+    if caller.environment == "sandbox" && !adapter.config().is_sandbox_compatible() {
+        return Err(AppError::Forbidden(
+            "Sandbox API keys cannot perform Razorpay operations against live adapter credentials."
+                .into(),
+        ));
+    }
+
     if req.amount_cents < 100 {
         return Err(AppError::Internal(
             "Minimum amount is 100 paise (₹1)".into(),
@@ -1647,11 +1674,23 @@ async fn razorpay_create_order(
         }
     }
 
+    let returned_key_id = if caller.environment == "sandbox" {
+        if adapter.config().is_test_credentials() {
+            adapter.config().key_id.clone()
+        } else {
+            return Err(AppError::Forbidden(
+                "Live Razorpay credentials cannot be returned to sandbox callers.".into(),
+            ));
+        }
+    } else {
+        adapter.config().key_id.clone()
+    };
+
     Ok(Json(serde_json::json!({
         "order_id": order_id,
         "amount": order.get("amount").and_then(|v| v.as_u64()).unwrap_or(req.amount_cents),
         "currency": order.get("currency").and_then(|v| v.as_str()).unwrap_or("INR"),
-        "key_id": adapter.config().key_id,
+        "key_id": returned_key_id,
         "receipt": receipt,
         "region": region,
         "payment_method": method,
@@ -1680,6 +1719,18 @@ async fn razorpay_confirm_payment(
     {
         return Err(AppError::Forbidden(
             "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
+    let adapter = state
+        .razorpay
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Razorpay adapter not configured".into()))?;
+
+    // Reject sandbox caller if adapter credentials are live or not sandbox compatible
+    if caller.environment == "sandbox" && !adapter.config().is_sandbox_compatible() {
+        return Err(AppError::Forbidden(
+            "Sandbox API keys cannot perform Razorpay payment confirmation against live adapter credentials.".into(),
         ));
     }
     let adapter = state
@@ -3383,17 +3434,31 @@ async fn universal_checkout(
     }
 
     // Sandbox API keys are strictly forbidden from performing live payment operations.
-    if caller.environment == "sandbox"
-        && (is_production_mode()
-            || matches!(detect_checkout_mode(), PaymentCheckoutMode::Live { .. }))
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "forbidden",
-                "message": "Sandbox API keys cannot perform live payment operations."
-            })),
-        ));
+    if caller.environment == "sandbox" {
+        if is_production_mode()
+            || matches!(detect_checkout_mode(), PaymentCheckoutMode::Live { .. })
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "message": "Sandbox API keys cannot perform live payment operations."
+                })),
+            ));
+        }
+
+        // If the Razorpay adapter is configured, verify it is verifiably using test credentials
+        if let Some(adapter) = &state.razorpay {
+            if !adapter.config().is_sandbox_compatible() {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "forbidden",
+                        "message": "Sandbox API keys cannot perform checkout against live Razorpay adapter credentials."
+                    })),
+                ));
+            }
+        }
     }
 
     // 3. Currency Validation against Supported Currency Registry
@@ -3752,8 +3817,7 @@ mod integration_tests {
         let vitals = VitalsStore::new();
         let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
         let rate_limiter = rate_limiter::ApiRateLimiter::new();
-        let sandbox_keys = Arc::new(api_keys::SandboxKeyStore::new_in_memory());
-        api_keys::set_global_sandbox_key_store(Arc::clone(&sandbox_keys));
+        let sandbox_keys = api_keys::get_global_sandbox_key_store();
 
         AppState {
             state_fabric,
@@ -5951,6 +6015,7 @@ mod integration_tests {
             key_secret: "rzp_test_secret123".to_string(),
             webhook_secret: secret.to_string(),
             api_base: "https://api.razorpay.com/v1".to_string(),
+            mode: esa_razorpay::RazorpayMode::Test,
             test_mode_only: true,
             webhook_rate_limit_per_sec: 1000,
             api_rate_limit_per_sec: 1000,
@@ -8265,6 +8330,7 @@ mod integration_tests {
             key_secret: "rzp_test_sec123".to_string(),
             webhook_secret: "whsec_test".to_string(),
             api_base: format!("http://127.0.0.1:{}", port),
+            mode: esa_razorpay::RazorpayMode::Test,
             test_mode_only: true,
             webhook_rate_limit_per_sec: 1000,
             api_rate_limit_per_sec: 1000,
@@ -8837,5 +8903,367 @@ mod integration_tests {
 
         clear_mode_env_vars();
         std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_razorpay_live_vs_test_credential_isolation_for_sandbox_identities() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        // 1. Live credentials in adapter -> Sandbox keys strictly rejected
+        let mut live_state = create_test_state();
+        let live_config = RazorpayConfig {
+            key_id: "rzp_live_real987654321".to_string(),
+            key_secret: "live_secret_abc123".to_string(),
+            webhook_secret: "whsec_live_xyz".to_string(),
+            api_base: "https://api.razorpay.com/v1".to_string(),
+            mode: esa_razorpay::RazorpayMode::Live,
+            test_mode_only: false,
+            webhook_rate_limit_per_sec: 30,
+            api_rate_limit_per_sec: 10,
+            account_id: None,
+        };
+        live_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(live_config)));
+        let live_app = build_app(live_state.clone());
+
+        // Generate a sandbox key
+        let gen_resp = live_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys/generate-sandbox")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gen_resp.status(), StatusCode::OK);
+        let gen_bytes = axum::body::to_bytes(gen_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let gen_json: serde_json::Value = serde_json::from_slice(&gen_bytes).unwrap();
+        let sandbox_key = gen_json["api_key"].as_str().unwrap().to_string();
+
+        let order_payload = serde_json::json!({
+            "amount_cents": 5000,
+            "region": "IN-SOUTH",
+            "payment_method": "upi"
+        });
+
+        // Test POST /api/razorpay/orders rejected with 403
+        for uri in &["/api/razorpay/orders", "/api/v1/razorpay/orders"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", sandbox_key))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&order_payload).unwrap(),
+                ))
+                .unwrap();
+            let resp = live_app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Sandbox key must be rejected from {} when adapter has live credentials",
+                uri
+            );
+        }
+
+        // Test POST /api/razorpay/confirm rejected with 403
+        let confirm_payload = serde_json::json!({
+            "payment_id": "pay_test123"
+        });
+        for uri in &["/api/razorpay/confirm", "/api/v1/razorpay/confirm"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", sandbox_key))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&confirm_payload).unwrap(),
+                ))
+                .unwrap();
+            let resp = live_app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Sandbox key must be rejected from {} when adapter has live credentials",
+                uri
+            );
+        }
+
+        // Test GET /api/razorpay/status redacts live key ID for sandbox caller
+        for uri in &["/api/razorpay/status", "/api/v1/razorpay/status"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .header("authorization", format!("Bearer {}", sandbox_key))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = live_app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json["razorpay"]["key_id"], "[REDACTED_LIVE_CREDENTIAL]",
+                "Live key ID must be masked for sandbox caller on {}",
+                uri
+            );
+        }
+
+        // 2. Test credentials in adapter -> Sandbox keys can create orders
+        let mock_app = axum::Router::new().route(
+            "/orders",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "id": "order_test_sbx_001",
+                        "amount": 5000,
+                        "currency": "INR",
+                        "status": "created"
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, mock_app).await.unwrap();
+        });
+
+        let mut test_state = create_test_state();
+        test_state.sandbox_keys = Arc::clone(&live_state.sandbox_keys);
+        api_keys::set_global_sandbox_key_store(Arc::clone(&live_state.sandbox_keys));
+        let test_config = RazorpayConfig {
+            key_id: "rzp_test_valid123456".to_string(),
+            key_secret: "test_secret_abc123".to_string(),
+            webhook_secret: "whsec_test_xyz".to_string(),
+            api_base: format!("http://127.0.0.1:{}", port),
+            mode: esa_razorpay::RazorpayMode::Test,
+            test_mode_only: true,
+            webhook_rate_limit_per_sec: 1000,
+            api_rate_limit_per_sec: 1000,
+            account_id: None,
+        };
+        test_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(test_config)));
+        let test_app = build_app(test_state);
+
+        // Order creation succeeds with test credentials
+        let test_order_req = Request::builder()
+            .method("POST")
+            .uri("/api/razorpay/orders")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", sandbox_key))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&order_payload).unwrap(),
+            ))
+            .unwrap();
+        let test_order_resp = test_app.clone().oneshot(test_order_req).await.unwrap();
+        assert_eq!(test_order_resp.status(), StatusCode::OK);
+        let order_bytes = axum::body::to_bytes(test_order_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let order_json: serde_json::Value = serde_json::from_slice(&order_bytes).unwrap();
+        assert_eq!(order_json["key_id"], "rzp_test_valid123456");
+
+        clear_mode_env_vars();
+    }
+
+    #[tokio::test]
+    async fn test_admin_key_revocation_endpoint_and_aliases() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin_secret_revoker_key");
+        std::env::set_var("ESA_TEST_API_KEY", "merchant_standard_key");
+
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        // 1. Generate sandbox key
+        let gen_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys/generate-sandbox")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gen_resp.status(), StatusCode::OK);
+        let gen_bytes = axum::body::to_bytes(gen_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let gen_json: serde_json::Value = serde_json::from_slice(&gen_bytes).unwrap();
+        let raw_key = gen_json["api_key"].as_str().unwrap().to_string();
+
+        // 2. Validate key works before revocation
+        let val_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "api_key": raw_key })).unwrap(),
+            ))
+            .unwrap();
+        let val_resp = app.clone().oneshot(val_req).await.unwrap();
+        assert_eq!(val_resp.status(), StatusCode::OK);
+
+        let revoke_body = serde_json::json!({ "api_key": raw_key });
+
+        // 3. Anonymous caller rejected with 401
+        for uri in &["/api/keys/revoke", "/api/v1/keys/revoke"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&revoke_body).unwrap(),
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 4. Ordinary merchant caller rejected with 403
+        for uri in &["/api/keys/revoke", "/api/v1/keys/revoke"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .header("x-api-key", "merchant_standard_key")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&revoke_body).unwrap(),
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // 5. Admin caller succeeds with 200
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/revoke")
+            .header("content-type", "application/json")
+            .header("x-api-key", "admin_secret_revoker_key")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&revoke_body).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(resp_json["success"], true);
+
+        // 6. Validating key now returns 401 Unauthorized
+        let val_after_req = Request::builder()
+            .method("POST")
+            .uri("/api/keys/validate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "api_key": raw_key })).unwrap(),
+            ))
+            .unwrap();
+        let val_after_resp = app.clone().oneshot(val_after_req).await.unwrap();
+        assert_eq!(val_after_resp.status(), StatusCode::UNAUTHORIZED);
+
+        clear_mode_env_vars();
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    async fn get_test_postgres_pool() -> Option<sqlx::PgPool> {
+        let db_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() && url != "memory" => url,
+            _ => return None,
+        };
+        sqlx::PgPool::connect(&db_url).await.ok()
+    }
+
+    #[tokio::test]
+    async fn test_postgres_sandbox_key_store_lifecycle_and_multinode_consistency() {
+        let pool = match get_test_postgres_pool().await {
+            Some(p) => p,
+            None => {
+                println!("Skipping test_postgres_sandbox_key_store_lifecycle_and_multinode_consistency: DATABASE_URL not set");
+                return;
+            }
+        };
+
+        // 1. Schema initialization on database (split statements)
+        api_keys::SandboxKeyStore::init_schema_on_pool(&pool)
+            .await
+            .expect("Schema init on PostgreSQL must succeed");
+
+        // 2. Node A creates a sandbox key
+        let store_node_a = api_keys::SandboxKeyStore::new_with_pool(pool.clone());
+        let raw_key = format!("esa_test_demo_{}", uuid::Uuid::new_v4().simple());
+        let key_hash = api_keys::hash_api_key(&raw_key);
+        let now = chrono::Utc::now();
+        let record = api_keys::SandboxKeyRecord {
+            key_hash: key_hash.clone(),
+            key_prefix: raw_key[..18].to_string(),
+            merchant_id: "sbx_merchant_pg_test".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+            revoked: false,
+        };
+        store_node_a
+            .insert_key(&record)
+            .await
+            .expect("Insert on Node A must succeed");
+
+        // 3. Node B (independent instance, empty local cache) retrieves key from DB
+        let store_node_b = api_keys::SandboxKeyStore::new_with_pool(pool.clone());
+        let fetched_b = store_node_b
+            .get_key(&key_hash)
+            .await
+            .expect("Node B must find key in DB");
+        assert_eq!(fetched_b.merchant_id, "sbx_merchant_pg_test");
+        assert!(!fetched_b.revoked);
+
+        // 4. Node A revokes the key
+        let revoked = store_node_a
+            .revoke_key(&key_hash)
+            .await
+            .expect("Revoke must succeed");
+        assert!(revoked);
+
+        // 5. Node B must immediately observe revoked status because PostgreSQL is authoritative
+        let fetched_b_after = store_node_b
+            .get_key(&key_hash)
+            .await
+            .expect("Node B must find record");
+        assert!(
+            fetched_b_after.revoked,
+            "Node B must immediately see revoked status from PostgreSQL"
+        );
+
+        // 6. Test expiry enforcement after retrieval from PostgreSQL
+        let expired_key_raw = format!("esa_test_demo_{}", uuid::Uuid::new_v4().simple());
+        let expired_hash = api_keys::hash_api_key(&expired_key_raw);
+        let expired_record = api_keys::SandboxKeyRecord {
+            key_hash: expired_hash.clone(),
+            key_prefix: expired_key_raw[..18].to_string(),
+            merchant_id: "sbx_expired_pg".to_string(),
+            created_at: now - chrono::Duration::hours(25),
+            expires_at: now - chrono::Duration::hours(1),
+            revoked: false,
+        };
+        store_node_a.insert_key(&expired_record).await.unwrap();
+        let expired_b = store_node_b.get_key(&expired_hash).await.unwrap();
+        assert!(chrono::Utc::now() >= expired_b.expires_at);
     }
 }

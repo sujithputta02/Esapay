@@ -1133,22 +1133,24 @@ impl SandboxKeyStore {
                 expires_at TIMESTAMPTZ NOT NULL,
                 revoked BOOLEAN NOT NULL DEFAULT FALSE
             );
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
             CREATE INDEX IF NOT EXISTS idx_sandbox_api_keys_expires ON sandbox_api_keys(expires_at);
             "#,
         )
         .execute(pool)
         .await?;
+
         Ok(())
     }
 
     pub async fn insert_key(&self, record: &SandboxKeyRecord) -> Result<(), String> {
-        // Always store in memory cache
-        {
-            let mut mem = self.memory_store.write();
-            mem.insert(record.key_hash.clone(), record.clone());
-        }
-
-        // If PostgreSQL pool is available, persist durably
+        // If PostgreSQL pool is available, persist durably FIRST
         if let Some(pool) = &self.pg_pool {
             sqlx::query(
                 r#"
@@ -1170,21 +1172,20 @@ impl SandboxKeyStore {
             .map_err(|e| format!("Failed to persist sandbox key to PostgreSQL: {}", e))?;
         }
 
+        // Only insert into memory store once durable storage succeeds
+        {
+            let mut mem = self.memory_store.write();
+            mem.insert(record.key_hash.clone(), record.clone());
+        }
+
         Ok(())
     }
 
     pub async fn get_key(&self, key_hash: &str) -> Option<SandboxKeyRecord> {
-        // First check in-memory cache
-        {
-            let mem = self.memory_store.read();
-            if let Some(record) = mem.get(key_hash) {
-                return Some(record.clone());
-            }
-        }
-
-        // If not found in memory and PostgreSQL is available, query DB
+        // If PostgreSQL pool is available, it is the authoritative source of truth.
+        // We query the DB to avoid stale revocation states across instances.
         if let Some(pool) = &self.pg_pool {
-            if let Ok(Some(row)) = sqlx::query(
+            match sqlx::query(
                 r#"
                 SELECT key_hash, key_prefix, merchant_id, created_at, expires_at, revoked
                 FROM sandbox_api_keys
@@ -1195,35 +1196,42 @@ impl SandboxKeyStore {
             .fetch_optional(pool)
             .await
             {
-                use sqlx::Row;
-                let record = SandboxKeyRecord {
-                    key_hash: row.get("key_hash"),
-                    key_prefix: row.get("key_prefix"),
-                    merchant_id: row.get("merchant_id"),
-                    created_at: row.get("created_at"),
-                    expires_at: row.get("expires_at"),
-                    revoked: row.get("revoked"),
-                };
-                let mut mem = self.memory_store.write();
-                mem.insert(key_hash.to_string(), record.clone());
-                return Some(record);
+                Ok(Some(row)) => {
+                    use sqlx::Row;
+                    let record = SandboxKeyRecord {
+                        key_hash: row.get("key_hash"),
+                        key_prefix: row.get("key_prefix"),
+                        merchant_id: row.get("merchant_id"),
+                        created_at: row.get("created_at"),
+                        expires_at: row.get("expires_at"),
+                        revoked: row.get("revoked"),
+                    };
+                    let mut mem = self.memory_store.write();
+                    mem.insert(key_hash.to_string(), record.clone());
+                    return Some(record);
+                }
+                Ok(None) => {
+                    // Evict from local cache if record no longer exists in DB
+                    let mut mem = self.memory_store.write();
+                    mem.remove(key_hash);
+                    return None;
+                }
+                Err(e) => {
+                    warn!("Database query for sandbox key failed: {e}. Failing closed.");
+                    return None;
+                }
             }
         }
 
-        None
+        // Fallback for standalone in-memory mode
+        let mem = self.memory_store.read();
+        mem.get(key_hash).cloned()
     }
 
-    #[allow(dead_code)]
     pub async fn revoke_key(&self, key_hash: &str) -> Result<bool, String> {
         let mut found = false;
-        {
-            let mut mem = self.memory_store.write();
-            if let Some(record) = mem.get_mut(key_hash) {
-                record.revoked = true;
-                found = true;
-            }
-        }
 
+        // PostgreSQL is authoritative: update DB first
         if let Some(pool) = &self.pg_pool {
             let res = sqlx::query(
                 r#"
@@ -1238,6 +1246,15 @@ impl SandboxKeyStore {
             .map_err(|e| format!("Failed to revoke sandbox key in PostgreSQL: {}", e))?;
 
             if res.rows_affected() > 0 {
+                found = true;
+            }
+        }
+
+        // Invalidate / update local memory cache
+        {
+            let mut mem = self.memory_store.write();
+            if let Some(record) = mem.get_mut(key_hash) {
+                record.revoked = true;
                 found = true;
             }
         }
@@ -1422,9 +1439,13 @@ pub fn is_key_authorized(key: &str) -> bool {
 /// Issues an instant Sandbox Key with test prefix, stored durably as a hash with 24-hour server-side expiration.
 pub async fn generate_sandbox_key_handler(
     State(state): State<crate::AppState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err((status, err_json)) = state.rate_limiter.check_keys() {
-        return (status, [(axum::http::header::RETRY_AFTER, "1")], err_json).into_response();
+    let source_id = crate::rate_limiter::extract_client_source_identifier(&headers);
+    if let Err((status, retry_hdrs, err_json)) =
+        state.rate_limiter.check_generate_sandbox(&source_id)
+    {
+        return (status, retry_hdrs, err_json).into_response();
     }
 
     let random_suffix = Uuid::new_v4().simple().to_string();
@@ -1475,12 +1496,14 @@ pub async fn generate_sandbox_key_handler(
 /// POST /api/v1/keys/validate
 pub async fn validate_key_handler(
     State(state): State<crate::AppState>,
+    headers: HeaderMap,
     Json(payload): Json<ValidateKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err((status, err_json)) = state.rate_limiter.check_keys() {
+    let source_id = crate::rate_limiter::extract_client_source_identifier(&headers);
+    if let Err((status, retry_hdrs, err_json)) = state.rate_limiter.check_validate_key(&source_id) {
         return (
             status,
-            [(axum::http::header::RETRY_AFTER, "1")],
+            retry_hdrs,
             Json(ValidateKeyResponse {
                 valid: false,
                 environment: "unknown".to_string(),
@@ -1607,6 +1630,88 @@ pub async fn validate_key_handler(
         }),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeKeyRequest {
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeKeyResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// POST /api/keys/revoke and POST /api/v1/keys/revoke
+/// Administrator-only key revocation endpoint. Never exposes raw credentials or hashes in responses/logs.
+pub async fn revoke_key_handler(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RevokeKeyRequest>,
+) -> Result<Json<RevokeKeyResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let caller = authenticate_caller(&headers).await.map_err(|e| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "unauthorized",
+                "message": format!("Authentication required for key revocation: {}", e)
+            })),
+        )
+    })?;
+
+    if !caller.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Administrative privileges required to revoke API keys."
+            })),
+        ));
+    }
+
+    let raw_key = match payload
+        .api_key
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(k) => k,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "bad_request",
+                    "message": "Missing 'api_key' to revoke."
+                })),
+            ));
+        }
+    };
+
+    let key_hash = hash_api_key(raw_key);
+    match state.sandbox_keys.revoke_key(&key_hash).await {
+        Ok(true) => {
+            tracing::info!("Sandbox API key revoked successfully by admin");
+            Ok(Json(RevokeKeyResponse {
+                success: true,
+                message: "API key has been successfully revoked.".to_string(),
+            }))
+        }
+        Ok(false) => Ok(Json(RevokeKeyResponse {
+            success: false,
+            message: "API key not found or already revoked.".to_string(),
+        })),
+        Err(e) => {
+            tracing::error!("Failed to revoke key: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "internal_error",
+                    "message": "Failed to revoke API key"
+                })),
+            ))
+        }
+    }
 }
 
 /// GET /api/v1/auth/me
@@ -2475,5 +2580,39 @@ pub(crate) mod tests {
 
         assert!(constant_time_eq(a, b));
         assert!(!constant_time_eq(a, c));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_failure_does_not_cache_in_memory() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://127.0.0.1:1/invalid_db")
+            .unwrap();
+        let store = SandboxKeyStore::new_with_pool(pool);
+
+        let raw_key = "esa_test_demo_fail_test_key";
+        let key_hash = hash_api_key(raw_key);
+        let record = SandboxKeyRecord {
+            key_hash: key_hash.clone(),
+            key_prefix: raw_key[..18].to_string(),
+            merchant_id: "sbx_test".to_string(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            revoked: false,
+        };
+
+        // Persistence must fail due to unavailable DB
+        let res = store.insert_key(&record).await;
+        assert!(res.is_err(), "Persistence must fail when DB is unavailable");
+
+        // Crucial invariant: Memory cache must NOT contain the key!
+        assert!(
+            store.memory_store.read().get(&key_hash).is_none(),
+            "Memory store must not cache key when persistence fails"
+        );
+        assert!(
+            store.get_key(&key_hash).await.is_none(),
+            "get_key must return None when persistence fails"
+        );
     }
 }
