@@ -1,11 +1,12 @@
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -1439,9 +1440,14 @@ pub fn is_key_authorized(key: &str) -> bool {
 /// Issues an instant Sandbox Key with test prefix, stored durably as a hash with 24-hour server-side expiration.
 pub async fn generate_sandbox_key_handler(
     State(state): State<crate::AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let source_id = crate::rate_limiter::extract_client_source_identifier(&headers);
+    let source_id = crate::rate_limiter::extract_client_source_identifier(
+        connect_info.map(|ci| ci.0),
+        &headers,
+        None,
+    );
     if let Err((status, retry_hdrs, err_json)) =
         state.rate_limiter.check_generate_sandbox(&source_id)
     {
@@ -1496,10 +1502,15 @@ pub async fn generate_sandbox_key_handler(
 /// POST /api/v1/keys/validate
 pub async fn validate_key_handler(
     State(state): State<crate::AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(payload): Json<ValidateKeyRequest>,
 ) -> impl IntoResponse {
-    let source_id = crate::rate_limiter::extract_client_source_identifier(&headers);
+    let source_id = crate::rate_limiter::extract_client_source_identifier(
+        connect_info.map(|ci| ci.0),
+        &headers,
+        None,
+    );
     if let Err((status, retry_hdrs, err_json)) = state.rate_limiter.check_validate_key(&source_id) {
         return (
             status,

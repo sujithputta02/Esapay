@@ -808,7 +808,11 @@ async fn main() -> anyhow::Result<()> {
     info!("ESA API listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     orch_handle.await?;
 
@@ -9265,5 +9269,333 @@ mod integration_tests {
         store_node_a.insert_key(&expired_record).await.unwrap();
         let expired_b = store_node_b.get_key(&expired_hash).await.unwrap();
         assert!(chrono::Utc::now() >= expired_b.expires_at);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_peer_identity_and_proxy_trust_regression() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+
+        // 1. Independent buckets for distinct peer IPs
+        let mut state = create_test_state();
+        // Quotas: checkout(10,10), aggregate(100,100), gen(10,2), val(10,4), demo(10,10)
+        state.rate_limiter = rate_limiter::ApiRateLimiter::new_with_all_quotas(
+            10, 10, 100, 100, 10, 2, 10, 4, 10, 10,
+        );
+        let app = build_app(state);
+
+        let peer_a: SocketAddr = "192.0.2.1:1234".parse().unwrap();
+        let peer_b: SocketAddr = "198.51.100.2:5678".parse().unwrap();
+
+        // Helper to send generate-sandbox request with peer address and optional headers
+        async fn send_gen_req(
+            app: Router,
+            uri: &'static str,
+            peer: Option<SocketAddr>,
+            hdrs: Vec<(&'static str, &'static str)>,
+        ) -> axum::response::Response {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json");
+            for (k, v) in hdrs {
+                builder = builder.header(k, v);
+            }
+            let mut req = builder.body(axum::body::Body::empty()).unwrap();
+            if let Some(p) = peer {
+                req.extensions_mut().insert(ConnectInfo(p));
+            }
+            app.oneshot(req).await.unwrap()
+        }
+
+        // Peer A: Request 1 (OK)
+        let r1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_a),
+            vec![],
+        )
+        .await;
+        assert_eq!(r1.status(), StatusCode::OK);
+
+        // Peer A: Request 2 (OK, burst reached)
+        let r2 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_a),
+            vec![],
+        )
+        .await;
+        assert_eq!(r2.status(), StatusCode::OK);
+
+        // Peer A: Request 3 (Exhausted -> 429)
+        let r3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_a),
+            vec![],
+        )
+        .await;
+        assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r3.headers().get("retry-after").unwrap(), "1");
+
+        // Peer B: Request 1 (Independent bucket -> OK!)
+        let r_b1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_b),
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            r_b1.status(),
+            StatusCode::OK,
+            "Peer B must have an independent rate bucket"
+        );
+
+        // Peer B: Request 2 (OK)
+        let r_b2 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_b),
+            vec![],
+        )
+        .await;
+        assert_eq!(r_b2.status(), StatusCode::OK);
+
+        // Peer B: Request 3 (Exhausted -> 429)
+        let r_b3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_b),
+            vec![],
+        )
+        .await;
+        assert_eq!(r_b3.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // 2. Arbitrary fake Authorization headers cannot bypass peer-based identity
+        let peer_c: SocketAddr = "203.0.113.88:9999".parse().unwrap();
+        // Request 1 with fake token A
+        let r_c1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_c),
+            vec![("authorization", "Bearer fake_token_alpha")],
+        )
+        .await;
+        assert_eq!(r_c1.status(), StatusCode::OK);
+
+        // Request 2 with different fake token B
+        let r_c2 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_c),
+            vec![("authorization", "Bearer fake_token_beta")],
+        )
+        .await;
+        assert_eq!(r_c2.status(), StatusCode::OK);
+
+        // Request 3 with third fake token C -> Must still be blocked by peer IP bucket!
+        let r_c3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_c),
+            vec![("authorization", "Bearer fake_token_gamma")],
+        )
+        .await;
+        assert_eq!(
+            r_c3.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "Fake Authorization headers must not bypass peer IP rate limiting"
+        );
+
+        // 3. Client-supplied X-Forwarded-For is ignored by default (no trusted proxy configured)
+        std::env::remove_var("TRUSTED_PROXIES");
+        let peer_d: SocketAddr = "203.0.113.99:1111".parse().unwrap();
+        let r_d1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_d),
+            vec![("x-forwarded-for", "1.1.1.1")],
+        )
+        .await;
+        assert_eq!(r_d1.status(), StatusCode::OK);
+        let r_d2 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_d),
+            vec![("x-forwarded-for", "2.2.2.2")],
+        )
+        .await;
+        assert_eq!(r_d2.status(), StatusCode::OK);
+        // Spoofing different X-Forwarded-For does not evade peer bucket
+        let r_d3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_d),
+            vec![("x-forwarded-for", "3.3.3.3")],
+        )
+        .await;
+        assert_eq!(
+            r_d3.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "Spoofed X-Forwarded-For must be ignored for untrusted peers"
+        );
+
+        // 4. Forwarded headers trusted only under verified proxy configuration
+        std::env::set_var("TRUSTED_PROXIES", "10.0.0.0/8,172.16.0.0/12");
+        let trusted_proxy: SocketAddr = "10.0.0.1:4000".parse().unwrap();
+
+        // Forwarded Client 1
+        let r_p1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(trusted_proxy),
+            vec![("x-forwarded-for", "198.51.100.201")],
+        )
+        .await;
+        assert_eq!(r_p1.status(), StatusCode::OK);
+        let r_p2 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(trusted_proxy),
+            vec![("x-forwarded-for", "198.51.100.201")],
+        )
+        .await;
+        assert_eq!(r_p2.status(), StatusCode::OK);
+        let r_p3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(trusted_proxy),
+            vec![("x-forwarded-for", "198.51.100.201")],
+        )
+        .await;
+        assert_eq!(
+            r_p3.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "Client 1 forwarded through trusted proxy exhausted its bucket"
+        );
+
+        // Forwarded Client 2 from SAME trusted proxy -> independent bucket!
+        let r_p2_1 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(trusted_proxy),
+            vec![("x-forwarded-for", "198.51.100.202")],
+        )
+        .await;
+        assert_eq!(
+            r_p2_1.status(),
+            StatusCode::OK,
+            "Different client forwarded through trusted proxy must have separate bucket"
+        );
+
+        // Multi-hop right-to-left traversal: untrusted spoofed IP ignored
+        let r_multi = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(trusted_proxy),
+            vec![("x-forwarded-for", "spoofed.ip, 198.51.100.203, 172.16.0.5")],
+        )
+        .await;
+        assert_eq!(
+            r_multi.status(),
+            StatusCode::OK,
+            "Multi-hop right-to-left traversal must resolve authentic client IP"
+        );
+
+        // Clean up environment
+        std::env::remove_var("TRUSTED_PROXIES");
+
+        // 5. Versioned /api/v1 and legacy /api route consistency
+        let peer_e: SocketAddr = "192.0.2.55:7777".parse().unwrap();
+        let r_v1_1 = send_gen_req(
+            app.clone(),
+            "/api/v1/keys/generate-sandbox",
+            Some(peer_e),
+            vec![],
+        )
+        .await;
+        assert_eq!(r_v1_1.status(), StatusCode::OK);
+        let r_v1_2 = send_gen_req(
+            app.clone(),
+            "/api/v1/keys/generate-sandbox",
+            Some(peer_e),
+            vec![],
+        )
+        .await;
+        assert_eq!(r_v1_2.status(), StatusCode::OK);
+        // Calling unversioned alias shares the same limiter
+        let r_v1_3 = send_gen_req(
+            app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(peer_e),
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            r_v1_3.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "/api and /api/v1 must share the rate limiter"
+        );
+
+        // 6. Process-local aggregate limit safeguard
+        let mut agg_state = create_test_state();
+        // Aggregate quota: 2 rps, burst 2. Per-client quota: 10 rps, burst 10
+        agg_state.rate_limiter = rate_limiter::ApiRateLimiter::new_with_all_quotas(
+            10, 10, 10, 2, 10, 10, 10, 10, 10, 10,
+        );
+        let agg_app = build_app(agg_state);
+
+        let p1: SocketAddr = "10.1.1.1:1001".parse().unwrap();
+        let p2: SocketAddr = "10.2.2.2:1002".parse().unwrap();
+        let p3: SocketAddr = "10.3.3.3:1003".parse().unwrap();
+
+        assert_eq!(
+            send_gen_req(
+                agg_app.clone(),
+                "/api/keys/generate-sandbox",
+                Some(p1),
+                vec![]
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send_gen_req(
+                agg_app.clone(),
+                "/api/keys/generate-sandbox",
+                Some(p2),
+                vec![]
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        // 3rd request from distinct client hits process aggregate limit!
+        let agg_resp = send_gen_req(
+            agg_app.clone(),
+            "/api/keys/generate-sandbox",
+            Some(p3),
+            vec![],
+        )
+        .await;
+        assert_eq!(agg_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(agg_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("Process-level aggregate"),
+            "Expected process-level aggregate message, got: {:?}",
+            body["message"]
+        );
     }
 }
