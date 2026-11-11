@@ -124,4 +124,61 @@ impl RazorpayClient {
         info!("Fetched Razorpay order {}", order_id);
         Ok(body)
     }
+
+    /// Initiate a refund against a payment (rate-limited).
+    pub async fn create_refund(
+        &self,
+        payment_id: &str,
+        amount_paise: u64,
+        notes: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.rate_limiter.wait().await;
+
+        let url = format!("{}/payments/{}/refund", self.config.api_base, payment_id);
+        let payload = serde_json::json!({
+            "amount": amount_paise,
+            "notes": notes,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .basic_auth(&self.config.key_id, Some(&self.config.key_secret))
+            .header("User-Agent", "ESA-Razorpay-Adapter/0.1")
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Razorpay refund error: HTTP {} — {}", status, body);
+        }
+
+        let body = response.json().await?;
+        info!("Created Razorpay refund for payment {}", payment_id);
+        Ok(body)
+    }
+
+    /// Fetch a refund by ID (rate-limited).
+    pub async fn get_refund(&self, refund_id: &str) -> Result<serde_json::Value> {
+        self.rate_limiter.wait().await;
+
+        let url = format!("{}/refunds/{}", self.config.api_base, refund_id);
+        let response = self
+            .http
+            .get(&url)
+            .basic_auth(&self.config.key_id, Some(&self.config.key_secret))
+            .header("User-Agent", "ESA-Razorpay-Adapter/0.1")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Razorpay refund fetch error: HTTP {}", response.status());
+        }
+
+        let body = response.json().await?;
+        info!("Fetched Razorpay refund {}", refund_id);
+        Ok(body)
+    }
 }

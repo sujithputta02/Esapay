@@ -48,12 +48,19 @@ interface GatewayItem {
 interface CheckoutDecision {
   transaction_id: string;
   amount: number;
+  amount_minor?: number;
   currency: string;
   requested_gateway: string;
   routed_gateway: string;
   failover_triggered: boolean;
   routing_reason: string;
   checkout_url: string;
+  is_simulated?: boolean;
+  session?: {
+    mode: 'razorpay' | 'cashfree' | 'payu' | 'hosted_url';
+    data: any;
+  };
+  provider_order_id?: string;
 }
 
 /* ========================================================================== */
@@ -591,6 +598,7 @@ export function LandingPage() {
   const [isOutageSimulated, setIsOutageSimulated] = useState(false);
 
   // In-App Universal Checkout Modal
+  const [selectedGateway, setSelectedGateway] = useState<'auto' | 'razorpay' | 'cashfree' | 'payu'>('auto');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMethod, setModalMethod] = useState<'upi' | 'card' | 'netbanking'>('upi');
   const [isPayingInModal, setIsPayingInModal] = useState(false);
@@ -972,8 +980,8 @@ export function LandingPage() {
       const res = await apiClient.checkout({
         amount: amount * 100,
         currency: 'INR',
-        gateway: 'auto',
-        method: 'UPI',
+        gateway: selectedGateway,
+        method: modalMethod.toUpperCase(),
       });
       setCheckoutResult(res);
       if (openModalAfter) {
@@ -986,13 +994,13 @@ export function LandingPage() {
         transaction_id: `tx_esa_${Date.now().toString(36)}`,
         amount: amount * 100,
         currency: 'INR',
-        requested_gateway: 'auto',
-        routed_gateway: isOutageSimulated ? 'phonepe' : 'razorpay',
+        requested_gateway: selectedGateway,
+        routed_gateway: isOutageSimulated ? 'cashfree' : (selectedGateway === 'auto' ? 'razorpay' : selectedGateway),
         failover_triggered: isOutageSimulated,
         routing_reason: isOutageSimulated
-          ? '⚡ Razorpay degraded (P95 > 250ms) -> Autonomous failover executed to PhonePe Direct UPI rail'
-          : 'Direct routed to optimal low-latency Indian corridor (PhonePe Direct UPI Switch)',
-        checkout_url: `/checkout/session?id=tx_esa_${Date.now().toString(36)}&gateway=phonepe`,
+          ? '⚡ Razorpay degraded (P95 > 250ms) -> Autonomous failover executed to Cashfree corridor'
+          : `Direct routed to optimal Indian corridor (${selectedGateway.toUpperCase()})`,
+        checkout_url: `/checkout/session?id=tx_esa_${Date.now().toString(36)}&gateway=${selectedGateway}`,
       };
       setCheckoutResult(fallbackResult);
       if (openModalAfter) {
@@ -1005,12 +1013,30 @@ export function LandingPage() {
     }
   };
 
-  const handleCompleteModalPayment = () => {
+  const handleCompleteModalPayment = async () => {
     setIsPayingInModal(true);
-    setTimeout(() => {
-      setIsPayingInModal(false);
-      setPaymentSuccess(true);
-    }, 600);
+    try {
+      if (checkoutResult?.session) {
+        if (checkoutResult.session.mode === 'cashfree' && checkoutResult.provider_order_id) {
+          try {
+            await apiClient.confirmCashfreePayment(checkoutResult.provider_order_id);
+          } catch {
+            // Simulated local fallback
+          }
+        } else if (checkoutResult.session.mode === 'payu' && checkoutResult.provider_order_id) {
+          try {
+            await apiClient.verifyPayUPayment(checkoutResult.provider_order_id);
+          } catch {
+            // Simulated local fallback
+          }
+        }
+      }
+    } finally {
+      setTimeout(() => {
+        setIsPayingInModal(false);
+        setPaymentSuccess(true);
+      }, 700);
+    }
   };
 
   const terminalOutputs = {
@@ -2732,6 +2758,28 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                       <span className="text-xs font-mono text-slate-400">Merchant Store</span>
                     </div>
 
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] text-slate-400 font-mono">Routing Corridor:</span>
+                        <span className="text-[10px] text-blue-400 font-mono">Orchestrated Rail</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5 bg-[#080B14] p-1.5 rounded-2xl border border-white/[0.08] text-xs font-mono">
+                        {(['auto', 'razorpay', 'cashfree', 'payu'] as const).map((gw) => (
+                          <button
+                            key={gw}
+                            onClick={() => setSelectedGateway(gw)}
+                            className={`py-1.5 rounded-xl text-center uppercase transition-all ${
+                              selectedGateway === gw
+                                ? 'bg-[#1F51FF] text-white font-bold shadow-md'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {gw}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
                     <div className="grid grid-cols-3 gap-2 bg-[#080B14] p-1.5 rounded-2xl border border-white/[0.08] text-xs font-mono">
                       <button
                         onClick={() => setModalMethod('upi')}
@@ -2799,6 +2847,47 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             {b}
                           </div>
                         ))}
+                      </div>
+                    )}
+
+                    {checkoutResult?.session && (
+                      <div className="p-3 rounded-xl border border-white/[0.08] bg-[#080B14] text-left font-mono text-[10px] space-y-1">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Gateway Session:</span>
+                          <span className="text-blue-400 font-bold uppercase">{checkoutResult.session.mode}</span>
+                        </div>
+                        {checkoutResult.session.mode === 'cashfree' && checkoutResult.session.data?.payment_session_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Session ID:</span>
+                            <span className="text-emerald-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.payment_session_id}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.session.mode === 'payu' && checkoutResult.session.data?.action_url && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Hosted Action:</span>
+                            <span className="text-amber-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.action_url}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.session.mode === 'razorpay' && checkoutResult.session.data?.order_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Razorpay Order:</span>
+                            <span className="text-purple-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.order_id}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.provider_order_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Provider Ref:</span>
+                            <span className="text-slate-300 truncate max-w-[170px]">
+                              {checkoutResult.provider_order_id}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
 

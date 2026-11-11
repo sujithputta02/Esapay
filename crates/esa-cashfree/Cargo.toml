@@ -1,0 +1,23 @@
+[package]
+name = "esa-cashfree"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+esa-core = { path = "../esa-core" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.21"
+subtle = "2.5"
+parking_lot = "0.12"

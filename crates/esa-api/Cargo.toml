@@ -18,6 +18,8 @@ esa-agents = { path = "../esa-agents" }
 esa-runtime = { path = "../esa-runtime" }
 esa-telemetry = { path = "../esa-telemetry" }
 esa-razorpay = { path = "../esa-razorpay" }
+esa-cashfree = { path = "../esa-cashfree" }
+esa-payu = { path = "../esa-payu" }
 esa-gateway = { path = "../esa-gateway" }
 esa-policy = { path = "../esa-policy" }
 
@@ -41,5 +43,6 @@ sha2.workspace = true
 governor.workspace = true
 base64 = "0.21"
 hmac = "0.12"
+hex = "0.4"
 thiserror.workspace = true
 jsonwebtoken = "9.3"

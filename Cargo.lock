@@ -651,8 +651,10 @@ dependencies = [
  "chrono",
  "dotenvy",
  "esa-agents",
+ "esa-cashfree",
  "esa-core",
  "esa-gateway",
+ "esa-payu",
  "esa-policy",
  "esa-razorpay",
  "esa-runtime",
@@ -660,6 +662,7 @@ dependencies = [
  "esa-telemetry",
  "futures",
  "governor",
+ "hex",
  "hmac",
  "jsonwebtoken",
  "parking_lot",
@@ -674,6 +677,28 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "esa-cashfree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.21.7",
+ "chrono",
+ "esa-core",
+ "hmac",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -697,6 +722,7 @@ name = "esa-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dashmap 6.2.1",
  "parking_lot",
@@ -726,6 +752,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "esa-payu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "esa-core",
+ "hex",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "esa-policy"
 version = "0.1.0"
 dependencies = [
@@ -747,12 +795,14 @@ name = "esa-razorpay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dashmap 5.5.3",
  "esa-core",
  "governor",
  "hex",
  "hmac",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",

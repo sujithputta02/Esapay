@@ -310,6 +310,15 @@ pub const PROVIDER_MINIMUM_POLICIES: &[ProviderMinimumPolicy] = &[
         policy_justification: "Cashfree Orders API mandates `order_amount` >= 1.00 INR (100 paise) for order creation.",
         regional_settlement_assumption: "Indian domestic merchant account with standard INR settlement via Cashfree PG.",
     },
+    ProviderMinimumPolicy {
+        provider: "payu",
+        currency: "INR",
+        payment_method: "all",
+        minimum_amount_minor: 100, // 100 paise (₹1.00)
+        source: "PayU Hosted Checkout Documentation (https://docs.payu.in/reference/_payment_payu_hosted_checkout)",
+        policy_justification: "PayU Hosted Checkout mandates positive transaction amounts with minimum value 100 paise (₹1.00).",
+        regional_settlement_assumption: "Indian domestic merchant account with standard INR settlement via PayU India.",
+    },
 ];
 
 /// Validated ISO-4217 Currency representation backed by the supported currency registry.
@@ -439,7 +448,7 @@ impl Currency {
             // Provider method capability check: verify gateway genuinely supports the requested method
             let provider_supports_method = match p_clean.as_str() {
                 "stripe" => canonical_method == "card",
-                "razorpay" | "phonepe" | "cashfree" => {
+                "razorpay" | "phonepe" | "cashfree" | "payu" => {
                     canonical_method == "card"
                         || canonical_method == "upi"
                         || canonical_method == "netbanking"

@@ -282,12 +282,14 @@ See full methodology in [`benchmarkreport.md`](benchmarkreport.md) and [`docs/ES
 ESA_paymentgateway/
 ├── crates/                  # Core Rust workspace
 │   ├── esa-api/             # HTTP & WebSocket control plane server
-│   ├── esa-core/            # Core domain models, actions, audit traits
+│   ├── esa-core/            # Core domain models, actions, provider trait, audit traits
 │   ├── esa-state/           # In-memory StateFabric with OCC versioning
 │   ├── esa-agents/          # 4-agent collaborative reasoning loop
 │   ├── esa-policy/          # Deterministic invariant policy engine & verifier
 │   ├── esa-gateway/         # Sole mutation execution engine with rollback
-│   ├── esa-razorpay/        # Razorpay Test Mode gateway adapter
+│   ├── esa-razorpay/        # Razorpay adapter (Orders, Webhooks, Status, Refunds)
+│   ├── esa-cashfree/        # Cashfree adapter (Order sessions, HMAC+timestamp, Refunds)
+│   ├── esa-payu/            # PayU adapter (Hosted checkout, SHA-512 hash, PostService verify)
 │   └── esa-cli/             # Native Rust CLI binary
 ├── arc_reasoner/            # Python neuro-symbolic fluid reasoner (<1ms)
 ├── packages/esa-cli/        # Published NPM universal CLI (esapay-cli)
@@ -299,6 +301,38 @@ ESA_paymentgateway/
 ├── benchmarks/              # Reproducible test harnesses & scenario suites
 └── docs/                    # Technical architecture & engineering guides
 ```
+
+---
+
+## Universal Indian Payment Gateway Orchestration (India MVP)
+
+ESAPay provides unified, resilient payment orchestration across Indian payment gateways through an asynchronous backend provider abstraction (`esa_core::provider::PaymentProvider`).
+
+### Provider Capability Matrix (Phase 1 Scope)
+
+| Capability / Feature | Razorpay (`esa-razorpay`) | Cashfree Payments (`esa-cashfree`) | PayU India (`esa-payu`) | Extensible Architecture (PhonePe, Paytm, BillDesk, Stripe)* |
+|---|---|---|---|---|
+| **Integration Pattern** | Standard Order & Checkout API | Payment Gateway / Orders API v2023-08-01 | Hosted Checkout (`_payment`) | Standard Provider Interface Prepared |
+| **Order / Session Creation** | `POST /v1/orders` | `POST /pg/orders` (`payment_session_id`) | Server-side SHA-512 form action | Extensible |
+| **Frontend Checkout Mode** | Modal / JS SDK (`razorpay`) | Web SDK / Drop Checkout (`cashfree`) | Hosted Redirect / Form POST (`payu`) | Typed `CheckoutSessionData` |
+| **Supported Methods** | UPI, Cards, NetBanking, Wallets | UPI, Cards, NetBanking, Wallets | UPI, Cards, NetBanking, Wallets | Extensible |
+| **Status Verification** | Direct Order/Payment Query | `GET /pg/orders/{order_id}/payments` | S2S PostService `verify_payment` command | Extensible |
+| **Webhook Security** | HMAC-SHA256 (`x-razorpay-signature`) | HMAC-SHA256 (`timestamp + raw_body`) | Reverse SHA-512 hash verification | Extensible |
+| **Refund Processing** | `POST /v1/payments/{id}/refund` | `POST /pg/orders/{id}/refunds` | S2S `cancel_refund_transaction` command | Extensible |
+| **Phase 1 Status** | **Integrated & Verified** | **Integrated & Verified** | **Integrated & Verified** | *Architecture prepared; not integrated in Phase 1* |
+
+*\*Note: PhonePe Direct Switch, Paytm, BillDesk, CCAvenue, Stripe, and Adyen are supported architecturally via the common provider interface, but are not active integrations in Phase 1 MVP.*
+
+### Critical Payment Safety Invariants
+
+1. **Strictly No Double Charging on Ambiguous State:**
+   Never automatically retry a payment through another provider when the original provider's transaction outcome is unknown. If an upstream request times out after dispatch, ESAPay marks the payment attempt as pending / outcome-unknown and initiates authoritative state reconciliation against the original gateway before any new attempt is permitted.
+2. **Authoritative Backend Verification:**
+   ESAPay never confirms a payment or marks an order paid solely because the customer's browser hits a success callback or return URL. For PayU, browser callbacks must pass reverse SHA-512 verification and a mandatory server-to-server `verify_payment` command. For Cashfree, payment session outcomes are verified against the authoritative Payments API.
+3. **Durable Webhook Idempotency:**
+   Webhook payloads are verified against raw bytes before parsing, normalized to canonical domain states (`Created`, `Pending`, `Authorized`, `Captured`, `Failed`, `Cancelled`, `Partially Refunded`, `Refunded`), and protected against duplicate delivery, out-of-order sequencing, and terminal-state downgrades.
+4. **Environment Isolation & Credential Security:**
+   Test/sandbox and production environments use distinct, isolated endpoints. Provider API secrets and PayU salts are maintained strictly in server memory and never exposed in client responses or debug logs.
 
 ---
 
@@ -316,11 +350,18 @@ cp .env.example .env
 | `OLLAMA_MODEL` | No | `llama3.2:1b` | Ollama model tag for semantic diagnosis |
 | `RAZORPAY_KEY_ID` | No | *(Empty)* | Razorpay **Test Mode** Key ID (`rzp_test_...`) |
 | `RAZORPAY_KEY_SECRET`| No | *(Empty)* | Razorpay Test Mode Secret |
-| `RAZORPAY_WEBHOOK_SECRET` | No | *(Empty)* | Webhook signature verification secret |
+| `RAZORPAY_WEBHOOK_SECRET` | No | *(Empty)* | Razorpay Webhook signature verification secret |
+| `CASHFREE_ENV` | No | `sandbox` | Cashfree environment (`sandbox` or `production`) |
+| `CASHFREE_CLIENT_ID` | No | *(Empty)* | Cashfree App/Client ID |
+| `CASHFREE_CLIENT_SECRET` | No | *(Empty)* | Cashfree Client Secret Key |
+| `CASHFREE_API_VERSION` | No | `2023-08-01` | Cashfree API version header |
+| `PAYU_ENV` | No | `test` | PayU environment (`test` or `production`) |
+| `PAYU_MERCHANT_KEY` | No | *(Empty)* | PayU India Merchant Key |
+| `PAYU_MERCHANT_SALT` | No | *(Empty)* | PayU India Merchant Salt (backend only) |
 | `KUBERNETES_ENABLED` | No | `false` | Enable optional `kubectl scale` integrations |
 | `PORT` | No | `8080` | Backend API server port |
 
-*Note: Never commit real production secrets or Razorpay Live Mode keys.*
+*Note: Never commit real production secrets or gateway credentials. In Phase 1 MVP, environment variables supply credentials for platform test gateway connectivity.*
 
 ---
 

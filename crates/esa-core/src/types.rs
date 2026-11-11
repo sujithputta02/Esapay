@@ -54,12 +54,14 @@ pub enum PaymentGateway {
     Auto,
     #[serde(rename = "razorpay")]
     Razorpay,
+    #[serde(rename = "cashfree")]
+    Cashfree,
+    #[serde(rename = "payu")]
+    PayU,
     #[serde(rename = "stripe")]
     Stripe,
     #[serde(rename = "phonepe")]
     PhonePe,
-    #[serde(rename = "cashfree")]
-    Cashfree,
     #[serde(rename = "paytm")]
     Paytm,
     #[serde(rename = "adyen")]
@@ -71,11 +73,26 @@ impl PaymentGateway {
         match self {
             PaymentGateway::Auto => "auto",
             PaymentGateway::Razorpay => "razorpay",
+            PaymentGateway::Cashfree => "cashfree",
+            PaymentGateway::PayU => "payu",
             PaymentGateway::Stripe => "stripe",
             PaymentGateway::PhonePe => "phonepe",
-            PaymentGateway::Cashfree => "cashfree",
             PaymentGateway::Paytm => "paytm",
             PaymentGateway::Adyen => "adyen",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(PaymentGateway::Auto),
+            "razorpay" => Some(PaymentGateway::Razorpay),
+            "cashfree" => Some(PaymentGateway::Cashfree),
+            "payu" => Some(PaymentGateway::PayU),
+            "stripe" => Some(PaymentGateway::Stripe),
+            "phonepe" => Some(PaymentGateway::PhonePe),
+            "paytm" => Some(PaymentGateway::Paytm),
+            "adyen" => Some(PaymentGateway::Adyen),
+            _ => None,
         }
     }
 }
@@ -89,6 +106,43 @@ pub struct GatewayHealth {
     pub success_rate: f64,
     pub active_traffic_pct: f64,
     pub is_healthy: bool,
+}
+
+/// Typed checkout session data representing provider-specific checkout parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "mode", content = "data", rename_all = "snake_case")]
+pub enum CheckoutSessionData {
+    Razorpay {
+        order_id: String,
+        key_id: String,
+        amount: u64,
+        currency: String,
+        notes: serde_json::Value,
+    },
+    Cashfree {
+        order_id: String,
+        payment_session_id: String,
+        environment: String,
+    },
+    Payu {
+        action_url: String,
+        params: HashMap<String, String>,
+    },
+    HostedUrl {
+        url: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutSession {
+    pub transaction_id: String,
+    pub provider: PaymentGateway,
+    pub order_id: String,
+    pub amount_minor: u64,
+    pub currency: String,
+    pub checkout_url: String,
+    pub session_data: CheckoutSessionData,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +160,10 @@ pub struct GatewayRouteDecision {
     #[serde(default)]
     pub is_simulated: bool,
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<CheckoutSessionData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

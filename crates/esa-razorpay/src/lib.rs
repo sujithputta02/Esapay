@@ -7,7 +7,7 @@ pub mod dedup;
 pub mod rate_limit;
 pub mod webhook;
 
-pub use adapter::RazorpayAdapter;
+pub use adapter::{RazorpayAdapter, RazorpayProvider};
 pub use config::{RazorpayConfig, RazorpayConfigError, RazorpayMode};
 pub use webhook::WebhookError;
 pub use webhook::{payment_entity_to_event, verify_signature};

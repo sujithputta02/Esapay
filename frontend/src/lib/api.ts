@@ -201,8 +201,35 @@ export class ApiClient {
     return this.post<any>(`/api/gateways/${name}/toggle`);
   }
 
-  async checkout(params: { amount: number; currency?: string; gateway?: string; method?: string }) {
+  async checkout(params: {
+    amount: number;
+    amount_minor?: number;
+    currency?: string;
+    gateway?: string;
+    method?: string;
+    payment_method?: string;
+    customer_id?: string;
+    customer_email?: string;
+    customer_phone?: string;
+    return_url?: string;
+  }) {
     return this.post<any>('/api/payments/checkout', params);
+  }
+
+  async getCashfreeStatus() {
+    return this.get<any>('/api/payments/cashfree/status');
+  }
+
+  async getPayUStatus() {
+    return this.get<any>('/api/payments/payu/status');
+  }
+
+  async confirmCashfreePayment(orderId: string) {
+    return this.post<any>('/api/payments/cashfree/confirm', { order_id: orderId });
+  }
+
+  async verifyPayUPayment(txnid: string) {
+    return this.post<any>('/api/payments/payu/verify', { txnid });
   }
 }
 
