@@ -493,6 +493,32 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting ESA API Server");
 
+    // Validate payment checkout configuration and fail fast on invalid/misconfigured settings
+    match detect_checkout_mode() {
+        PaymentCheckoutMode::Misconfigured(err) => {
+            error!("Payment checkout configuration is invalid: {}", err);
+            anyhow::bail!("Invalid payment checkout mode configuration: {}", err);
+        }
+        PaymentCheckoutMode::Live { reason } => {
+            info!("Production live mode detected: {}", reason);
+            if let Ok(key) = std::env::var("ESA_ADMIN_API_KEY") {
+                if key.trim().is_empty() {
+                    anyhow::bail!(
+                        "ESA_ADMIN_API_KEY is configured but empty in live/production mode"
+                    );
+                }
+            } else {
+                warn!("ESA_ADMIN_API_KEY is not set in live/production mode; admin endpoints will be inaccessible");
+            }
+        }
+        PaymentCheckoutMode::Simulated => {
+            info!("Simulation payment checkout mode active");
+        }
+        PaymentCheckoutMode::Unconfigured => {
+            info!("Payment checkout mode unconfigured (will fail closed on checkout requests)");
+        }
+    }
+
     // Initialize state fabric
     let state_fabric = Arc::new(StateFabric::new());
     let audit_store = Arc::new(AuditStore::new());
@@ -824,6 +850,11 @@ fn build_app(app_state: AppState) -> Router {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
+        .route("/livez", get(health_handler))
+        .route("/ready", get(readiness_handler))
+        .route("/readyz", get(readiness_handler))
+        .route("/api/ready", get(readiness_handler))
+        .route("/api/v1/ready", get(readiness_handler))
         // Multi-Gateway Universal Routing endpoints
         .route("/api/gateways", get(list_gateways))
         .route("/api/v1/gateways", get(list_gateways))
@@ -996,8 +1027,20 @@ fn build_app(app_state: AppState) -> Router {
                 .unwrap_or(false);
             let is_prod = is_production_mode();
 
+            let request_id = req
+                .headers()
+                .get("x-request-id")
+                .or_else(|| req.headers().get("x-correlation-id"))
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| !s.trim().is_empty() && s.len() <= 128)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
             let mut res = next.run(req).await;
             let headers = res.headers_mut();
+            if let Ok(val) = request_id.parse() {
+                headers.insert("x-request-id", val);
+            }
             headers.insert("x-content-type-options", "nosniff".parse().unwrap());
             headers.insert("x-frame-options", "DENY".parse().unwrap());
             headers.insert(
@@ -1067,6 +1110,35 @@ async fn health_handler() -> impl IntoResponse {
         "status": "healthy",
         "service": "esa-api"
     }))
+}
+
+async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let db_health = state.webhook_store.health_check().await;
+    let rzp_configured = state.razorpay.is_some();
+
+    match db_health {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "service": "esa-api",
+                "database": "healthy",
+                "razorpay_configured": rzp_configured,
+            })),
+        ),
+        Err(err) => {
+            error!(error = %err, "Readiness probe failed: database unhealthy");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not_ready",
+                    "service": "esa-api",
+                    "database": "unhealthy",
+                    "error": "database connection check failed",
+                })),
+            )
+        }
+    }
 }
 
 async fn get_fluid_reasoner_status(
@@ -1808,17 +1880,114 @@ async fn razorpay_confirm_payment(
         ));
     }
 
-    let event = payment_entity_to_event(&payment).map_err(|e| AppError::Internal(e.to_string()))?;
-    let result = payment::apply_payment_event(&state.state_fabric, &event);
-    publish_payment_side_effects(&state, &result);
+    // 6. Check existing durable payment record in webhook_store.
+    // If the payment is already Captured/Refunded, return immediately (idempotent no-op)
+    // without re-applying side effects or re-inflating workload metrics!
+    if let Ok(Some(existing)) = state
+        .webhook_store
+        .get_payment_record(&req.payment_id)
+        .await
+    {
+        if existing.state == PaymentState::Captured
+            || existing.state == PaymentState::PartiallyRefunded
+            || existing.state == PaymentState::Refunded
+        {
+            info!(
+                payment_id = %req.payment_id,
+                state = ?existing.state,
+                "Payment already confirmed/captured; returning idempotent response"
+            );
+            return Ok(Json(serde_json::json!({
+                "status": "already_confirmed",
+                "source": "razorpay_confirm",
+                "event_id": format!("confirm_{}", req.payment_id),
+                "payment_id": req.payment_id,
+                "payment_state": existing.state,
+                "idempotent": true,
+                "message": "Payment has already been confirmed and processed",
+            })));
+        }
+    }
 
-    Ok(Json(serde_json::json!({
-        "status": "accepted",
-        "source": "razorpay_confirm",
-        "event_id": result.event_id,
-        "workload_updated": result.workload_updated,
-        "workload_id": result.workload_id,
-    })))
+    let event = payment_entity_to_event(&payment).map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // 7. Record and transition transactionally into durable webhook_store
+    let confirm_event_id = format!("confirm_{}", req.payment_id);
+    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let currency = payment
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INR");
+
+    let params = esa_state::WebhookEventParams {
+        provider: "razorpay",
+        provider_event_id: &confirm_event_id,
+        event_type: event.event_type.clone(),
+        payment_id: &req.payment_id,
+        amount_minor,
+        currency,
+        refund_id: None,
+        refund_amount_minor: None,
+        refund_status: None,
+        payload: &payment,
+    };
+
+    let store_result = state.webhook_store.process_webhook_event(&params).await;
+    match store_result {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. })
+        | Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            let result = payment::apply_payment_event(&state.state_fabric, &event);
+            publish_payment_side_effects(&state, &result);
+
+            Ok(Json(serde_json::json!({
+                "status": "accepted",
+                "source": "razorpay_confirm",
+                "event_id": result.event_id,
+                "payment_id": req.payment_id,
+                "workload_updated": result.workload_updated,
+                "workload_id": result.workload_id,
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
+            Ok(Json(serde_json::json!({
+                "status": "already_confirmed",
+                "source": "razorpay_confirm",
+                "event_id": confirm_event_id,
+                "payment_id": req.payment_id,
+                "idempotent": true,
+                "message": "Payment has already been confirmed and processed",
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => Err(AppError::Conflict(
+            "Payment confirmation is currently in-flight by another worker".into(),
+        )),
+        Ok(esa_state::WebhookProcessingResult::Unapplied { reason, .. }) => {
+            Err(AppError::Conflict(format!(
+                "Payment confirmation could not be applied: {}",
+                reason
+            )))
+        }
+        Err(esa_state::WebhookStoreError::PaymentState(err)) => {
+            warn!("Payment confirmation state transition rejected: {}", err);
+            Err(AppError::Conflict(format!(
+                "Invalid payment state transition: {}",
+                err
+            )))
+        }
+        Err(esa_state::WebhookStoreError::Mismatch(err)) => {
+            warn!("Payment confirmation entity mismatch: {}", err);
+            Err(AppError::Conflict(format!(
+                "Payment entity mismatch: {}",
+                err
+            )))
+        }
+        Err(err) => {
+            error!("Payment confirmation failed in durable store: {}", err);
+            Err(AppError::Internal(
+                "Failed to record payment confirmation in durable store".into(),
+            ))
+        }
+    }
 }
 
 async fn get_vitals_history(
@@ -4134,14 +4303,230 @@ mod integration_tests {
         let state = create_test_state();
         let app = build_app(state.clone());
 
+        for uri in &["/health", "/healthz", "/livez"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("healthy"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readiness_probe_reports_healthy_dependencies() {
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        for uri in &["/ready", "/readyz", "/api/ready", "/api/v1/ready"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("ready"));
+            assert_eq!(
+                json.get("database").and_then(|v| v.as_str()),
+                Some("healthy")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_correlation_id_middleware() {
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        // 1. Explicit incoming X-Request-ID is echoed back
+        let custom_id = "test-corr-id-987654";
         let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .header("x-request-id", custom_id)
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some(custom_id)
+        );
+
+        // 2. Omitted X-Request-ID generates a fresh UUIDv4 in response header
+        let req_auto = Request::builder()
             .method("GET")
             .uri("/health")
             .body(axum::body::Body::empty())
             .unwrap();
 
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_auto = app.oneshot(req_auto).await.unwrap();
+        assert_eq!(resp_auto.status(), StatusCode::OK);
+        let generated_id = resp_auto
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("x-request-id header must be generated");
+        assert!(
+            uuid::Uuid::parse_str(generated_id).is_ok(),
+            "Generated request ID must be a valid UUIDv4"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_payment_confirmation_replay_safety_and_idempotency() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+        std::env::set_var("ESA_TEST_API_KEY", "esa_test_key_root");
+
+        let payment_id = "pay_test_replay_safe_123";
+        let order_id = "order_test_replay_safe_123";
+
+        // Set up mock upstream Razorpay API server
+        let mock_app = axum::Router::new()
+            .route(
+                &format!("/payments/{}", payment_id),
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "pay_test_replay_safe_123",
+                            "order_id": "order_test_replay_safe_123",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "status": "captured",
+                            "method": "upi",
+                            "notes": {
+                                "esa_merchant_id": "merchant_sandbox_01"
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                &format!("/orders/{}", order_id),
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "id": "order_test_replay_safe_123",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "notes": {
+                                "esa_merchant_id": "merchant_sandbox_01"
+                            }
+                        })),
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, mock_app).await.unwrap();
+        });
+
+        let mut state = create_test_state();
+        let rzp_config = RazorpayConfig {
+            key_id: "rzp_test_conf_key".to_string(),
+            key_secret: "conf_secret".to_string(),
+            webhook_secret: "conf_wh_secret".to_string(),
+            api_base: format!("http://127.0.0.1:{}", port),
+            mode: esa_razorpay::RazorpayMode::Test,
+            test_mode_only: true,
+            webhook_rate_limit_per_sec: 1000,
+            api_rate_limit_per_sec: 1000,
+            account_id: None,
+        };
+        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
+
+        // Pre-seed an authoritative captured payment record in durable store
+        let captured_params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "event_pre_captured_123",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id,
+            amount_minor: 5000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &serde_json::json!({ "id": payment_id, "amount": 5000 }),
+        };
+        let apply_res = state
+            .webhook_store
+            .process_webhook_event(&captured_params)
+            .await;
+        assert!(matches!(
+            apply_res,
+            Ok(esa_state::WebhookProcessingResult::Applied { .. })
+        ));
+
+        // Track initial workload metrics
+        let initial_rate = state
+            .state_fabric
+            .get_workload("payment-upi-india-south")
+            .map(|w| w.metrics.rate_per_min)
+            .unwrap_or(0.0);
+
+        let app = build_app(state.clone());
+
+        // Repeated confirmation requests for this already-captured payment
+        for _ in 0..3 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/razorpay/confirm")
+                .header("content-type", "application/json")
+                .header("x-api-key", "esa_test_key_root")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "payment_id": payment_id
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json.get("status").and_then(|v| v.as_str()),
+                Some("already_confirmed")
+            );
+            assert_eq!(json.get("idempotent").and_then(|v| v.as_bool()), Some(true));
+        }
+
+        // Verify workload metrics did NOT compound or inflate
+        let final_rate = state
+            .state_fabric
+            .get_workload("payment-upi-india-south")
+            .map(|w| w.metrics.rate_per_min)
+            .unwrap_or(0.0);
+        assert_eq!(
+            initial_rate, final_rate,
+            "Repeated confirmations must not compound workload metrics"
+        );
+
+        std::env::remove_var("ESA_TEST_API_KEY");
     }
 
     #[tokio::test]

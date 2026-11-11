@@ -216,6 +216,11 @@ pub trait WebhookStore: Send + Sync {
     ) -> Result<Option<RefundRecord>, WebhookStoreError> {
         Ok(None)
     }
+
+    /// Check health/reachability of the underlying data store
+    async fn health_check(&self) -> Result<(), WebhookStoreError> {
+        Ok(())
+    }
 }
 
 /// Durable PostgreSQL-backed implementation of WebhookStore
@@ -697,6 +702,14 @@ impl PostgresWebhookStore {
 impl WebhookStore for PostgresWebhookStore {
     fn pg_pool(&self) -> Option<&PgPool> {
         Some(&self.pool)
+    }
+
+    async fn health_check(&self) -> Result<(), WebhookStoreError> {
+        sqlx::query("SELECT 1;")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(())
     }
 
     async fn process_webhook_event(

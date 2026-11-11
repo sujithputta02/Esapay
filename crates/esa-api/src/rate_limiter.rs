@@ -252,13 +252,41 @@ impl TrustedProxyConfig {
             }
             Vec::new()
         } else {
-            generic_str.split(',').filter_map(IpCidr::parse).collect()
+            let mut list = Vec::new();
+            for token in generic_str.split(',') {
+                let clean = token.trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                match IpCidr::parse(clean) {
+                    Some(cidr) => list.push(cidr),
+                    None => {
+                        tracing::warn!(
+                            token = %clean,
+                            "Failed to parse TRUSTED_PROXIES entry as valid IPv4 or IPv6 CIDR; entry ignored"
+                        );
+                    }
+                }
+            }
+            list
         };
 
-        let cloudflare_proxies = cloudflare_str
-            .split(',')
-            .filter_map(IpCidr::parse)
-            .collect();
+        let mut cloudflare_proxies = Vec::new();
+        for token in cloudflare_str.split(',') {
+            let clean = token.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            match IpCidr::parse(clean) {
+                Some(cidr) => cloudflare_proxies.push(cidr),
+                None => {
+                    tracing::warn!(
+                        token = %clean,
+                        "Failed to parse CLOUDFLARE_PROXIES entry as valid IPv4 or IPv6 CIDR; entry ignored"
+                    );
+                }
+            }
+        }
 
         Self {
             generic_proxies,
@@ -560,6 +588,7 @@ impl ApiRateLimiter {
 
     pub fn check_checkout(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.checkout_limiter.check().is_err() {
+            tracing::warn!(limiter = "checkout", "Payment checkout rate limit exceeded");
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
@@ -577,6 +606,10 @@ impl ApiRateLimiter {
     #[allow(dead_code)]
     pub fn check_keys(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                limiter = "aggregate_keys",
+                "Process-level API key operation rate limit exceeded"
+            );
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
@@ -593,6 +626,11 @@ impl ApiRateLimiter {
     /// Per-source rate limit check for sandbox key generation with process-local aggregate safeguard
     pub fn check_generate_sandbox(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                client_key = %client_key,
+                limiter = "generate_sandbox_aggregate",
+                "Process-level aggregate API key generation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -615,6 +653,11 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            tracing::warn!(
+                client_key = %client_key,
+                limiter = "generate_sandbox_per_client",
+                "Client sandbox key generation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -632,6 +675,11 @@ impl ApiRateLimiter {
     /// Per-source rate limit check for key validation with process-local aggregate safeguard
     pub fn check_validate_key(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                client_key = %client_key,
+                limiter = "validate_key_aggregate",
+                "Process-level aggregate API key validation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -654,6 +702,11 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            tracing::warn!(
+                client_key = %client_key,
+                limiter = "validate_key_per_client",
+                "Client API key validation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -670,6 +723,7 @@ impl ApiRateLimiter {
 
     pub fn check_demo(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.demo_limiter.check().is_err() {
+            tracing::warn!(limiter = "demo", "Scenario simulation rate limit exceeded");
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
