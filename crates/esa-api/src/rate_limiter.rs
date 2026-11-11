@@ -5,7 +5,7 @@ use governor::nanos::Nanos;
 use governor::state::keyed::{DefaultKeyedStateStore, ShrinkableKeyedStateStore};
 use governor::state::{InMemoryState, NotKeyed, StateStore};
 use governor::{Quota, RateLimiter as GovRateLimiter};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
@@ -19,35 +19,67 @@ pub type RateLimitError = (
     Json<serde_json::Value>,
 );
 
+#[cfg(test)]
+pub type ObserveHook<K> = Option<Arc<dyn Fn(&K) + Send + Sync>>;
+
 /// Maximum number of active tracked keys in keyed rate limiters to prevent unbounded memory growth
 pub const MAX_KEYED_ENTRIES: usize = 10_000;
 
 /// Bounded keyed state store backed by Governor's `DefaultKeyedStateStore`.
 ///
 /// Guarantees that the number of active distinct rate-limiter keys can never exceed `capacity`.
-/// Under high concurrency, key admission is synchronized such that once capacity is reached,
-/// all new distinct keys are atomically routed to a shared `overflow_key` bucket.
-/// Established keys bypass the lock and execute concurrently.
+///
+/// Synchronization design:
+/// 1. `prune_gate: RwLock<()>`:
+///    - `measure_and_replace()` acquires a read guard across the key existence check and inner measurement.
+///    - `retain_recent()` and `shrink_to_fit()` acquire a write guard.
+///    - This guarantees that pruning can never delete an established key while a measurement operation is in progress,
+///      eliminating the race where a pruned key is recreated after its capacity slot was reallocated.
+/// 2. `admission_lock: Mutex<()>`:
+///    - Synchronizes new-key admission so that concurrent requests attempting to insert distinct keys
+///      cannot exceed `capacity`. When at capacity, requests are atomically redirected to `overflow_key`.
+/// 3. Established keys measure concurrently using DashMap's fine-grained shard locking under the read guard.
+#[derive(Clone)]
 pub struct BoundedKeyedStateStore<K = String> {
-    inner: DefaultKeyedStateStore<K>,
+    inner: Arc<DefaultKeyedStateStore<K>>,
     capacity: usize,
     overflow_key: K,
-    admission_lock: Mutex<()>,
+    admission_lock: Arc<Mutex<()>>,
+    prune_gate: Arc<RwLock<()>>,
+    #[cfg(test)]
+    pub(crate) test_observe_hook: ObserveHook<K>,
 }
 
 impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> BoundedKeyedStateStore<K> {
     pub fn new(capacity: usize, overflow_key: K) -> Self {
         Self {
-            inner: DefaultKeyedStateStore::default(),
+            inner: Arc::new(DefaultKeyedStateStore::default()),
             capacity: capacity.max(1),
             overflow_key,
-            admission_lock: Mutex::new(()),
+            admission_lock: Arc::new(Mutex::new(())),
+            prune_gate: Arc::new(RwLock::new(())),
+            #[cfg(test)]
+            test_observe_hook: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn prune_gate(&self) -> &RwLock<()> {
+        &self.prune_gate
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn force_remove(&self, key: &K) {
+        let _write_guard = self.prune_gate.write();
+        let _guard = self.admission_lock.lock();
+        self.inner.remove(key);
     }
 }
 
@@ -60,13 +92,22 @@ impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> StateStore
     where
         F: Fn(Option<Nanos>) -> Result<(T, Nanos), E>,
     {
-        // Fast path for established keys: lock-free concurrent measurement
+        // 1. Hold read guard across existence check and inner measurement.
+        // Pruning (retain_recent / shrink_to_fit) requires the write guard,
+        // making measurement and pruning mutually exclusive and preventing key recreation races.
+        let _read_guard = self.prune_gate.read();
+
+        // Fast path for established keys: lock-free concurrent measurement across DashMap shards
         if self.inner.contains_key(key) {
+            #[cfg(test)]
+            if let Some(hook) = &self.test_observe_hook {
+                hook(key);
+            }
             return self.inner.measure_and_replace(key, f);
         }
 
         // New key path: synchronize admission to strictly bound capacity under concurrency
-        let _guard = self.admission_lock.lock();
+        let _admission = self.admission_lock.lock();
 
         // Double-check: was the key admitted by another thread while waiting for the lock?
         if self.inner.contains_key(key) {
@@ -93,20 +134,24 @@ impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> ShrinkableKeyedSta
     for BoundedKeyedStateStore<K>
 {
     fn retain_recent(&self, drop_below: Nanos) {
+        let _write_guard = self.prune_gate.write();
         let _guard = self.admission_lock.lock();
         self.inner.retain_recent(drop_below);
     }
 
     fn shrink_to_fit(&self) {
+        let _write_guard = self.prune_gate.write();
         let _guard = self.admission_lock.lock();
         self.inner.shrink_to_fit();
     }
 
     fn len(&self) -> usize {
+        let _read_guard = self.prune_gate.read();
         self.inner.len()
     }
 
     fn is_empty(&self) -> bool {
+        let _read_guard = self.prune_gate.read();
         self.inner.is_empty()
     }
 }
@@ -331,6 +376,8 @@ pub struct ApiRateLimiter {
     aggregate_keys_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     client_gen_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
     client_val_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
+    #[cfg(test)]
+    client_gen_store: BoundedKeyedStateStore<String>,
     demo_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     call_count: Arc<AtomicU64>,
 }
@@ -405,6 +452,75 @@ impl ApiRateLimiter {
         demo_burst: u32,
         keyed_capacity: usize,
     ) -> Self {
+        #[cfg(test)]
+        {
+            Self::new_with_bounded_capacity_and_hook(
+                checkout_rps,
+                checkout_burst,
+                aggregate_keys_rps,
+                aggregate_keys_burst,
+                client_gen_rps,
+                client_gen_burst,
+                client_val_rps,
+                client_val_burst,
+                demo_rps,
+                demo_burst,
+                keyed_capacity,
+                None,
+            )
+        }
+        #[cfg(not(test))]
+        {
+            let checkout_quota = Quota::per_second(NonZeroU32::new(checkout_rps).unwrap())
+                .allow_burst(NonZeroU32::new(checkout_burst).unwrap());
+            let aggregate_keys_quota =
+                Quota::per_second(NonZeroU32::new(aggregate_keys_rps).unwrap())
+                    .allow_burst(NonZeroU32::new(aggregate_keys_burst).unwrap());
+            let client_gen_quota = Quota::per_second(NonZeroU32::new(client_gen_rps).unwrap())
+                .allow_burst(NonZeroU32::new(client_gen_burst).unwrap());
+            let client_val_quota = Quota::per_second(NonZeroU32::new(client_val_rps).unwrap())
+                .allow_burst(NonZeroU32::new(client_val_burst).unwrap());
+            let demo_quota = Quota::per_second(NonZeroU32::new(demo_rps).unwrap())
+                .allow_burst(NonZeroU32::new(demo_burst).unwrap());
+
+            let clock = DefaultClock::default();
+            let gen_store =
+                BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string());
+            let client_gen_limiter =
+                Arc::new(GovRateLimiter::new(client_gen_quota, gen_store, &clock));
+            let client_val_limiter = Arc::new(GovRateLimiter::new(
+                client_val_quota,
+                BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
+                &clock,
+            ));
+
+            Self {
+                checkout_limiter: Arc::new(GovRateLimiter::direct(checkout_quota)),
+                aggregate_keys_limiter: Arc::new(GovRateLimiter::direct(aggregate_keys_quota)),
+                client_gen_limiter,
+                client_val_limiter,
+                demo_limiter: Arc::new(GovRateLimiter::direct(demo_quota)),
+                call_count: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bounded_capacity_and_hook(
+        checkout_rps: u32,
+        checkout_burst: u32,
+        aggregate_keys_rps: u32,
+        aggregate_keys_burst: u32,
+        client_gen_rps: u32,
+        client_gen_burst: u32,
+        client_val_rps: u32,
+        client_val_burst: u32,
+        demo_rps: u32,
+        demo_burst: u32,
+        keyed_capacity: usize,
+        hook: ObserveHook<String>,
+    ) -> Self {
         let checkout_quota = Quota::per_second(NonZeroU32::new(checkout_rps).unwrap())
             .allow_burst(NonZeroU32::new(checkout_burst).unwrap());
         let aggregate_keys_quota = Quota::per_second(NonZeroU32::new(aggregate_keys_rps).unwrap())
@@ -417,9 +533,12 @@ impl ApiRateLimiter {
             .allow_burst(NonZeroU32::new(demo_burst).unwrap());
 
         let clock = DefaultClock::default();
+        let mut gen_store =
+            BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string());
+        gen_store.test_observe_hook = hook;
         let client_gen_limiter = Arc::new(GovRateLimiter::new(
             client_gen_quota,
-            BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
+            gen_store.clone(),
             &clock,
         ));
         let client_val_limiter = Arc::new(GovRateLimiter::new(
@@ -433,6 +552,7 @@ impl ApiRateLimiter {
             aggregate_keys_limiter: Arc::new(GovRateLimiter::direct(aggregate_keys_quota)),
             client_gen_limiter,
             client_val_limiter,
+            client_gen_store: gen_store,
             demo_limiter: Arc::new(GovRateLimiter::direct(demo_quota)),
             call_count: Arc::new(AtomicU64::new(0)),
         }
@@ -572,6 +692,18 @@ impl ApiRateLimiter {
     pub fn val_len(&self) -> usize {
         self.client_val_limiter.len()
     }
+
+    #[allow(dead_code)]
+    pub fn retain_recent(&self) {
+        self.client_gen_limiter.retain_recent();
+        self.client_val_limiter.retain_recent();
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn gen_store(&self) -> &BoundedKeyedStateStore<String> {
+        &self.client_gen_store
+    }
 }
 
 impl Default for ApiRateLimiter {
@@ -583,6 +715,7 @@ impl Default for ApiRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_cidr_parsing_and_matching() {
@@ -739,6 +872,163 @@ mod tests {
         assert!(
             limiter.gen_len() <= capacity,
             "Limiter entries {} exceeded strict capacity {}",
+            limiter.gen_len(),
+            capacity
+        );
+    }
+
+    #[test]
+    fn test_prune_update_race_eliminated_deterministically() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Barrier;
+
+        let capacity = 3;
+        let barrier_observed = Arc::new(Barrier::new(2));
+        let barrier_resume = Arc::new(Barrier::new(2));
+        let observed_flag = Arc::new(AtomicBool::new(false));
+
+        let b1 = barrier_observed.clone();
+        let b2 = barrier_resume.clone();
+        let flag = observed_flag.clone();
+
+        let hook: Arc<dyn Fn(&String) + Send + Sync> = Arc::new(move |k: &String| {
+            if k == "ip:198.51.100.1" {
+                flag.store(true, Ordering::SeqCst);
+                b1.wait();
+                b2.wait();
+            }
+        });
+
+        let limiter = ApiRateLimiter::new_with_bounded_capacity_and_hook(
+            10,
+            10,
+            100,
+            100,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            capacity,
+            Some(hook),
+        );
+
+        // 1. Fill store to capacity:
+        // Key 1: "ip:198.51.100.1"
+        // Key 2: "ip:198.51.100.2"
+        // Overflow Key: "overflow_client" (pre-allocated on first overflow)
+        assert!(limiter.check_generate_sandbox("ip:198.51.100.1").is_ok());
+        assert!(limiter.check_generate_sandbox("ip:198.51.100.2").is_ok());
+        assert!(limiter.check_generate_sandbox("ip:198.51.100.99").is_ok()); // Triggers overflow bucket
+        assert_eq!(limiter.gen_len(), capacity);
+
+        // 2. Thread 1: Established key request for "ip:198.51.100.1"
+        // It observes that key exists, triggers hook, and pauses before measurement
+        let lim_clone = limiter.clone();
+        let handle = std::thread::spawn(move || {
+            let res = lim_clone.check_generate_sandbox("ip:198.51.100.1");
+            assert!(res.is_ok());
+        });
+
+        // Wait until Thread 1 has observed the established key and paused while holding prune_gate.read()
+        barrier_observed.wait();
+        assert!(observed_flag.load(Ordering::SeqCst));
+
+        // 3. Thread 2 (here): Attempt to prune or write while Thread 1 is in-flight.
+        // Because Thread 1 holds prune_gate.read(), write guard CANNOT be acquired!
+        // This deterministically proves that retain_recent() / pruning is mutually exclusive
+        // and cannot delete the key from under Thread 1!
+        let write_lock_blocked = limiter.gen_store().prune_gate().try_write().is_none();
+        assert!(
+            write_lock_blocked,
+            "Prune gate write lock MUST be blocked while measurement holds read guard"
+        );
+
+        // 4. Release Thread 1 to complete its measurement
+        barrier_resume.wait();
+        handle.join().unwrap();
+
+        // 5. Thread 1 has released the read lock. Now pruning can safely remove a stale key
+        limiter
+            .gen_store()
+            .force_remove(&"ip:198.51.100.1".to_string());
+        assert_eq!(limiter.gen_len(), capacity - 1);
+
+        // 6. Admit a different new key into the freed capacity
+        assert!(limiter.check_generate_sandbox("ip:198.51.100.3").is_ok());
+        assert_eq!(limiter.gen_len(), capacity);
+
+        // 7. Request "ip:198.51.100.1" again (which was removed in step 5)
+        // Since capacity is full, it routes safely to overflow_client without exceeding capacity
+        assert!(limiter.check_generate_sandbox("ip:198.51.100.1").is_ok());
+
+        // 8. Strict capacity assertion: len must remain exactly capacity!
+        assert_eq!(
+            limiter.gen_len(),
+            capacity,
+            "Store must strictly remain at capacity bound"
+        );
+    }
+
+    #[test]
+    fn test_stress_simultaneous_admission_and_pruning() {
+        let capacity = 10;
+        let limiter = ApiRateLimiter::new_with_bounded_capacity(
+            10, 10, 1000, 1000, 100, 100, 100, 100, 10, 10, capacity,
+        );
+
+        let running = Arc::new(AtomicBool::new(true));
+
+        // 10 threads continuously performing new key admissions and established key hits
+        let mut workers = Vec::new();
+        for worker_id in 0..10 {
+            let lim = limiter.clone();
+            let r = running.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut i = 0;
+                while r.load(Ordering::Relaxed) {
+                    i += 1;
+                    let key = if i % 2 == 0 {
+                        // Established key
+                        format!("ip:10.0.0.{}", worker_id)
+                    } else {
+                        // New key attempt
+                        format!("ip:10.{}.{}", worker_id, i)
+                    };
+                    let _ = lim.check_generate_sandbox(&key);
+                }
+            }));
+        }
+
+        // 4 threads continuously pruning
+        let mut pruners = Vec::new();
+        for _ in 0..4 {
+            let lim = limiter.clone();
+            let r = running.clone();
+            pruners.push(std::thread::spawn(move || {
+                while r.load(Ordering::Relaxed) {
+                    lim.retain_recent();
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }));
+        }
+
+        // Run stress test for 100ms
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        running.store(false, Ordering::Relaxed);
+
+        for w in workers {
+            w.join().unwrap();
+        }
+        for p in pruners {
+            p.join().unwrap();
+        }
+
+        // Assert store len NEVER exceeded capacity
+        assert!(
+            limiter.gen_len() <= capacity,
+            "Stress test failed: gen_len {} exceeded capacity {}",
             limiter.gen_len(),
             capacity
         );
