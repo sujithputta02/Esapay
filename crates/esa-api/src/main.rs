@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn, Instrument, Level};
 
 mod api_keys;
 mod benchmark;
@@ -260,6 +260,8 @@ pub(crate) fn is_production_mode() -> bool {
 /// In live/production mode:
 /// - A secure administrative key of at least 32 characters is strictly required.
 /// - Shorter keys or missing keys fail closed.
+/// - Note: Startup validates key length (minimum 32 characters), not entropy or randomness;
+///   operators must provision a cryptographically secure random secret (e.g. `openssl rand -hex 32`).
 /// - Never logs the key or any part of it.
 ///
 /// Non-production modes (dev/test/simulation) do not enforce this requirement.
@@ -1103,21 +1105,15 @@ fn build_app(app_state: AppState) -> Router {
             req.extensions_mut().insert(correlation_id);
 
             let method = req.method().clone();
-            let uri = req.uri().clone();
+            let path = req.uri().path().to_string();
             let span = tracing::info_span!(
                 "http_request",
                 request_id = %request_id,
                 method = %method,
-                uri = %uri,
+                path = %path,
             );
 
-            let res = {
-                let _guard = span.enter();
-                tracing::debug!("Processing HTTP request");
-                next.run(req).await
-            };
-
-            let mut res = res;
+            let mut res = next.run(req).instrument(span).await;
             let headers = res.headers_mut();
             if let Ok(val) = request_id.parse() {
                 headers.insert("x-request-id", val);
@@ -4491,56 +4487,99 @@ mod integration_tests {
             "Generated request ID must be a valid UUIDv4"
         );
 
-        // 4. Request context extension propagation:
-        // Build a test router with an endpoint extracting RequestCorrelationId extension
-        let test_router =
-            Router::new()
-                .route(
-                    "/test/correlation",
-                    get(
-                        |axum::Extension(corr): axum::Extension<RequestCorrelationId>| async move {
-                            corr.0
-                        },
-                    ),
-                )
-                .layer(axum::middleware::from_fn(
-                    |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
-                        let raw_corr = req
-                            .headers()
-                            .get("x-request-id")
-                            .or_else(|| req.headers().get("x-correlation-id"))
-                            .and_then(|v| v.to_str().ok());
+        // 4. Request context extension and async tracing propagation:
+        // Set up a test subscriber to verify trace span context propagation across async await points
+        let subscriber = tracing_subscriber::fmt().with_test_writer().finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
-                        let validated_id = raw_corr.and_then(sanitize_correlation_id);
-                        let request_id =
-                            validated_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                        let correlation_id = RequestCorrelationId(request_id.clone());
-                        req.extensions_mut().insert(correlation_id);
+        let test_router = Router::new()
+            .route(
+                "/test/correlation",
+                get(
+                    |axum::Extension(corr): axum::Extension<RequestCorrelationId>| async move {
+                        let span_before = tracing::Span::current();
+                        let has_span_before = !span_before.is_none();
 
-                        let mut res = next.run(req).await;
-                        if let Ok(val) = request_id.parse() {
-                            res.headers_mut().insert("x-request-id", val);
-                        }
-                        res
+                        // Yield execution across an asynchronous await point
+                        tokio::task::yield_now().await;
+
+                        // Downstream asynchronous logs and checks inherit the exact same span context
+                        let span_after = tracing::Span::current();
+                        let has_span_after = !span_after.is_none();
+
+                        Json(serde_json::json!({
+                            "correlation_id": corr.0,
+                            "has_span_before": has_span_before,
+                            "has_span_after": has_span_after,
+                        }))
                     },
-                ));
+                ),
+            )
+            .layer(axum::middleware::from_fn(
+                |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let raw_corr = req
+                        .headers()
+                        .get("x-request-id")
+                        .or_else(|| req.headers().get("x-correlation-id"))
+                        .and_then(|v| v.to_str().ok());
+
+                    let validated_id = raw_corr.and_then(sanitize_correlation_id);
+                    let request_id =
+                        validated_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    let correlation_id = RequestCorrelationId(request_id.clone());
+                    req.extensions_mut().insert(correlation_id);
+
+                    let method = req.method().clone();
+                    let path = req.uri().path().to_string();
+                    let span = tracing::info_span!(
+                        "http_request",
+                        request_id = %request_id,
+                        method = %method,
+                        path = %path,
+                    );
+
+                    let mut res = next.run(req).instrument(span).await;
+                    if let Ok(val) = request_id.parse() {
+                        res.headers_mut().insert("x-request-id", val);
+                    }
+                    res
+                },
+            ));
 
         let req_ext = Request::builder()
             .method("GET")
-            .uri("/test/correlation")
+            .uri("/test/correlation?token=sensitive_do_not_log_in_span&other=123")
             .header("x-request-id", "trace-extension-verified-42")
             .body(axum::body::Body::empty())
             .unwrap();
 
         let resp_ext = test_router.oneshot(req_ext).await.unwrap();
         assert_eq!(resp_ext.status(), StatusCode::OK);
+        assert_eq!(
+            resp_ext
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("trace-extension-verified-42")
+        );
         let body_bytes = axum::body::to_bytes(resp_ext.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        let json_val: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(
-            body_str, "trace-extension-verified-42",
+            json_val.get("correlation_id").and_then(|v| v.as_str()),
+            Some("trace-extension-verified-42"),
             "RequestCorrelationId must be propagated through request extensions"
+        );
+        assert_eq!(
+            json_val.get("has_span_before").and_then(|v| v.as_bool()),
+            Some(true),
+            "Span context must be active in handler"
+        );
+        assert_eq!(
+            json_val.get("has_span_after").and_then(|v| v.as_bool()),
+            Some(true),
+            "Span context must remain active across asynchronous await/yield points"
         );
     }
 
@@ -4916,25 +4955,44 @@ mod integration_tests {
 
     #[test]
     fn test_rate_limiter_privacy_preserving_identifiers() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+
         let ip_key = "ip:198.51.100.1";
         let auth_key = "auth_merchant_987654321";
         let other_key = "custom_client_ref";
 
-        let ip_ref = rate_limiter::privacy_preserving_client_id(ip_key);
+        // 1. With configured HMAC secret: deterministic and pseudonymous
+        std::env::set_var("ESA_LOG_HMAC_SECRET", "test_hmac_secret_key_123");
+        let ip_ref1 = rate_limiter::privacy_preserving_client_id(ip_key);
         let auth_ref = rate_limiter::privacy_preserving_client_id(auth_key);
         let other_ref = rate_limiter::privacy_preserving_client_id(other_key);
 
-        assert!(ip_ref.starts_with("ip_hash:"));
-        assert!(!ip_ref.contains("198.51.100.1"));
-        assert_eq!(ip_ref.len(), 8 + 12); // "ip_hash:" + 12 hex chars
+        assert!(ip_ref1.starts_with("ip_hash:"));
+        assert!(!ip_ref1.contains("198.51.100.1"));
+        assert_eq!(ip_ref1.len(), 8 + 12); // "ip_hash:" + 12 hex chars
 
         assert!(auth_ref.starts_with("auth_user:"));
         assert!(!auth_ref.contains("987654321"));
+        assert_eq!(auth_ref.len(), 10 + 12);
 
         assert!(other_ref.starts_with("client_hash:"));
+        assert_eq!(other_ref.len(), 12 + 12);
 
-        // Deterministic
-        assert_eq!(ip_ref, rate_limiter::privacy_preserving_client_id(ip_key));
+        // Deterministic with same key
+        assert_eq!(ip_ref1, rate_limiter::privacy_preserving_client_id(ip_key));
+
+        // 2. Different secret produces different pseudonyms (keyed HMAC prevents dictionary attacks)
+        std::env::set_var("ESA_LOG_HMAC_SECRET", "different_secret_key_456");
+        let ip_ref2 = rate_limiter::privacy_preserving_client_id(ip_key);
+        assert_ne!(ip_ref1, ip_ref2);
+
+        // 3. Fallback to process-lifetime random secret when unconfigured
+        std::env::remove_var("ESA_LOG_HMAC_SECRET");
+        let ip_ref_fallback1 = rate_limiter::privacy_preserving_client_id(ip_key);
+        let ip_ref_fallback2 = rate_limiter::privacy_preserving_client_id(ip_key);
+        assert_eq!(ip_ref_fallback1, ip_ref_fallback2);
+        assert!(ip_ref_fallback1.starts_with("ip_hash:"));
+        assert_eq!(ip_ref_fallback1.len(), 8 + 12);
     }
 
     #[tokio::test]

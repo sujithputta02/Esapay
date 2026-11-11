@@ -216,12 +216,53 @@ impl IpCidr {
     }
 }
 
-/// Generates a privacy-preserving identifier for structured logging without exposing raw client IPs or identities.
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::sync::OnceLock;
+
+type HmacSha256 = Hmac<Sha256>;
+
+static PROCESS_FALLBACK_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
+
+fn get_fallback_secret() -> &'static [u8; 32] {
+    PROCESS_FALLBACK_SECRET.get_or_init(|| {
+        let mut secret = [0u8; 32];
+        let (u1, u2) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        secret[..16].copy_from_slice(u1.as_bytes());
+        secret[16..].copy_from_slice(u2.as_bytes());
+        secret
+    })
+}
+
+/// Generates a privacy-preserving pseudonymous identifier for structured logging without exposing
+/// raw client IPs, API tokens, or merchant IDs.
+///
+/// Security & Privacy Design:
+/// - Uses keyed HMAC-SHA256 to prevent dictionary and rainbow-table precomputation attacks against small
+///   input spaces (e.g. IPv4 addresses).
+/// - If `ESA_LOG_HMAC_SECRET` is configured in the environment, it is used as the HMAC key to enable stable,
+///   pseudonymous log correlation across multiple cluster nodes and service restarts.
+/// - If `ESA_LOG_HMAC_SECRET` is omitted or empty, falls back to a 256-bit process-lifetime random secret,
+///   providing pseudonymous correlation within a single process run while preventing cross-restart tracking.
+/// - Note: This produces pseudonymous identifiers for log correlation, not full anonymization.
 pub fn privacy_preserving_client_id(raw: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
+    let env_val = std::env::var("ESA_LOG_HMAC_SECRET").ok();
+    let key: &[u8] = match env_val.as_deref().map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.as_bytes(),
+        _ => get_fallback_secret(),
+    };
+
+    let hash = if let Ok(mut mac) = HmacSha256::new_from_slice(key) {
+        mac.update(raw.as_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    } else {
+        use sha2::Digest;
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        hasher.update(raw.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
     let prefix = if raw.starts_with("auth_") {
         "auth_user:"
     } else if raw.starts_with("ip:") {
