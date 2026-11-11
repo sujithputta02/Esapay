@@ -231,6 +231,10 @@ export class ApiClient {
   async verifyPayUPayment(txnid: string) {
     return this.post<any>('/api/payments/payu/verify', { txnid });
   }
+
+  async confirmRazorpayPayment(paymentId: string) {
+    return this.post<any>('/api/razorpay/confirm', { payment_id: paymentId });
+  }
 }
 
 export const apiClient = new ApiClient();

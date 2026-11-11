@@ -13,13 +13,29 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitBreakerState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+#[derive(Debug, Default)]
+struct CircuitStateInternal {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+    is_half_open: bool,
+}
+
 pub struct PayUProvider {
     client: PayUClient,
     latency_sum_ms: AtomicU64,
     latency_count: AtomicU64,
     success_count: AtomicU64,
     failure_count: AtomicU64,
-    circuit_broken_until: RwLock<Option<Instant>>,
+    circuit: RwLock<CircuitStateInternal>,
+    failure_threshold: u32,
+    cooldown_duration: std::time::Duration,
 }
 
 impl PayUProvider {
@@ -31,7 +47,9 @@ impl PayUProvider {
             latency_count: AtomicU64::new(0),
             success_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
-            circuit_broken_until: RwLock::new(None),
+            circuit: RwLock::new(CircuitStateInternal::default()),
+            failure_threshold: 3,
+            cooldown_duration: std::time::Duration::from_secs(30),
         }
     }
 
@@ -43,34 +61,72 @@ impl PayUProvider {
         self.client.config()
     }
 
-    fn record_metric(&self, latency_ms: u64, success: bool) {
-        self.latency_sum_ms.fetch_add(latency_ms, Ordering::Relaxed);
-        self.latency_count.fetch_add(1, Ordering::Relaxed);
-        if success {
-            self.success_count.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.failure_count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn check_circuit(&self) -> Result<(), ProviderError> {
-        let guard = self.circuit_broken_until.read();
-        if let Some(until) = *guard {
-            if Instant::now() < until {
-                return Err(ProviderError::UpstreamError {
-                    provider: "payu".into(),
-                    status: Some(503),
-                    message: "PayU circuit breaker is open due to consecutive upstream failures"
-                        .into(),
-                });
+    pub fn circuit_state(&self) -> CircuitBreakerState {
+        let guard = self.circuit.read();
+        match guard.open_until {
+            None => CircuitBreakerState::Closed,
+            Some(until) => {
+                if Instant::now() < until {
+                    CircuitBreakerState::Open
+                } else {
+                    CircuitBreakerState::HalfOpen
+                }
             }
         }
-        Ok(())
     }
 
-    fn trip_circuit(&self, duration: std::time::Duration) {
-        let mut guard = self.circuit_broken_until.write();
-        *guard = Some(Instant::now() + duration);
+    pub fn check_circuit(&self) -> Result<(), ProviderError> {
+        let state = self.circuit_state();
+        match state {
+            CircuitBreakerState::Open => Err(ProviderError::UpstreamError {
+                provider: "payu".into(),
+                status: Some(503),
+                message: "PayU circuit breaker is open due to consecutive upstream failures".into(),
+            }),
+            CircuitBreakerState::HalfOpen => {
+                let mut guard = self.circuit.write();
+                guard.is_half_open = true;
+                Ok(())
+            }
+            CircuitBreakerState::Closed => Ok(()),
+        }
+    }
+
+    pub fn record_success(&self, latency_ms: u64) {
+        self.latency_sum_ms.fetch_add(latency_ms, Ordering::Relaxed);
+        self.latency_count.fetch_add(1, Ordering::Relaxed);
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+
+        let mut guard = self.circuit.write();
+        guard.consecutive_failures = 0;
+        guard.open_until = None;
+        guard.is_half_open = false;
+    }
+
+    pub fn record_failure(&self, latency_ms: u64) {
+        self.latency_sum_ms.fetch_add(latency_ms, Ordering::Relaxed);
+        self.latency_count.fetch_add(1, Ordering::Relaxed);
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
+
+        let mut guard = self.circuit.write();
+        guard.consecutive_failures += 1;
+        if guard.is_half_open || guard.consecutive_failures >= self.failure_threshold {
+            guard.open_until = Some(Instant::now() + self.cooldown_duration);
+            guard.is_half_open = false;
+        }
+    }
+
+    pub fn trip_circuit(&self, duration: std::time::Duration) {
+        let mut guard = self.circuit.write();
+        guard.open_until = Some(Instant::now() + duration);
+        guard.is_half_open = false;
+    }
+
+    pub fn reset_circuit(&self) {
+        let mut guard = self.circuit.write();
+        guard.consecutive_failures = 0;
+        guard.open_until = None;
+        guard.is_half_open = false;
     }
 }
 
@@ -203,7 +259,7 @@ impl PaymentProvider for PayUProvider {
 
         match res {
             Ok(body) => {
-                self.record_metric(elapsed, true);
+                self.record_success(elapsed);
                 let txn_details = body
                     .get("transaction_details")
                     .and_then(|td| td.get(payment_id))
@@ -264,7 +320,7 @@ impl PaymentProvider for PayUProvider {
                 })
             }
             Err(e) => {
-                self.record_metric(elapsed, false);
+                self.record_failure(elapsed);
                 self.trip_circuit(std::time::Duration::from_secs(10));
                 Err(ProviderError::UpstreamError {
                     provider: "payu".into(),
@@ -336,7 +392,7 @@ impl PaymentProvider for PayUProvider {
 
         match res {
             Ok(body) => {
-                self.record_metric(elapsed, true);
+                self.record_success(elapsed);
                 let status_num = body.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
                 let status = if status_num == 1 {
                     "processed"
@@ -358,7 +414,7 @@ impl PaymentProvider for PayUProvider {
                 })
             }
             Err(e) => {
-                self.record_metric(elapsed, false);
+                self.record_failure(elapsed);
                 Err(ProviderError::RefundError {
                     provider: "payu".into(),
                     reason: e.to_string(),
@@ -380,7 +436,7 @@ impl PaymentProvider for PayUProvider {
 
         match res {
             Ok(body) => {
-                self.record_metric(elapsed, true);
+                self.record_success(elapsed);
                 let status_num = body.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
                 let status = if status_num == 1 {
                     "processed"
@@ -397,7 +453,7 @@ impl PaymentProvider for PayUProvider {
                 })
             }
             Err(e) => {
-                self.record_metric(elapsed, false);
+                self.record_failure(elapsed);
                 Err(ProviderError::RefundError {
                     provider: "payu".into(),
                     reason: e.to_string(),
@@ -408,7 +464,8 @@ impl PaymentProvider for PayUProvider {
 
     fn health(&self) -> ProviderHealth {
         let is_cfg = self.is_configured();
-        let is_cb_open = self.circuit_broken_until.read().is_some();
+        let cb_state = self.circuit_state();
+        let is_healthy = is_cfg && cb_state != CircuitBreakerState::Open;
 
         let count = self.latency_count.load(Ordering::Relaxed);
         let p95 = if count > 0 {
@@ -428,7 +485,7 @@ impl PaymentProvider for PayUProvider {
             0.0
         };
 
-        let status = if !is_cfg || is_cb_open {
+        let status = if !is_cfg || cb_state == CircuitBreakerState::Open {
             WorkloadState::Degraded
         } else {
             WorkloadState::Healthy
@@ -436,8 +493,10 @@ impl PaymentProvider for PayUProvider {
 
         let message = if !is_cfg {
             "PayU credentials unconfigured".to_string()
-        } else if is_cb_open {
+        } else if cb_state == CircuitBreakerState::Open {
             "PayU circuit open due to upstream errors".to_string()
+        } else if cb_state == CircuitBreakerState::HalfOpen {
+            "PayU circuit half-open (probing recovery)".to_string()
         } else {
             format!(
                 "Operational ({})",
@@ -453,7 +512,7 @@ impl PaymentProvider for PayUProvider {
             gateway: PaymentGateway::PayU,
             name: self.name().to_string(),
             is_configured: is_cfg,
-            is_healthy: is_cfg && !is_cb_open,
+            is_healthy,
             is_sandbox: self.is_sandbox(),
             status,
             p95_latency_ms: p95,
@@ -462,5 +521,65 @@ impl PaymentProvider for PayUProvider {
             supported_methods: PAYU_SUPPORTED_METHODS.to_vec(),
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn create_test_provider() -> PayUProvider {
+        let cfg = PayUConfig {
+            merchant_key: "test_key".to_string(),
+            merchant_salt: "test_salt".to_string(),
+            payment_url: "https://test.payu.in/_payment".to_string(),
+            verify_url: "https://test.payu.in/merchant/postservice?form=2".to_string(),
+            env: crate::config::PayUEnv::Test,
+        };
+        PayUProvider::new(cfg)
+    }
+
+    #[test]
+    fn test_payu_circuit_breaker_lifecycle() {
+        let provider = create_test_provider();
+
+        // 1. Initial closed state
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Closed);
+        assert!(provider.check_circuit().is_ok());
+        assert!(provider.health().is_healthy);
+
+        // 2. Failure threshold trips to Open
+        provider.record_failure(100);
+        provider.record_failure(100);
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Closed);
+        provider.record_failure(100); // 3rd failure trips
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Open);
+        assert!(provider.check_circuit().is_err());
+        assert!(!provider.health().is_healthy);
+
+        // 3. Cooldown with short duration for test
+        provider.trip_circuit(Duration::from_millis(50));
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Open);
+        std::thread::sleep(Duration::from_millis(60));
+
+        // 4. Half-Open after cooldown expires
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::HalfOpen);
+        assert!(provider.health().is_healthy);
+        assert!(provider.check_circuit().is_ok());
+
+        // 5. Successful probe restores to Closed
+        provider.record_success(50);
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Closed);
+        assert!(provider.health().is_healthy);
+
+        // 6. Repeated failure in Half-Open immediately trips back to Open
+        provider.trip_circuit(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::HalfOpen);
+        assert!(provider.check_circuit().is_ok());
+        provider.record_failure(100);
+        assert_eq!(provider.circuit_state(), CircuitBreakerState::Open);
+        assert!(!provider.health().is_healthy);
     }
 }

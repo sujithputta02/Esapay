@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use esa_core::payment_state::{PaymentEntity, PaymentError, PaymentState, TransitionOutcome};
+use esa_core::provider::PaymentAttemptRecord;
 use esa_core::PaymentEventType;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -221,6 +222,32 @@ pub trait WebhookStore: Send + Sync {
     async fn health_check(&self) -> Result<(), WebhookStoreError> {
         Ok(())
     }
+
+    /// Record an initiated payment attempt for durable merchant ownership and audit tracking
+    async fn record_payment_attempt(
+        &self,
+        _attempt: &PaymentAttemptRecord,
+    ) -> Result<(), WebhookStoreError> {
+        Ok(())
+    }
+
+    /// Retrieve an existing payment attempt by internal transaction ID or provider order ID
+    async fn get_payment_attempt(
+        &self,
+        _id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        Ok(None)
+    }
+
+    /// Update payment attempt state (e.g. captured, failed, refunded) and optional provider payment reference
+    async fn update_payment_attempt_state(
+        &self,
+        _transaction_id: &str,
+        _state: &str,
+        _payment_reference: Option<&str>,
+    ) -> Result<(), WebhookStoreError> {
+        Ok(())
+    }
 }
 
 /// Durable PostgreSQL-backed implementation of WebhookStore
@@ -327,6 +354,23 @@ impl PostgresWebhookStore {
             "CREATE INDEX IF NOT EXISTS idx_payment_records_provider ON payment_records(provider);",
             "CREATE INDEX IF NOT EXISTS idx_payment_refunds_payment_id ON payment_refunds(payment_id);",
             "CREATE INDEX IF NOT EXISTS idx_payment_refunds_provider_payment ON payment_refunds(provider, payment_id);",
+            r#"
+            CREATE TABLE IF NOT EXISTS payment_attempts (
+                transaction_id VARCHAR(255) PRIMARY KEY,
+                merchant_id VARCHAR(255) NOT NULL,
+                provider VARCHAR(64) NOT NULL,
+                provider_order_id VARCHAR(255),
+                payment_reference VARCHAR(255),
+                amount_minor BIGINT NOT NULL,
+                currency VARCHAR(10) NOT NULL,
+                state VARCHAR(50) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_payment_attempts_provider_order ON payment_attempts(provider, provider_order_id);",
+            "CREATE INDEX IF NOT EXISTS idx_payment_attempts_merchant ON payment_attempts(merchant_id);",
+            "CREATE INDEX IF NOT EXISTS idx_payment_attempts_reference ON payment_attempts(payment_reference);",
         ];
 
         for stmt in statements {
@@ -1518,6 +1562,101 @@ impl WebhookStore for PostgresWebhookStore {
             Ok(None)
         }
     }
+
+    async fn record_payment_attempt(
+        &self,
+        attempt: &PaymentAttemptRecord,
+    ) -> Result<(), WebhookStoreError> {
+        let q = r#"
+            INSERT INTO payment_attempts (
+                transaction_id, merchant_id, provider, provider_order_id,
+                payment_reference, amount_minor, currency, state, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (transaction_id) DO UPDATE SET
+                merchant_id = EXCLUDED.merchant_id,
+                provider = EXCLUDED.provider,
+                provider_order_id = COALESCE(EXCLUDED.provider_order_id, payment_attempts.provider_order_id),
+                payment_reference = COALESCE(EXCLUDED.payment_reference, payment_attempts.payment_reference),
+                amount_minor = EXCLUDED.amount_minor,
+                currency = EXCLUDED.currency,
+                state = EXCLUDED.state,
+                updated_at = NOW();
+        "#;
+        sqlx::query(q)
+            .bind(&attempt.transaction_id)
+            .bind(&attempt.merchant_id)
+            .bind(&attempt.provider)
+            .bind(&attempt.provider_order_id)
+            .bind(&attempt.payment_reference)
+            .bind(attempt.amount_minor as i64)
+            .bind(&attempt.currency)
+            .bind(&attempt.state)
+            .bind(attempt.created_at)
+            .bind(attempt.updated_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        let q = r#"
+            SELECT transaction_id, merchant_id, provider, provider_order_id,
+                   payment_reference, amount_minor, currency, state, created_at, updated_at
+            FROM payment_attempts
+            WHERE transaction_id = $1 OR provider_order_id = $1 OR payment_reference = $1
+            LIMIT 1;
+        "#;
+        let row_opt = sqlx::query(q)
+            .bind(id_or_order_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        if let Some(r) = row_opt {
+            let amt: i64 = r.get("amount_minor");
+            Ok(Some(PaymentAttemptRecord {
+                transaction_id: r.get("transaction_id"),
+                merchant_id: r.get("merchant_id"),
+                provider: r.get("provider"),
+                provider_order_id: r.get("provider_order_id"),
+                payment_reference: r.get("payment_reference"),
+                amount_minor: amt as u64,
+                currency: r.get("currency"),
+                state: r.get("state"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn update_payment_attempt_state(
+        &self,
+        transaction_id: &str,
+        state: &str,
+        payment_reference: Option<&str>,
+    ) -> Result<(), WebhookStoreError> {
+        let q = r#"
+            UPDATE payment_attempts
+            SET state = $2,
+                payment_reference = COALESCE($3, payment_reference),
+                updated_at = NOW()
+            WHERE transaction_id = $1 OR provider_order_id = $1;
+        "#;
+        sqlx::query(q)
+            .bind(transaction_id)
+            .bind(state)
+            .bind(payment_reference)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1540,6 +1679,8 @@ pub struct InMemoryWebhookStore {
     payments: Arc<parking_lot::Mutex<HashMap<String, PaymentEntity>>>,
     refunds: Arc<parking_lot::Mutex<HashMap<(String, String), InMemoryRefundEntry>>>,
     next_id: Arc<parking_lot::Mutex<i64>>,
+    attempts: Arc<parking_lot::Mutex<HashMap<String, PaymentAttemptRecord>>>,
+    order_index: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 }
 
 impl InMemoryWebhookStore {
@@ -1549,6 +1690,8 @@ impl InMemoryWebhookStore {
             payments: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             refunds: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             next_id: Arc::new(parking_lot::Mutex::new(1)),
+            attempts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            order_index: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2266,11 +2409,120 @@ impl WebhookStore for InMemoryWebhookStore {
                 applied_to_balance: e.applied_to_balance,
             }))
     }
+
+    async fn record_payment_attempt(
+        &self,
+        attempt: &PaymentAttemptRecord,
+    ) -> Result<(), WebhookStoreError> {
+        let mut guard = self.attempts.lock();
+        guard.insert(attempt.transaction_id.clone(), attempt.clone());
+        if let Some(order_id) = &attempt.provider_order_id {
+            let mut idx_guard = self.order_index.lock();
+            idx_guard.insert(order_id.clone(), attempt.transaction_id.clone());
+        }
+        Ok(())
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        let guard = self.attempts.lock();
+        if let Some(attempt) = guard.get(id_or_order_id) {
+            return Ok(Some(attempt.clone()));
+        }
+        let idx_guard = self.order_index.lock();
+        if let Some(tx_id) = idx_guard.get(id_or_order_id) {
+            return Ok(guard.get(tx_id).cloned());
+        }
+        if let Some(attempt) = guard
+            .values()
+            .find(|a| a.payment_reference.as_deref() == Some(id_or_order_id))
+        {
+            return Ok(Some(attempt.clone()));
+        }
+        Ok(None)
+    }
+
+    async fn update_payment_attempt_state(
+        &self,
+        transaction_id: &str,
+        state: &str,
+        payment_reference: Option<&str>,
+    ) -> Result<(), WebhookStoreError> {
+        let mut guard = self.attempts.lock();
+        let target_id = if guard.contains_key(transaction_id) {
+            Some(transaction_id.to_string())
+        } else {
+            let idx_guard = self.order_index.lock();
+            idx_guard.get(transaction_id).cloned().or_else(|| {
+                guard
+                    .values()
+                    .find(|a| a.payment_reference.as_deref() == Some(transaction_id))
+                    .map(|a| a.transaction_id.clone())
+            })
+        };
+        if let Some(id) = target_id {
+            if let Some(attempt) = guard.get_mut(&id) {
+                attempt.state = state.to_string();
+                if let Some(pref) = payment_reference {
+                    attempt.payment_reference = Some(pref.to_string());
+                }
+                attempt.updated_at = Utc::now();
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_in_memory_payment_attempt_lifecycle() {
+        let store = InMemoryWebhookStore::new();
+        let attempt = PaymentAttemptRecord {
+            transaction_id: "tx_esa_123".to_string(),
+            merchant_id: "merchant_alpha".to_string(),
+            provider: "cashfree".to_string(),
+            provider_order_id: Some("order_cf_456".to_string()),
+            payment_reference: None,
+            amount_minor: 50000,
+            currency: "INR".to_string(),
+            state: "created".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        store.record_payment_attempt(&attempt).await.unwrap();
+
+        // 1. Lookup by transaction ID
+        let found_by_tx = store.get_payment_attempt("tx_esa_123").await.unwrap();
+        assert!(found_by_tx.is_some());
+        assert_eq!(found_by_tx.as_ref().unwrap().merchant_id, "merchant_alpha");
+
+        // 2. Lookup by provider order ID
+        let found_by_order = store.get_payment_attempt("order_cf_456").await.unwrap();
+        assert!(found_by_order.is_some());
+        assert_eq!(
+            found_by_order.as_ref().unwrap().transaction_id,
+            "tx_esa_123"
+        );
+
+        // 3. Update state
+        store
+            .update_payment_attempt_state("order_cf_456", "captured", Some("cf_pay_789"))
+            .await
+            .unwrap();
+        let updated = store
+            .get_payment_attempt("tx_esa_123")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.state, "captured");
+        assert_eq!(updated.payment_reference.as_deref(), Some("cf_pay_789"));
+    }
 
     #[tokio::test]
     async fn test_in_memory_webhook_store_lifecycle() {

@@ -172,6 +172,21 @@ pub struct ProviderHealth {
     pub message: String,
 }
 
+/// Durable record of an initiated payment attempt for merchant ownership and lifecycle verification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaymentAttemptRecord {
+    pub transaction_id: String,
+    pub merchant_id: String,
+    pub provider: String,
+    pub provider_order_id: Option<String>,
+    pub payment_reference: Option<String>,
+    pub amount_minor: u64,
+    pub currency: String,
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Unified Asynchronous Payment Provider Interface.
 /// Authoritative interface for Indian Payment Gateway providers.
 #[async_trait]

@@ -1,5 +1,4 @@
 use crate::hash::verify_response_hash;
-use chrono::Utc;
 use esa_core::events::PaymentEventType;
 use esa_core::provider::NormalizedWebhookEvent;
 use esa_core::types::PaymentGateway;
@@ -24,6 +23,9 @@ pub enum PayUWebhookError {
 
     #[error("Malformed payload: {0}")]
     MalformedPayload(String),
+
+    #[error("Unrecognized PayU event status: {0}")]
+    UnrecognizedStatus(String),
 }
 
 /// Verify PayU callback / webhook response hash and normalize into a common event.
@@ -89,13 +91,22 @@ pub fn parse_and_verify_callback(
         .unwrap_or_else(|| txnid.to_string());
 
     let event_type = match status.to_lowercase().as_str() {
-        "success" => PaymentEventType::PaymentCaptured,
-        "failure" | "bounced" | "failed" => PaymentEventType::PaymentFailed,
-        "pending" => PaymentEventType::PaymentAuthorized,
-        _ => PaymentEventType::PaymentFailed,
+        "success" | "captured" => PaymentEventType::PaymentCaptured,
+        "failure" | "bounced" | "failed" | "usercancelled" | "cancelled" => {
+            PaymentEventType::PaymentFailed
+        }
+        "pending" | "in progress" | "initiated" => PaymentEventType::PaymentAuthorized,
+        other => return Err(PayUWebhookError::UnrecognizedStatus(other.to_string())),
     };
 
-    let provider_event_id = format!("payu_evt_{}_{}", mihpayid, Utc::now().timestamp_millis());
+    let provider_event_id = if let Some(eid) = params
+        .get("event_id")
+        .or_else(|| params.get("notification_id"))
+    {
+        format!("payu_evt_{}", eid)
+    } else {
+        format!("payu_evt_{}_{}_{}", mihpayid, txnid, status.to_lowercase())
+    };
 
     let payload_val = serde_json::to_value(params)
         .map_err(|e| PayUWebhookError::MalformedPayload(e.to_string()))?;
@@ -165,5 +176,40 @@ mod tests {
         assert_eq!(event.provider_payment_id, "987654321");
         assert_eq!(event.provider_order_id, Some("tx_123456".to_string()));
         assert_eq!(event.amount_minor, 50000);
+        assert_eq!(
+            event.provider_event_id,
+            "payu_evt_987654321_tx_123456_success"
+        );
+
+        // 2. Repeated delivery produces identical event ID for durable idempotency
+        let event_dup = parse_and_verify_callback(&params, salt).expect("must parse duplicate");
+        assert_eq!(event_dup.provider_event_id, event.provider_event_id);
+
+        // 3. Unrecognized status is rejected
+        let bad_hash = calculate_reverse_hash(
+            salt,
+            "weird_unknown_status",
+            None,
+            None,
+            None,
+            None,
+            None,
+            email,
+            firstname,
+            productinfo,
+            amount,
+            txnid,
+            key,
+            None,
+        );
+        let mut bad_params = params.clone();
+        bad_params.insert("status".to_string(), "weird_unknown_status".to_string());
+        bad_params.insert("hash".to_string(), bad_hash);
+        let err = parse_and_verify_callback(&bad_params, salt)
+            .expect_err("must reject unrecognized status");
+        assert_eq!(
+            err,
+            PayUWebhookError::UnrecognizedStatus("weird_unknown_status".to_string())
+        );
     }
 }
