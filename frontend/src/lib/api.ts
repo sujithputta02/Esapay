@@ -55,6 +55,25 @@ export function setApiKey(key: string) {
   }
 }
 
+export interface PaymentConfirmationResponse {
+  success: boolean;
+  status: string;
+  payment_state: string;
+  transaction_id: string;
+  provider: string;
+  provider_order_id?: string;
+  order_id?: string;
+  payment_reference?: string;
+  payment_id?: string;
+  cf_payment_id?: string;
+  mihpayid?: string;
+  amount_minor: number;
+  currency: string;
+  idempotent: boolean;
+  message: string;
+  [key: string]: any;
+}
+
 export class ApiClient {
   private customBaseUrl?: string;
 
@@ -201,8 +220,39 @@ export class ApiClient {
     return this.post<any>(`/api/gateways/${name}/toggle`);
   }
 
-  async checkout(params: { amount: number; currency?: string; gateway?: string; method?: string }) {
+  async checkout(params: {
+    amount: number;
+    amount_minor?: number;
+    currency?: string;
+    gateway?: string;
+    method?: string;
+    payment_method?: string;
+    customer_id?: string;
+    customer_email?: string;
+    customer_phone?: string;
+    return_url?: string;
+  }) {
     return this.post<any>('/api/payments/checkout', params);
+  }
+
+  async getCashfreeStatus() {
+    return this.get<any>('/api/payments/cashfree/status');
+  }
+
+  async getPayUStatus() {
+    return this.get<any>('/api/payments/payu/status');
+  }
+
+  async confirmCashfreePayment(orderId: string): Promise<PaymentConfirmationResponse> {
+    return this.post<PaymentConfirmationResponse>('/api/payments/cashfree/confirm', { order_id: orderId });
+  }
+
+  async verifyPayUPayment(txnid: string): Promise<PaymentConfirmationResponse> {
+    return this.post<PaymentConfirmationResponse>('/api/payments/payu/verify', { txnid });
+  }
+
+  async confirmRazorpayPayment(paymentId: string): Promise<PaymentConfirmationResponse> {
+    return this.post<PaymentConfirmationResponse>('/api/razorpay/confirm', { payment_id: paymentId });
   }
 }
 

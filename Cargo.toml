@@ -9,6 +9,8 @@ members = [
     "crates/esa-runtime",
     "crates/esa-api",
     "crates/esa-razorpay",
+    "crates/esa-cashfree",
+    "crates/esa-payu",
     "crates/esa-telemetry",
     "crates/esa-cli",
 ]

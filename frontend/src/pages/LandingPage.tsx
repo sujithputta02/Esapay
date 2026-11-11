@@ -29,8 +29,13 @@ import {
   Eye,
   EyeOff,
   Menu,
+  Clock,
+  XCircle,
+  HelpCircle,
+  Ban,
 } from 'lucide-react';
 import { apiClient, getApiBaseUrl, setApiKey } from '@/lib/api';
+import { executeProviderCheckout, type PaymentOutcomeStatus, type CheckoutDecision } from '@/lib/checkout';
 import { supabaseAuth, evaluatePasswordStrength } from '@/lib/supabase';
 import { EnterpriseAuthDialog } from '@/components/EnterpriseAuthDialog';
 import { cn } from '@/lib/utils';
@@ -45,16 +50,6 @@ interface GatewayItem {
   is_healthy: boolean;
 }
 
-interface CheckoutDecision {
-  transaction_id: string;
-  amount: number;
-  currency: string;
-  requested_gateway: string;
-  routed_gateway: string;
-  failover_triggered: boolean;
-  routing_reason: string;
-  checkout_url: string;
-}
 
 /* ========================================================================== */
 /* SCROLL DEPTH PARALLAX WRAPPER (Fades in & comes near, scrolls away & fades)*/
@@ -591,10 +586,13 @@ export function LandingPage() {
   const [isOutageSimulated, setIsOutageSimulated] = useState(false);
 
   // In-App Universal Checkout Modal
+  const [selectedGateway, setSelectedGateway] = useState<'auto' | 'razorpay' | 'cashfree' | 'payu'>('auto');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMethod, setModalMethod] = useState<'upi' | 'card' | 'netbanking'>('upi');
   const [isPayingInModal, setIsPayingInModal] = useState(false);
-  const [paymentSuccess, setPaymentSuccess] = useState(false);
+  const [paymentOutcome, setPaymentOutcome] = useState<PaymentOutcomeStatus>('idle');
+  const [paymentOutcomeMessage, setPaymentOutcomeMessage] = useState<string>('');
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [activeTxHash, setActiveTxHash] = useState('');
 
   // Interactive Documentation Modal
@@ -969,48 +967,50 @@ export function LandingPage() {
         }
         return next;
       });
+      setCheckoutError(null);
       const res = await apiClient.checkout({
         amount: amount * 100,
         currency: 'INR',
-        gateway: 'auto',
-        method: 'UPI',
+        gateway: selectedGateway,
+        method: modalMethod.toUpperCase(),
       });
       setCheckoutResult(res);
+      setPaymentOutcome('idle');
+      setPaymentOutcomeMessage('');
       if (openModalAfter) {
-        setPaymentSuccess(false);
-        setActiveTxHash(`0x${Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`);
+        setActiveTxHash(res.transaction_id || `0x${Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`);
         setIsModalOpen(true);
       }
-    } catch {
-      const fallbackResult: CheckoutDecision = {
-        transaction_id: `tx_esa_${Date.now().toString(36)}`,
-        amount: amount * 100,
-        currency: 'INR',
-        requested_gateway: 'auto',
-        routed_gateway: isOutageSimulated ? 'phonepe' : 'razorpay',
-        failover_triggered: isOutageSimulated,
-        routing_reason: isOutageSimulated
-          ? '⚡ Razorpay degraded (P95 > 250ms) -> Autonomous failover executed to PhonePe Direct UPI rail'
-          : 'Direct routed to optimal low-latency Indian corridor (PhonePe Direct UPI Switch)',
-        checkout_url: `/checkout/session?id=tx_esa_${Date.now().toString(36)}&gateway=phonepe`,
-      };
-      setCheckoutResult(fallbackResult);
-      if (openModalAfter) {
-        setPaymentSuccess(false);
-        setActiveTxHash(`0x${Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`);
-        setIsModalOpen(true);
-      }
+    } catch (err: any) {
+      // Do not fabricate fallback transactions on failed checkout API calls
+      const errMsg = err?.message || 'Payment initiation failed';
+      setCheckoutError(errMsg);
+      setCheckoutResult(null);
+      setPaymentOutcome('failed');
+      setPaymentOutcomeMessage(errMsg);
     } finally {
       setIsProcessingCheckout(false);
     }
   };
 
-  const handleCompleteModalPayment = () => {
+  const handleCompleteModalPayment = async () => {
+    if (!checkoutResult) return;
     setIsPayingInModal(true);
-    setTimeout(() => {
+    try {
+      const outcome = await executeProviderCheckout(checkoutResult, { skipFormSubmit: false });
+      setPaymentOutcome(outcome.status);
+      setPaymentOutcomeMessage(outcome.message || '');
+      if (outcome.status === 'captured') {
+        if (outcome.paymentReference) {
+          setActiveTxHash(outcome.paymentReference);
+        }
+      }
+    } catch (err: any) {
+      setPaymentOutcome('failed');
+      setPaymentOutcomeMessage(err?.message || 'Payment processing failed');
+    } finally {
       setIsPayingInModal(false);
-      setPaymentSuccess(true);
-    }, 600);
+    }
   };
 
   const terminalOutputs = {
@@ -1554,6 +1554,18 @@ print(f"Transaction ID: {decision.transaction_id}")`,
 
                 {/* Sub-Equator Telemetry & Action Launchers */}
                 <div className="mt-3.5 sm:mt-5 flex flex-col items-center justify-center gap-2.5 w-full max-w-[340px] sm:max-w-md mx-auto">
+                  {checkoutError && (
+                    <div className="flex items-center gap-2 text-xs font-mono text-rose-300 bg-rose-950/70 border border-rose-500/30 px-3.5 py-1.5 rounded-full shadow-sm max-w-full text-center">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                      <span className="truncate">{checkoutError}</span>
+                      <button
+                        onClick={() => setCheckoutError(null)}
+                        className="text-rose-400 hover:text-white ml-1 text-[10px]"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
                   {/* Sub-Pill Telemetry & Routing Ribbon */}
                   <div className="flex items-center justify-center gap-2 text-[11px] sm:text-xs font-mono text-white/95 bg-black/50 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10 shadow-sm max-w-full text-center">
                     <span className="flex items-center gap-1.5">
@@ -2652,7 +2664,10 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                   <span className="text-[10px] text-slate-400 font-mono">· Sovereign Indian Checkout</span>
                 </div>
                 <button
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    setPaymentOutcome('idle');
+                  }}
                   className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
                 >
                   <X className="h-4 w-4" />
@@ -2681,7 +2696,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
               )}
 
               <div className="p-6 space-y-5">
-                {paymentSuccess ? (
+                {paymentOutcome === 'captured' ? (
                   <div className="text-center py-6 space-y-4">
                     <div className="h-16 w-16 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center mx-auto shadow-[0_0_30px_rgba(16,185,129,0.4)]">
                       <Check className="h-8 w-8 stroke-[3]" />
@@ -2689,7 +2704,7 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     <div>
                       <h3 className="text-xl font-extrabold text-white">Payment Settled</h3>
                       <p className="text-xs text-slate-400 mt-1">
-                        Processed via {checkoutResult?.routed_gateway.toUpperCase() || 'PHONEPE'} Corridor
+                        {paymentOutcomeMessage || `Processed via ${(checkoutResult?.routed_gateway || 'GATEWAY').toUpperCase()} Corridor`}
                       </p>
                     </div>
 
@@ -2701,11 +2716,19 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                       <div className="flex justify-between text-slate-400">
                         <span>Transaction ID:</span>
                         <span className="text-blue-400 font-bold truncate max-w-[180px]">
-                          {checkoutResult?.transaction_id || 'tx_esa_demo'}
+                          {checkoutResult?.transaction_id}
                         </span>
                       </div>
+                      {checkoutResult?.provider_order_id && (
+                        <div className="flex justify-between text-slate-400">
+                          <span>Provider Order ID:</span>
+                          <span className="text-purple-400 font-bold truncate max-w-[180px]">
+                            {checkoutResult.provider_order_id}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between text-slate-400">
-                        <span>Audit Proof:</span>
+                        <span>Audit / Payment Ref:</span>
                         <span className="text-emerald-400 truncate max-w-[180px]">{activeTxHash}</span>
                       </div>
                     </div>
@@ -2713,12 +2736,166 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                     <button
                       onClick={() => {
                         setIsModalOpen(false);
-                        setPaymentSuccess(false);
+                        setPaymentOutcome('idle');
                       }}
                       className="w-full py-3 rounded-full bg-white text-black hover:bg-slate-100 font-bold text-xs transition-colors"
                     >
                       Close Checkout
                     </button>
+                  </div>
+                ) : paymentOutcome === 'pending' ? (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="h-16 w-16 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center mx-auto shadow-[0_0_30px_rgba(245,158,11,0.3)]">
+                      <Clock className="h-8 w-8 stroke-[2.5] animate-pulse" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-extrabold text-white">Payment Pending</h3>
+                      <p className="text-xs text-amber-300/80 mt-1">
+                        {paymentOutcomeMessage || 'Awaiting confirmation from provider.'}
+                      </p>
+                    </div>
+
+                    <div className="p-4 rounded-2xl border border-white/5 bg-white/[0.02] text-left font-mono text-[11px] space-y-1.5">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Order Amount:</span>
+                        <span className="text-white font-bold">₹{amount.toFixed(2)} INR</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Transaction ID:</span>
+                        <span className="text-blue-400 font-bold truncate max-w-[180px]">
+                          {checkoutResult?.transaction_id}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Gateway:</span>
+                        <span className="text-amber-400 uppercase font-bold">{checkoutResult?.routed_gateway}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleCompleteModalPayment}
+                        disabled={isPayingInModal}
+                        className="flex-1 py-3 rounded-full bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        {isPayingInModal ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                        <span>Verify Status</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsModalOpen(false);
+                          setPaymentOutcome('idle');
+                        }}
+                        className="flex-1 py-3 rounded-full bg-white/10 text-white hover:bg-white/20 font-bold text-xs transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : paymentOutcome === 'failed' ? (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="h-16 w-16 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto shadow-[0_0_30px_rgba(244,63,94,0.3)]">
+                      <XCircle className="h-8 w-8 stroke-[2.5]" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-extrabold text-white">Payment Failed</h3>
+                      <p className="text-xs text-rose-300/80 mt-1">
+                        {paymentOutcomeMessage || 'Transaction could not be authorized or verified.'}
+                      </p>
+                    </div>
+
+                    <div className="p-4 rounded-2xl border border-rose-500/10 bg-rose-500/[0.03] text-left font-mono text-[11px] space-y-1.5">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Gateway:</span>
+                        <span className="text-slate-300 uppercase font-bold">{checkoutResult?.routed_gateway || selectedGateway}</span>
+                      </div>
+                      {checkoutResult?.transaction_id && (
+                        <div className="flex justify-between text-slate-400">
+                          <span>Attempt ID:</span>
+                          <span className="text-slate-300 font-bold truncate max-w-[180px]">
+                            {checkoutResult.transaction_id}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setPaymentOutcome('idle')}
+                        className="flex-1 py-3 rounded-full bg-white text-black hover:bg-slate-100 font-bold text-xs transition-colors"
+                      >
+                        Try Again
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsModalOpen(false);
+                          setPaymentOutcome('idle');
+                        }}
+                        className="flex-1 py-3 rounded-full bg-white/10 text-white hover:bg-white/20 font-bold text-xs transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : paymentOutcome === 'cancelled' ? (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="h-16 w-16 rounded-full bg-slate-500/20 border border-slate-500/40 text-slate-400 flex items-center justify-center mx-auto">
+                      <Ban className="h-8 w-8 stroke-[2.5]" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-extrabold text-white">Payment Cancelled</h3>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {paymentOutcomeMessage || 'The payment was cancelled or abandoned.'}
+                      </p>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setPaymentOutcome('idle')}
+                        className="flex-1 py-3 rounded-full bg-white text-black hover:bg-slate-100 font-bold text-xs transition-colors"
+                      >
+                        Try Again
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsModalOpen(false);
+                          setPaymentOutcome('idle');
+                        }}
+                        className="flex-1 py-3 rounded-full bg-white/10 text-white hover:bg-white/20 font-bold text-xs transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : paymentOutcome === 'unknown' ? (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="h-16 w-16 rounded-full bg-indigo-500/20 border border-indigo-500/40 text-indigo-400 flex items-center justify-center mx-auto">
+                      <HelpCircle className="h-8 w-8 stroke-[2.5]" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-extrabold text-white">Status Unknown</h3>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {paymentOutcomeMessage || 'Could not verify payment status authoritatively.'}
+                      </p>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleCompleteModalPayment}
+                        className="flex-1 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-colors"
+                      >
+                        Retry Verification
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsModalOpen(false);
+                          setPaymentOutcome('idle');
+                        }}
+                        className="flex-1 py-3 rounded-full bg-white/10 text-white hover:bg-white/20 font-bold text-xs transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -2730,6 +2907,28 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                         </span>
                       </div>
                       <span className="text-xs font-mono text-slate-400">Merchant Store</span>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] text-slate-400 font-mono">Routing Corridor:</span>
+                        <span className="text-[10px] text-blue-400 font-mono">Orchestrated Rail</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5 bg-[#080B14] p-1.5 rounded-2xl border border-white/[0.08] text-xs font-mono">
+                        {(['auto', 'razorpay', 'cashfree', 'payu'] as const).map((gw) => (
+                          <button
+                            key={gw}
+                            onClick={() => setSelectedGateway(gw)}
+                            className={`py-1.5 rounded-xl text-center uppercase transition-all ${
+                              selectedGateway === gw
+                                ? 'bg-[#1F51FF] text-white font-bold shadow-md'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {gw}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 bg-[#080B14] p-1.5 rounded-2xl border border-white/[0.08] text-xs font-mono">
@@ -2799,6 +2998,47 @@ print(f"Transaction ID: {decision.transaction_id}")`,
                             {b}
                           </div>
                         ))}
+                      </div>
+                    )}
+
+                    {checkoutResult?.session && (
+                      <div className="p-3 rounded-xl border border-white/[0.08] bg-[#080B14] text-left font-mono text-[10px] space-y-1">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Gateway Session:</span>
+                          <span className="text-blue-400 font-bold uppercase">{checkoutResult.session.mode}</span>
+                        </div>
+                        {checkoutResult.session.mode === 'cashfree' && checkoutResult.session.data?.payment_session_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Session ID:</span>
+                            <span className="text-emerald-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.payment_session_id}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.session.mode === 'payu' && checkoutResult.session.data?.action_url && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Hosted Action:</span>
+                            <span className="text-amber-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.action_url}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.session.mode === 'razorpay' && checkoutResult.session.data?.order_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Razorpay Order:</span>
+                            <span className="text-purple-400 truncate max-w-[170px]">
+                              {checkoutResult.session.data.order_id}
+                            </span>
+                          </div>
+                        )}
+                        {checkoutResult.provider_order_id && (
+                          <div className="flex justify-between text-slate-400">
+                            <span>Provider Ref:</span>
+                            <span className="text-slate-300 truncate max-w-[170px]">
+                              {checkoutResult.provider_order_id}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
 

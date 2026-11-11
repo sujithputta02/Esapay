@@ -7,6 +7,7 @@ pub mod errors;
 pub mod events;
 pub mod intent;
 pub mod payment_state;
+pub mod provider;
 pub mod types;
 
 pub use actions::*;
@@ -16,4 +17,5 @@ pub use errors::*;
 pub use events::*;
 pub use intent::*;
 pub use payment_state::*;
+pub use provider::*;
 pub use types::*;

@@ -7,7 +7,9 @@ use axum::{
     Json, Router,
 };
 use esa_agents::OllamaClient;
+use esa_cashfree::{CashfreeConfig, CashfreeProvider};
 use esa_core::*;
+use esa_payu::{PayUConfig, PayUProvider};
 use esa_razorpay::{
     payment_entity_to_event, webhook::MAX_WEBHOOK_BODY_BYTES, RazorpayAdapter, RazorpayConfig,
     WebhookError,
@@ -86,12 +88,15 @@ pub(crate) fn detect_checkout_mode() -> PaymentCheckoutMode {
         Err(e) => return PaymentCheckoutMode::Misconfigured(e),
     };
 
-    // Supported provider gateways: razorpay, stripe, phonepe, cashfree, paytm, adyen
+    // Supported provider gateways: razorpay, cashfree, payu, stripe, phonepe, paytm, adyen
     let provider_vars = [
         "RAZORPAY_MODE",
         "STRIPE_MODE",
         "PHONEPE_MODE",
         "CASHFREE_MODE",
+        "CASHFREE_ENV",
+        "PAYU_MODE",
+        "PAYU_ENV",
         "PAYTM_MODE",
         "ADYEN_MODE",
     ];
@@ -724,6 +729,36 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let cashfree = match CashfreeConfig::from_env() {
+        Ok(Some(cfg)) => {
+            info!("Cashfree provider enabled (env: {:?})", cfg.env);
+            Some(Arc::new(CashfreeProvider::new(cfg)))
+        }
+        Ok(None) => {
+            info!("Cashfree provider disabled — set CASHFREE_* in .env to enable");
+            None
+        }
+        Err(e) => {
+            error!("Cashfree config invalid: {}", e);
+            return Err(anyhow::anyhow!("Cashfree configuration error: {}", e));
+        }
+    };
+
+    let payu = match PayUConfig::from_env() {
+        Ok(Some(cfg)) => {
+            info!("PayU provider enabled (env: {:?})", cfg.env);
+            Some(Arc::new(PayUProvider::new(cfg)))
+        }
+        Ok(None) => {
+            info!("PayU provider disabled — set PAYU_* in .env to enable");
+            None
+        }
+        Err(e) => {
+            error!("PayU config invalid: {}", e);
+            return Err(anyhow::anyhow!("PayU configuration error: {}", e));
+        }
+    };
+
     // Seed default workloads on startup if empty so vitals and dashboard start immediately live
     if state_fabric.list_workloads().is_empty() {
         use chrono::Utc;
@@ -884,6 +919,8 @@ async fn main() -> anyhow::Result<()> {
         audit_store,
         agent_status,
         razorpay,
+        cashfree,
+        payu,
         vitals,
         rate_limiter,
         last_benchmark: Arc::new(std::sync::RwLock::new(None)),
@@ -955,6 +992,89 @@ fn build_app(app_state: AppState) -> Router {
         .route("/api/v1/razorpay/verify", post(razorpay_verify_keys))
         .route("/api/razorpay/confirm", post(razorpay_confirm_payment))
         .route("/api/v1/razorpay/confirm", post(razorpay_confirm_payment))
+        // Cashfree Payment Gateway routes
+        .route(
+            "/api/cashfree/webhook",
+            post(cashfree_webhook).layer(DefaultBodyLimit::max(
+                esa_cashfree::webhook::MAX_WEBHOOK_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/cashfree/webhook",
+            post(cashfree_webhook).layer(DefaultBodyLimit::max(
+                esa_cashfree::webhook::MAX_WEBHOOK_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/api/payments/cashfree/webhook",
+            post(cashfree_webhook).layer(DefaultBodyLimit::max(
+                esa_cashfree::webhook::MAX_WEBHOOK_BODY_BYTES,
+            )),
+        )
+        .route("/api/cashfree/status", get(cashfree_status))
+        .route("/api/v1/cashfree/status", get(cashfree_status))
+        .route("/api/payments/cashfree/status", get(cashfree_status))
+        .route("/api/cashfree/confirm", post(cashfree_confirm_payment))
+        .route("/api/v1/cashfree/confirm", post(cashfree_confirm_payment))
+        .route(
+            "/api/payments/cashfree/confirm",
+            post(cashfree_confirm_payment),
+        )
+        .route("/api/cashfree/orders/:order_id", get(cashfree_get_order))
+        .route("/api/v1/cashfree/orders/:order_id", get(cashfree_get_order))
+        .route(
+            "/api/payments/cashfree/orders/:order_id",
+            get(cashfree_get_order),
+        )
+        .route("/api/cashfree/refunds", post(cashfree_create_refund))
+        .route("/api/v1/cashfree/refunds", post(cashfree_create_refund))
+        .route(
+            "/api/payments/cashfree/refunds",
+            post(cashfree_create_refund),
+        )
+        // PayU India Hosted Checkout routes
+        .route(
+            "/api/payu/webhook",
+            post(payu_webhook).layer(DefaultBodyLimit::max(
+                esa_payu::webhook::MAX_PAYU_PAYLOAD_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/payu/webhook",
+            post(payu_webhook).layer(DefaultBodyLimit::max(
+                esa_payu::webhook::MAX_PAYU_PAYLOAD_BYTES,
+            )),
+        )
+        .route(
+            "/api/payments/payu/webhook",
+            post(payu_webhook).layer(DefaultBodyLimit::max(
+                esa_payu::webhook::MAX_PAYU_PAYLOAD_BYTES,
+            )),
+        )
+        .route("/api/payu/status", get(payu_status))
+        .route("/api/v1/payu/status", get(payu_status))
+        .route("/api/payments/payu/status", get(payu_status))
+        .route("/api/payu/callback/success", post(payu_callback_handler))
+        .route(
+            "/api/payments/payu/callback/success",
+            post(payu_callback_handler),
+        )
+        .route("/api/payu/callback/failure", post(payu_callback_handler))
+        .route(
+            "/api/payments/payu/callback/failure",
+            post(payu_callback_handler),
+        )
+        .route("/api/payu/callback/cancel", post(payu_callback_handler))
+        .route(
+            "/api/payments/payu/callback/cancel",
+            post(payu_callback_handler),
+        )
+        .route("/api/payu/verify", post(payu_verify_payment))
+        .route("/api/v1/payu/verify", post(payu_verify_payment))
+        .route("/api/payments/payu/verify", post(payu_verify_payment))
+        .route("/api/payu/refunds", post(payu_create_refund))
+        .route("/api/v1/payu/refunds", post(payu_create_refund))
+        .route("/api/payments/payu/refunds", post(payu_create_refund))
         .route("/api/vitals/history", get(get_vitals_history))
         .route("/api/v1/vitals/history", get(get_vitals_history))
         .route("/api/demo/trigger-spike", post(trigger_spike))
@@ -1167,6 +1287,8 @@ pub(crate) struct AppState {
     pub(crate) audit_store: Arc<AuditStore>,
     pub(crate) agent_status: Arc<std::sync::RwLock<AgentStatusState>>,
     pub(crate) razorpay: Option<Arc<RazorpayAdapter>>,
+    pub(crate) cashfree: Option<Arc<CashfreeProvider>>,
+    pub(crate) payu: Option<Arc<PayUProvider>>,
     pub(crate) vitals: VitalsStore,
     pub(crate) rate_limiter: rate_limiter::ApiRateLimiter,
     pub(crate) last_benchmark: Arc<std::sync::RwLock<Option<benchmark::BenchmarkComparison>>>,
@@ -1722,6 +1844,57 @@ async fn razorpay_webhook(
             )
                 .into_response()
         }
+        Err(WebhookStoreError::Conflict(err)) => {
+            warn!("Webhook conflict rejected: {}", err);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "conflict",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::PaymentNotFound(err)) => {
+            warn!("Webhook payment not found: {}", err);
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "payment_not_found",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::InvalidState(err)) => {
+            warn!("Webhook invalid state: {}", err);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "invalid_payment_state",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::RefundExceedsBalance {
+            payment_id,
+            requested,
+            available,
+        }) => {
+            warn!(
+                "Webhook refund exceeds balance: payment_id={}, requested={}, available={}",
+                payment_id, requested, available
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "refund_exceeds_balance",
+                    "message": format!("Refund amount {} exceeds available balance {} for payment {}", requested, available, payment_id)
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1839,11 +2012,34 @@ async fn razorpay_create_order(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let order_id = order.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    if order_id.is_empty() {
+        return Err(AppError::Internal(
+            "Razorpay order creation returned an empty order ID".into(),
+        ));
+    }
 
-    if !order_id.is_empty() {
-        if let Ok(mut map) = state.order_merchants.write() {
-            map.insert(order_id.to_string(), caller.merchant_id.clone());
-        }
+    let attempt = esa_core::provider::PaymentAttemptRecord {
+        transaction_id: format!("tx_{}", order_id),
+        merchant_id: caller.merchant_id.clone(),
+        provider: "razorpay".to_string(),
+        provider_order_id: Some(order_id.to_string()),
+        payment_reference: None,
+        amount_minor: req.amount_cents,
+        currency: "INR".to_string(),
+        state: "created".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .webhook_store
+        .record_payment_attempt(&attempt)
+        .await
+        .map_err(|e| {
+            error!("Failed to persist Razorpay payment attempt: {}", e);
+            AppError::Internal("Failed to persist payment attempt record in durable store".into())
+        })?;
+    if let Ok(mut map) = state.order_merchants.write() {
+        map.insert(order_id.to_string(), caller.merchant_id.clone());
     }
 
     let returned_key_id = if caller.environment == "sandbox" {
@@ -1958,7 +2154,32 @@ async fn razorpay_confirm_payment(
         }
     };
 
-    // 4. Verify against durable server-owned order-to-merchant mapping if tracked locally.
+    // 4. Verify against durable server-owned payment attempt record.
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt_for_provider("razorpay", order_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Payment order '{}' has no recorded payment attempt in durable store",
+                order_id
+            ))
+        })?;
+
+    if attempt.provider != "razorpay" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match razorpay",
+            attempt.provider
+        )));
+    }
+
+    if attempt.merchant_id != authoritative_owner {
+        return Err(AppError::Forbidden(
+            "Order ownership metadata conflicts with server-tracked order mapping".into(),
+        ));
+    }
+
     if let Ok(map) = state.order_merchants.read() {
         if let Some(tracked_merchant) = map.get(order_id) {
             if tracked_merchant != authoritative_owner {
@@ -1970,10 +2191,23 @@ async fn razorpay_confirm_payment(
     }
 
     // 5. Enforce ownership: authoritative order merchant must match caller (or caller is admin).
-    if authoritative_owner != caller.merchant_id && !caller.is_admin() {
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
             "Payment order does not belong to the authenticated merchant".into(),
         ));
+    }
+
+    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let currency = payment
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INR");
+
+    if amount_minor != attempt.amount_minor || !currency.eq_ignore_ascii_case(&attempt.currency) {
+        return Err(AppError::Conflict(format!(
+            "Payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+            amount_minor, currency, attempt.amount_minor, attempt.currency
+        )));
     }
 
     // 6. Check existing durable payment record in webhook_store.
@@ -1994,11 +2228,18 @@ async fn razorpay_confirm_payment(
                 "Payment already confirmed/captured; returning idempotent response"
             );
             return Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "already_confirmed",
                 "source": "razorpay_confirm",
                 "event_id": format!("confirm_{}", req.payment_id),
                 "payment_id": req.payment_id,
-                "payment_state": existing.state,
+                "payment_reference": req.payment_id,
+                "payment_state": format!("{:?}", existing.state).to_lowercase(),
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
                 "idempotent": true,
                 "message": "Payment has already been confirmed and processed",
             })));
@@ -2009,11 +2250,6 @@ async fn razorpay_confirm_payment(
 
     // 7. Record and transition transactionally into durable webhook_store
     let confirm_event_id = format!("confirm_{}", req.payment_id);
-    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
-    let currency = payment
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("INR");
 
     let params = esa_state::WebhookEventParams {
         provider: "razorpay",
@@ -2030,28 +2266,65 @@ async fn razorpay_confirm_payment(
 
     let store_result = state.webhook_store.process_webhook_event(&params).await;
     match store_result {
-        Ok(esa_state::WebhookProcessingResult::Applied { .. })
-        | Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
             let result = payment::apply_payment_event(&state.state_fabric, &event);
             publish_payment_side_effects(&state, &result);
+            let _ = state
+                .webhook_store
+                .update_payment_attempt_state(order_id, "captured", Some(&req.payment_id))
+                .await;
 
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "accepted",
                 "source": "razorpay_confirm",
-                "event_id": result.event_id,
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
                 "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "idempotent": false,
+                "message": "Payment authoritatively confirmed and captured",
+                "event_id": result.event_id,
                 "workload_updated": result.workload_updated,
                 "workload_id": result.workload_id,
             })))
         }
         Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "already_confirmed",
                 "source": "razorpay_confirm",
-                "event_id": confirm_event_id,
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
                 "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
                 "idempotent": true,
                 "message": "Payment has already been confirmed and processed",
+                "event_id": confirm_event_id,
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({
+                "success": false,
+                "status": "metadata_recorded",
+                "payment_state": "metadata_recorded",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
+                "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "idempotent": false,
+                "message": "Metadata recorded without state transition",
             })))
         }
         Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => Err(AppError::Conflict(
@@ -2084,6 +2357,1263 @@ async fn razorpay_confirm_payment(
             ))
         }
     }
+}
+
+// ==========================================
+// Cashfree Payment Gateway Handlers
+// ==========================================
+
+async fn cashfree_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let caller = api_keys::authenticate_caller(&headers).await.ok();
+    let is_sandbox = caller
+        .as_ref()
+        .map(|c| c.environment == "sandbox")
+        .unwrap_or(false);
+
+    if let Some(cf) = &state.cashfree {
+        Json(serde_json::json!({
+            "cashfree": cf.config().public_status(is_sandbox),
+            "health": cf.health(),
+        }))
+    } else {
+        Json(serde_json::json!({
+            "cashfree": {
+                "configured": false,
+                "message": "Cashfree provider not configured"
+            }
+        }))
+    }
+}
+
+async fn cashfree_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let provider = match &state.cashfree {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Cashfree provider not configured" })),
+            ));
+        }
+    };
+
+    let mut header_map = std::collections::HashMap::new();
+    for (k, v) in headers.iter() {
+        if let Ok(val) = v.to_str() {
+            header_map.insert(k.as_str().to_lowercase(), val.to_string());
+        }
+    }
+
+    let parsed = match provider.verify_webhook(body.as_ref(), &header_map) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!("Cashfree webhook verification rejected: {}", err);
+            let status = match &err {
+                esa_core::provider::ProviderError::InvalidSignature { .. }
+                | esa_core::provider::ProviderError::AuthenticationFailed { .. } => {
+                    StatusCode::UNAUTHORIZED
+                }
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return Err((
+                status,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            ));
+        }
+    };
+
+    let params = esa_state::WebhookEventParams {
+        provider: "cashfree",
+        provider_event_id: &parsed.provider_event_id,
+        event_type: parsed.event_type.clone(),
+        payment_id: &parsed.provider_payment_id,
+        amount_minor: parsed.amount_minor,
+        currency: &parsed.currency,
+        refund_id: parsed.refund_id.as_deref(),
+        refund_amount_minor: parsed.refund_amount_minor,
+        refund_status: parsed.refund_status.as_deref(),
+        payload: &parsed.raw_payload,
+    };
+
+    match state.webhook_store.process_webhook_event(&params).await {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
+            let payment_event = PaymentEvent {
+                event_id: parsed.provider_event_id.clone(),
+                event_type: parsed.event_type.clone(),
+                timestamp: chrono::Utc::now(),
+                region: Region::IndiaSouth,
+                payment_method_class: PaymentMethodClass::Upi,
+                pseudonymous_reference: format!("PSEUDO-{}", parsed.provider_payment_id),
+                amount_cents: Some(parsed.amount_minor),
+                amount_minor: Some(parsed.amount_minor),
+                currency: parsed.currency.clone(),
+                processing_latency_ms: Some(92.0),
+                success: matches!(
+                    parsed.event_type,
+                    PaymentEventType::PaymentCaptured | PaymentEventType::RefundProcessed
+                ),
+            };
+            let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+            publish_payment_side_effects(&state, &apply_res);
+
+            info!(
+                "Cashfree webhook newly applied: {}",
+                parsed.provider_event_id
+            );
+            Ok(Json(
+                serde_json::json!({ "status": "OK", "processed": true }),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
+            info!(
+                "Cashfree webhook already processed (idempotent duplicate): {}",
+                parsed.provider_event_id
+            );
+            Ok(Json(
+                serde_json::json!({ "status": "already_processed", "duplicate": true }),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => {
+            warn!(
+                "Cashfree webhook currently in-flight: {}",
+                parsed.provider_event_id
+            );
+            Err((
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::json!({ "status": "in_flight", "message": "Concurrent webhook delivery in progress" }),
+                ),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({ "status": "metadata_recorded" })))
+        }
+        Ok(esa_state::WebhookProcessingResult::Unapplied { reason, .. }) => {
+            warn!("Cashfree webhook unapplied: {}", reason);
+            Ok(Json(
+                serde_json::json!({ "status": "unapplied", "reason": reason }),
+            ))
+        }
+        Err(err) => {
+            error!("Failed to persist Cashfree webhook: {}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            ))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CashfreeConfirmRequest {
+    order_id: String,
+    #[allow(dead_code)]
+    payment_id: Option<String>,
+}
+
+async fn cashfree_confirm_payment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CashfreeConfirmRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!("Authentication required to confirm payment: {}", e))
+    })?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
+    let provider = state
+        .cashfree
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Cashfree provider not configured".into()))?;
+
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt_for_provider("cashfree", &req.order_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Order '{}' has no recorded payment attempt in durable store",
+                req.order_id
+            ))
+        })?;
+
+    if attempt.provider != "cashfree" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match cashfree",
+            attempt.provider
+        )));
+    }
+
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Order does not belong to the authenticated merchant".into(),
+        ));
+    }
+
+    let payment_status = provider
+        .get_payment_status(&req.order_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to retrieve Cashfree payment status: {}", e))
+        })?;
+
+    if payment_status.status != esa_core::provider::ProviderPaymentStatus::Captured {
+        return Err(AppError::Forbidden(format!(
+            "Payment status is not captured: {:?}",
+            payment_status.status
+        )));
+    }
+
+    if payment_status.amount_minor != attempt.amount_minor
+        || !payment_status
+            .currency
+            .eq_ignore_ascii_case(&attempt.currency)
+    {
+        return Err(AppError::Conflict(format!(
+            "Cashfree payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+            payment_status.amount_minor, payment_status.currency, attempt.amount_minor, attempt.currency
+        )));
+    }
+
+    // Check if existing durable payment record is already Captured/Refunded
+    if let Ok(Some(existing)) = state
+        .webhook_store
+        .get_payment_record(&payment_status.provider_payment_id)
+        .await
+    {
+        if existing.state == PaymentState::Captured
+            || existing.state == PaymentState::PartiallyRefunded
+            || existing.state == PaymentState::Refunded
+        {
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "status": "already_confirmed",
+                "source": "cashfree_confirm",
+                "payment_state": format!("{:?}", existing.state).to_lowercase(),
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": true,
+                "message": "Payment has already been confirmed and processed",
+            })));
+        }
+    }
+
+    let confirm_event_id = format!("cf_confirm_{}", req.order_id);
+    let params = esa_state::WebhookEventParams {
+        provider: "cashfree",
+        provider_event_id: &confirm_event_id,
+        event_type: PaymentEventType::PaymentCaptured,
+        payment_id: &payment_status.provider_payment_id,
+        amount_minor: payment_status.amount_minor,
+        currency: &payment_status.currency,
+        refund_id: None,
+        refund_amount_minor: None,
+        refund_status: None,
+        payload: &payment_status.raw_response,
+    };
+
+    let store_result = state.webhook_store.process_webhook_event(&params).await;
+    match store_result {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
+            let event = PaymentEvent {
+                event_id: confirm_event_id.clone(),
+                event_type: PaymentEventType::PaymentCaptured,
+                timestamp: chrono::Utc::now(),
+                region: Region::IndiaSouth,
+                payment_method_class: PaymentMethodClass::Upi,
+                pseudonymous_reference: format!("PSEUDO-{}", payment_status.provider_payment_id),
+                amount_cents: Some(payment_status.amount_minor),
+                amount_minor: Some(payment_status.amount_minor),
+                currency: payment_status.currency.clone(),
+                processing_latency_ms: Some(95.0),
+                success: true,
+            };
+            let result = payment::apply_payment_event(&state.state_fabric, &event);
+            publish_payment_side_effects(&state, &result);
+            let _ = state
+                .webhook_store
+                .update_payment_attempt_state(
+                    &req.order_id,
+                    "captured",
+                    Some(&payment_status.provider_payment_id),
+                )
+                .await;
+
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "status": "accepted",
+                "source": "cashfree_confirm",
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": false,
+                "message": "Payment authoritatively captured and verified with Cashfree",
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "status": "already_confirmed",
+                "source": "cashfree_confirm",
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": true,
+                "message": "Payment has already been confirmed and processed",
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({
+                "success": false,
+                "status": "metadata_recorded",
+                "payment_state": "metadata_recorded",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": false,
+                "message": "Metadata recorded without payment state transition",
+            })))
+        }
+        Err(err) => Err(AppError::Internal(format!(
+            "Failed to record payment in store: {}",
+            err
+        ))),
+        Ok(_) => Ok(Json(serde_json::json!({
+            "success": true,
+            "status": "accepted",
+            "payment_state": "captured",
+            "transaction_id": attempt.transaction_id,
+            "provider": "cashfree",
+            "provider_order_id": req.order_id,
+            "order_id": req.order_id,
+            "payment_reference": payment_status.provider_payment_id,
+            "payment_id": payment_status.provider_payment_id,
+            "cf_payment_id": payment_status.provider_payment_id,
+            "amount_minor": payment_status.amount_minor,
+            "currency": payment_status.currency,
+            "idempotent": false,
+            "message": "Payment authoritatively confirmed",
+        }))),
+    }
+}
+
+async fn cashfree_get_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers)
+        .await
+        .map_err(|e| AppError::Unauthorized(format!("Authentication required: {}", e)))?;
+
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt(&order_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Order '{}' has no recorded payment attempt in durable store",
+                order_id
+            ))
+        })?;
+
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Order does not belong to the authenticated merchant".into(),
+        ));
+    }
+
+    let provider = state
+        .cashfree
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Cashfree provider not configured".into()))?;
+
+    let details = provider
+        .get_order(&order_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok(Json(serde_json::to_value(&details).unwrap_or_default()))
+}
+
+#[derive(Deserialize)]
+struct CashfreeRefundRequest {
+    order_id: String,
+    refund_id: String,
+    amount_minor: u64,
+    reason: Option<String>,
+}
+
+async fn cashfree_create_refund(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CashfreeRefundRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers)
+        .await
+        .map_err(|e| AppError::Unauthorized(format!("Authentication required: {}", e)))?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt_for_provider("cashfree", &req.order_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Order '{}' has no recorded payment attempt in durable store",
+                req.order_id
+            ))
+        })?;
+
+    if attempt.provider != "cashfree" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match cashfree",
+            attempt.provider
+        )));
+    }
+
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Order does not belong to caller".into(),
+        ));
+    }
+
+    // 1. Enforce captured state from attempt record
+    if attempt.state != "captured" && attempt.state != "partially_refunded" {
+        return Err(AppError::BadRequest(format!(
+            "Only captured or partially refunded payments can be refunded (current state: '{}')",
+            attempt.state
+        )));
+    }
+
+    // 2. Validate against attempt amount
+    if req.amount_minor == 0 || req.amount_minor > attempt.amount_minor {
+        return Err(AppError::BadRequest(format!(
+            "Refund amount exceeds refundable balance: requested {} paise, but maximum refundable is {} paise",
+            req.amount_minor, attempt.amount_minor
+        )));
+    }
+
+    let payment_key = attempt
+        .payment_reference
+        .as_deref()
+        .unwrap_or(&req.order_id);
+
+    // 3. Atomically reserve refund balance in durable store before calling upstream
+    let reservation = state
+        .webhook_store
+        .reserve_refund(
+            "cashfree",
+            payment_key,
+            &req.refund_id,
+            req.amount_minor,
+            "INR",
+        )
+        .await
+        .map_err(|e| match e {
+            esa_state::WebhookStoreError::RefundExceedsBalance { available, .. } => {
+                AppError::BadRequest(format!(
+                    "Refund amount {} exceeds refundable balance of {} paise",
+                    req.amount_minor, available
+                ))
+            }
+            esa_state::WebhookStoreError::PaymentNotFound(_) => AppError::BadRequest(format!(
+                "Payment record not found for '{}'; payment must be Captured or PartiallyRefunded",
+                payment_key
+            )),
+            esa_state::WebhookStoreError::InvalidState(s) => AppError::BadRequest(s),
+            esa_state::WebhookStoreError::Conflict(s) => AppError::Conflict(s),
+            other => AppError::Internal(format!("Failed to reserve refund balance: {}", other)),
+        })?;
+
+    if let esa_core::provider::RefundReservationOutcome::AlreadyProcessed { amount_minor } =
+        reservation
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "PROCESSED",
+            "refund_id": req.refund_id,
+            "amount_minor": amount_minor,
+            "idempotent": true,
+            "message": "Refund has already been processed",
+        })));
+    }
+
+    let provider = state
+        .cashfree
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Cashfree provider not configured".into()))?;
+
+    let params = esa_core::provider::CreateRefundParams {
+        provider_payment_id: req.order_id.clone(),
+        provider_order_id: Some(req.order_id.clone()),
+        refund_id: req.refund_id.clone(),
+        amount_minor: req.amount_minor,
+        currency: "INR".to_string(),
+        reason: req.reason,
+        merchant_id: caller.merchant_id,
+    };
+
+    let refund = match provider.create_refund(&params).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let is_timeout = matches!(e, esa_core::provider::ProviderError::Timeout { .. })
+                || err_str.to_lowercase().contains("timeout")
+                || err_str.to_lowercase().contains("timed out");
+
+            if is_timeout {
+                return Err(AppError::Internal(format!(
+                    "Upstream Cashfree request timed out: {}. Refund reservation remains pending until reconciled.",
+                    e
+                )));
+            } else {
+                let refund_event_id = format!("cf_ref_fail_{}", req.refund_id);
+                let webhook_params = esa_state::WebhookEventParams {
+                    provider: "cashfree",
+                    provider_event_id: &refund_event_id,
+                    event_type: PaymentEventType::RefundFailed,
+                    payment_id: payment_key,
+                    amount_minor: req.amount_minor,
+                    currency: "INR",
+                    refund_id: Some(&req.refund_id),
+                    refund_amount_minor: Some(req.amount_minor),
+                    refund_status: Some("failed"),
+                    payload: &serde_json::json!({ "error": err_str }),
+                };
+                let _ = state
+                    .webhook_store
+                    .process_webhook_event(&webhook_params)
+                    .await;
+                return Err(AppError::Internal(format!(
+                    "Cashfree refund rejected: {}",
+                    e
+                )));
+            }
+        }
+    };
+
+    let (event_type, canonical_status) = match refund.status.to_uppercase().as_str() {
+        "SUCCESS" | "PROCESSED" => (PaymentEventType::RefundProcessed, "processed"),
+        "FAILED" | "REJECTED" => (PaymentEventType::RefundFailed, "failed"),
+        _ => (PaymentEventType::RefundCreated, "pending"),
+    };
+
+    let refund_event_id = format!("cf_ref_{}", req.refund_id);
+    let webhook_params = esa_state::WebhookEventParams {
+        provider: "cashfree",
+        provider_event_id: &refund_event_id,
+        event_type,
+        payment_id: payment_key,
+        amount_minor: req.amount_minor,
+        currency: "INR",
+        refund_id: Some(&req.refund_id),
+        refund_amount_minor: Some(req.amount_minor),
+        refund_status: Some(canonical_status),
+        payload: &refund.raw_response,
+    };
+    state
+        .webhook_store
+        .process_webhook_event(&webhook_params)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to record refund in durable store: {}", e))
+        })?;
+
+    Ok(Json(serde_json::to_value(&refund).unwrap_or_default()))
+}
+
+// ==========================================
+// PayU India Hosted Checkout Handlers
+// ==========================================
+
+async fn payu_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let caller = api_keys::authenticate_caller(&headers).await.ok();
+    let is_sandbox = caller
+        .as_ref()
+        .map(|c| c.environment == "sandbox")
+        .unwrap_or(false);
+
+    if let Some(p) = &state.payu {
+        Json(serde_json::json!({
+            "payu": p.config().public_status(is_sandbox),
+            "health": p.health(),
+        }))
+    } else {
+        Json(serde_json::json!({
+            "payu": {
+                "configured": false,
+                "message": "PayU provider not configured"
+            }
+        }))
+    }
+}
+
+async fn payu_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let provider = match &state.payu {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "PayU provider not configured" })),
+            ));
+        }
+    };
+
+    let mut header_map = std::collections::HashMap::new();
+    for (k, v) in headers.iter() {
+        if let Ok(val) = v.to_str() {
+            header_map.insert(k.as_str().to_lowercase(), val.to_string());
+        }
+    }
+
+    let parsed = match provider.verify_webhook(body.as_ref(), &header_map) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!("PayU webhook verification failed: {}", err);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            ));
+        }
+    };
+
+    let params = esa_state::WebhookEventParams {
+        provider: "payu",
+        provider_event_id: &parsed.provider_event_id,
+        event_type: parsed.event_type.clone(),
+        payment_id: &parsed.provider_payment_id,
+        amount_minor: parsed.amount_minor,
+        currency: &parsed.currency,
+        refund_id: parsed.refund_id.as_deref(),
+        refund_amount_minor: parsed.refund_amount_minor,
+        refund_status: parsed.refund_status.as_deref(),
+        payload: &parsed.raw_payload,
+    };
+
+    match state.webhook_store.process_webhook_event(&params).await {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
+            let payment_event = PaymentEvent {
+                event_id: parsed.provider_event_id.clone(),
+                event_type: parsed.event_type.clone(),
+                timestamp: chrono::Utc::now(),
+                region: Region::IndiaNorth,
+                payment_method_class: PaymentMethodClass::Upi,
+                pseudonymous_reference: format!("PSEUDO-{}", parsed.provider_payment_id),
+                amount_cents: Some(parsed.amount_minor),
+                amount_minor: Some(parsed.amount_minor),
+                currency: parsed.currency.clone(),
+                processing_latency_ms: Some(88.0),
+                success: matches!(
+                    parsed.event_type,
+                    PaymentEventType::PaymentCaptured | PaymentEventType::RefundProcessed
+                ),
+            };
+            let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+            publish_payment_side_effects(&state, &apply_res);
+
+            info!("PayU webhook newly applied: {}", parsed.provider_event_id);
+            Ok(Json(
+                serde_json::json!({ "status": "OK", "processed": true }),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
+            info!(
+                "PayU webhook already processed (idempotent duplicate): {}",
+                parsed.provider_event_id
+            );
+            Ok(Json(
+                serde_json::json!({ "status": "already_processed", "duplicate": true }),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => {
+            warn!(
+                "PayU webhook currently in-flight: {}",
+                parsed.provider_event_id
+            );
+            Err((
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::json!({ "status": "in_flight", "message": "Concurrent webhook delivery in progress" }),
+                ),
+            ))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({ "status": "metadata_recorded" })))
+        }
+        Ok(esa_state::WebhookProcessingResult::Unapplied { reason, .. }) => {
+            warn!("PayU webhook unapplied: {}", reason);
+            Ok(Json(
+                serde_json::json!({ "status": "unapplied", "reason": reason }),
+            ))
+        }
+        Err(err) => {
+            error!("Failed to persist PayU webhook: {}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            ))
+        }
+    }
+}
+
+async fn payu_callback_handler(
+    State(state): State<AppState>,
+    _headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let provider = match &state.payu {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "PayU provider not configured" })),
+            ));
+        }
+    };
+
+    let header_map = std::collections::HashMap::new();
+    let parsed = match provider.verify_webhook(body.as_ref(), &header_map) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!("PayU callback reverse hash verification failed: {}", err);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            ));
+        }
+    };
+
+    let txnid = parsed
+        .provider_order_id
+        .as_deref()
+        .unwrap_or(&parsed.provider_payment_id);
+
+    // Verify attempt ownership record exists in durable store
+    let attempt = match state
+        .webhook_store
+        .get_payment_attempt_for_provider("payu", txnid)
+        .await
+    {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            warn!(
+                "PayU callback rejected: missing durable payment attempt for txnid '{}'",
+                txnid
+            );
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "payment_attempt_not_found",
+                    "message": format!("Transaction '{}' has no recorded payment attempt in durable store", txnid)
+                })),
+            ));
+        }
+        Err(e) => {
+            error!("Failed to retrieve payment attempt in PayU callback: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    if attempt.provider != "payu" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "provider_mismatch",
+                "message": format!("Attempt provider '{}' does not match payu", attempt.provider)
+            })),
+        ));
+    }
+
+    // Mandatory authoritative check via PayU Verify Payment API before confirming payment
+    let verify_res = match provider.get_payment_status(txnid).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("PayU callback authoritative verification failed: {}", e);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "authoritative_verification_failed",
+                    "message": format!("Could not verify PayU transaction: {}", e)
+                })),
+            ));
+        }
+    };
+
+    if verify_res.status != esa_core::provider::ProviderPaymentStatus::Captured {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "failed",
+                "message": "Transaction is not marked successful by PayU upstream"
+            })),
+        ));
+    }
+
+    if verify_res.amount_minor != attempt.amount_minor
+        || !verify_res.currency.eq_ignore_ascii_case(&attempt.currency)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "amount_currency_mismatch",
+                "message": format!(
+                    "PayU upstream amount/currency ({} {}) does not match attempt ({} {})",
+                    verify_res.amount_minor, verify_res.currency, attempt.amount_minor, attempt.currency
+                )
+            })),
+        ));
+    }
+
+    let params = esa_state::WebhookEventParams {
+        provider: "payu",
+        provider_event_id: &parsed.provider_event_id,
+        event_type: PaymentEventType::PaymentCaptured,
+        payment_id: &verify_res.provider_payment_id,
+        amount_minor: verify_res.amount_minor,
+        currency: &verify_res.currency,
+        refund_id: None,
+        refund_amount_minor: None,
+        refund_status: None,
+        payload: &verify_res.raw_response,
+    };
+
+    match state.webhook_store.process_webhook_event(&params).await {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
+            let payment_event = PaymentEvent {
+                event_id: parsed.provider_event_id.clone(),
+                event_type: PaymentEventType::PaymentCaptured,
+                timestamp: chrono::Utc::now(),
+                region: Region::IndiaNorth,
+                payment_method_class: PaymentMethodClass::Upi,
+                pseudonymous_reference: format!("PSEUDO-{}", verify_res.provider_payment_id),
+                amount_cents: Some(verify_res.amount_minor),
+                amount_minor: Some(verify_res.amount_minor),
+                currency: verify_res.currency.clone(),
+                processing_latency_ms: Some(88.0),
+                success: true,
+            };
+            let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
+            publish_payment_side_effects(&state, &apply_res);
+            let _ = state
+                .webhook_store
+                .update_payment_attempt_state(
+                    txnid,
+                    "captured",
+                    Some(&verify_res.provider_payment_id),
+                )
+                .await;
+        }
+        Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
+            info!(
+                "PayU callback already processed (duplicate delivery): {}",
+                parsed.provider_event_id
+            );
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            // Metadata only; do not emit state side-effects
+        }
+        Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "PayU callback is currently in-flight" })),
+            ));
+        }
+        Ok(esa_state::WebhookProcessingResult::Unapplied { reason, .. }) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::json!({ "error": format!("Payment event unapplied: {}", reason) }),
+                ),
+            ));
+        }
+        Err(err) => {
+            error!(
+                "Failed to persist PayU callback event in durable store: {}",
+                err
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({ "error": format!("Durable persistence failed: {}", err) }),
+                ),
+            ));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "txnid": txnid,
+        "mihpayid": verify_res.provider_payment_id,
+        "amount_minor": verify_res.amount_minor,
+        "currency": verify_res.currency,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PayUVerifyPaymentRequest {
+    txnid: String,
+}
+
+async fn payu_verify_payment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PayUVerifyPaymentRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers)
+        .await
+        .map_err(|e| AppError::Unauthorized(format!("Authentication required: {}", e)))?;
+
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt_for_provider("payu", &req.txnid)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Transaction '{}' has no recorded payment attempt in durable store",
+                req.txnid
+            ))
+        })?;
+
+    if attempt.provider != "payu" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match payu",
+            attempt.provider
+        )));
+    }
+
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Transaction does not belong to caller".into(),
+        ));
+    }
+
+    let provider = state
+        .payu
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("PayU provider not configured".into()))?;
+
+    let status = provider
+        .get_payment_status(&req.txnid)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if status.status == esa_core::provider::ProviderPaymentStatus::Captured {
+        if status.amount_minor != attempt.amount_minor
+            || !status.currency.eq_ignore_ascii_case(&attempt.currency)
+        {
+            return Err(AppError::Conflict(format!(
+                "PayU payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+                status.amount_minor, status.currency, attempt.amount_minor, attempt.currency
+            )));
+        }
+
+        let evt_id = format!("payu_ver_{}", req.txnid);
+        let params = esa_state::WebhookEventParams {
+            provider: "payu",
+            provider_event_id: &evt_id,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &status.provider_payment_id,
+            amount_minor: status.amount_minor,
+            currency: &status.currency,
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &status.raw_response,
+        };
+        state
+            .webhook_store
+            .process_webhook_event(&params)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to record verification in durable store: {}",
+                    e
+                ))
+            })?;
+
+        let _ = state
+            .webhook_store
+            .update_payment_attempt_state(&req.txnid, "captured", Some(&status.provider_payment_id))
+            .await;
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "status": "success",
+            "payment_state": "captured",
+            "transaction_id": attempt.transaction_id,
+            "provider": "payu",
+            "provider_order_id": req.txnid,
+            "txnid": req.txnid,
+            "payment_reference": status.provider_payment_id,
+            "mihpayid": status.provider_payment_id,
+            "amount_minor": status.amount_minor,
+            "currency": status.currency,
+            "idempotent": false,
+            "message": "Payment verified and authoritatively captured with PayU",
+        })));
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": false,
+        "status": format!("{:?}", status.status).to_lowercase(),
+        "payment_state": format!("{:?}", status.status).to_lowercase(),
+        "transaction_id": attempt.transaction_id,
+        "provider": "payu",
+        "provider_order_id": req.txnid,
+        "txnid": req.txnid,
+        "payment_reference": status.provider_payment_id,
+        "mihpayid": status.provider_payment_id,
+        "amount_minor": status.amount_minor,
+        "currency": status.currency,
+        "idempotent": false,
+        "message": format!("PayU payment in state: {:?}", status.status),
+    })))
+}
+
+#[derive(Deserialize)]
+struct PayURefundRequest {
+    mihpayid: String,
+    refund_id: String,
+    amount_minor: u64,
+    reason: Option<String>,
+}
+
+async fn payu_create_refund(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PayURefundRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let caller = api_keys::authenticate_caller(&headers)
+        .await
+        .map_err(|e| AppError::Unauthorized(format!("Authentication required: {}", e)))?;
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
+    let attempt = state
+        .webhook_store
+        .get_payment_attempt_for_provider("payu", &req.mihpayid)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Transaction '{}' has no recorded payment attempt in durable store",
+                req.mihpayid
+            ))
+        })?;
+
+    if attempt.provider != "payu" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match payu",
+            attempt.provider
+        )));
+    }
+
+    if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+        return Err(AppError::Forbidden(
+            "Transaction does not belong to caller".into(),
+        ));
+    }
+
+    // 1. Enforce captured state from attempt record
+    if attempt.state != "captured" && attempt.state != "partially_refunded" {
+        return Err(AppError::BadRequest(format!(
+            "Only captured or partially refunded payments can be refunded (current state: '{}')",
+            attempt.state
+        )));
+    }
+
+    // 2. Validate against attempt amount
+    if req.amount_minor == 0 || req.amount_minor > attempt.amount_minor {
+        return Err(AppError::BadRequest(format!(
+            "Refund amount exceeds refundable balance: requested {} paise, but maximum refundable is {} paise",
+            req.amount_minor, attempt.amount_minor
+        )));
+    }
+
+    let payment_key = attempt
+        .payment_reference
+        .as_deref()
+        .unwrap_or(&req.mihpayid);
+
+    // 3. Atomically reserve refund balance in durable store before calling upstream
+    let reservation = state
+        .webhook_store
+        .reserve_refund("payu", payment_key, &req.refund_id, req.amount_minor, "INR")
+        .await
+        .map_err(|e| match e {
+            esa_state::WebhookStoreError::RefundExceedsBalance { available, .. } => {
+                AppError::BadRequest(format!(
+                    "Refund amount {} exceeds refundable balance of {} paise",
+                    req.amount_minor, available
+                ))
+            }
+            esa_state::WebhookStoreError::PaymentNotFound(_) => AppError::BadRequest(format!(
+                "Payment record not found for '{}'; payment must be Captured or PartiallyRefunded",
+                payment_key
+            )),
+            esa_state::WebhookStoreError::InvalidState(s) => AppError::BadRequest(s),
+            esa_state::WebhookStoreError::Conflict(s) => AppError::Conflict(s),
+            other => AppError::Internal(format!("Failed to reserve refund balance: {}", other)),
+        })?;
+
+    if let esa_core::provider::RefundReservationOutcome::AlreadyProcessed { amount_minor } =
+        reservation
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "PROCESSED",
+            "refund_id": req.refund_id,
+            "amount_minor": amount_minor,
+            "idempotent": true,
+            "message": "Refund has already been processed",
+        })));
+    }
+
+    let provider = state
+        .payu
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("PayU provider not configured".into()))?;
+
+    let params = esa_core::provider::CreateRefundParams {
+        provider_payment_id: req.mihpayid.clone(),
+        provider_order_id: None,
+        refund_id: req.refund_id.clone(),
+        amount_minor: req.amount_minor,
+        currency: "INR".to_string(),
+        reason: req.reason,
+        merchant_id: caller.merchant_id,
+    };
+
+    let refund = match provider.create_refund(&params).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let is_timeout = matches!(e, esa_core::provider::ProviderError::Timeout { .. })
+                || err_str.to_lowercase().contains("timeout")
+                || err_str.to_lowercase().contains("timed out");
+
+            if is_timeout {
+                return Err(AppError::Internal(format!(
+                    "Upstream PayU request timed out: {}. Refund reservation remains pending until reconciled.",
+                    e
+                )));
+            } else {
+                let refund_event_id = format!("payu_ref_fail_{}", req.refund_id);
+                let webhook_params = esa_state::WebhookEventParams {
+                    provider: "payu",
+                    provider_event_id: &refund_event_id,
+                    event_type: PaymentEventType::RefundFailed,
+                    payment_id: payment_key,
+                    amount_minor: req.amount_minor,
+                    currency: "INR",
+                    refund_id: Some(&req.refund_id),
+                    refund_amount_minor: Some(req.amount_minor),
+                    refund_status: Some("failed"),
+                    payload: &serde_json::json!({ "error": err_str }),
+                };
+                let _ = state
+                    .webhook_store
+                    .process_webhook_event(&webhook_params)
+                    .await;
+                return Err(AppError::Internal(format!("PayU refund rejected: {}", e)));
+            }
+        }
+    };
+
+    let (event_type, canonical_status) = match refund.status.to_uppercase().as_str() {
+        "SUCCESS" | "PROCESSED" | "1" => (PaymentEventType::RefundProcessed, "processed"),
+        "FAILED" | "REJECTED" | "FAILURE" => (PaymentEventType::RefundFailed, "failed"),
+        _ => (PaymentEventType::RefundCreated, "pending"),
+    };
+
+    let refund_event_id = format!("payu_ref_{}", req.refund_id);
+    let webhook_params = esa_state::WebhookEventParams {
+        provider: "payu",
+        provider_event_id: &refund_event_id,
+        event_type,
+        payment_id: payment_key,
+        amount_minor: req.amount_minor,
+        currency: "INR",
+        refund_id: Some(&req.refund_id),
+        refund_amount_minor: Some(req.amount_minor),
+        refund_status: Some(canonical_status),
+        payload: &refund.raw_response,
+    };
+    state
+        .webhook_store
+        .process_webhook_event(&webhook_params)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to record refund in durable store: {}", e))
+        })?;
+
+    Ok(Json(serde_json::to_value(&refund).unwrap_or_default()))
 }
 
 async fn get_vitals_history(
@@ -3441,6 +4971,7 @@ async fn run_benchmark_harness(
 
 #[derive(Debug)]
 enum AppError {
+    BadRequest(String),
     NotFound(String),
     Internal(String),
     Unauthorized(String),
@@ -3457,6 +4988,7 @@ impl From<EsaError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let (status, err_msg) = match self {
+            AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
             AppError::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
             AppError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
@@ -3481,8 +5013,16 @@ struct UniversalCheckoutRequest {
     gateway: String,
     #[serde(default)]
     method: Option<String>,
+    #[serde(default)]
+    payment_method: Option<String>,
     #[allow(dead_code)]
     customer_id: Option<String>,
+    #[serde(default)]
+    customer_email: Option<String>,
+    #[serde(default)]
+    customer_phone: Option<String>,
+    #[serde(default)]
+    return_url: Option<String>,
 }
 
 fn default_currency() -> String {
@@ -3516,13 +5056,61 @@ async fn list_gateways(
         .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
         .unwrap_or(false);
     let rzp_override = overrides.get("razorpay").copied();
-    let rzp_healthy = rzp_override.unwrap_or(!rzp_is_degraded);
 
-    let stripe_healthy = overrides.get("stripe").copied().unwrap_or(true);
-    let phonepe_healthy = overrides.get("phonepe").copied().unwrap_or(true);
-    let cashfree_healthy = overrides.get("cashfree").copied().unwrap_or(true);
-    let paytm_healthy = overrides.get("paytm").copied().unwrap_or(true);
-    let adyen_healthy = overrides.get("adyen").copied().unwrap_or(true);
+    let (rzp_healthy, rzp_lat, rzp_sr) = if let Some(rzp) = &state.razorpay {
+        use esa_core::provider::PaymentProvider;
+        let h = rzp.health();
+        let healthy = rzp_override.unwrap_or(h.is_healthy && !rzp_is_degraded);
+        let lat = if healthy { h.p95_latency_ms } else { 380.0 };
+        let sr = if healthy { h.success_rate } else { 0.842 };
+        (healthy, lat, sr)
+    } else {
+        let healthy = rzp_override.unwrap_or(false);
+        (
+            healthy,
+            if healthy { 85.0 } else { 380.0 },
+            if healthy { 0.994 } else { 0.842 },
+        )
+    };
+
+    let cashfree_override = overrides.get("cashfree").copied();
+    let (cashfree_healthy, cashfree_lat, cashfree_sr) = if let Some(cf) = &state.cashfree {
+        use esa_core::provider::PaymentProvider;
+        let h = cf.health();
+        let healthy = cashfree_override.unwrap_or(h.is_healthy);
+        let lat = if healthy { h.p95_latency_ms } else { 380.0 };
+        let sr = if healthy { h.success_rate } else { 0.840 };
+        (healthy, lat, sr)
+    } else {
+        let healthy = cashfree_override.unwrap_or(false);
+        (
+            healthy,
+            if healthy { 92.0 } else { 380.0 },
+            if healthy { 0.992 } else { 0.840 },
+        )
+    };
+
+    let payu_override = overrides.get("payu").copied();
+    let (payu_healthy, payu_lat, payu_sr) = if let Some(pu) = &state.payu {
+        use esa_core::provider::PaymentProvider;
+        let h = pu.health();
+        let healthy = payu_override.unwrap_or(h.is_healthy);
+        let lat = if healthy { h.p95_latency_ms } else { 390.0 };
+        let sr = if healthy { h.success_rate } else { 0.850 };
+        (healthy, lat, sr)
+    } else {
+        let healthy = payu_override.unwrap_or(false);
+        (
+            healthy,
+            if healthy { 95.0 } else { 390.0 },
+            if healthy { 0.993 } else { 0.850 },
+        )
+    };
+
+    let stripe_healthy = overrides.get("stripe").copied().unwrap_or(false);
+    let phonepe_healthy = overrides.get("phonepe").copied().unwrap_or(false);
+    let paytm_healthy = overrides.get("paytm").copied().unwrap_or(false);
+    let adyen_healthy = overrides.get("adyen").copied().unwrap_or(false);
 
     let gateways = vec![
         GatewayHealth {
@@ -3533,14 +5121,40 @@ async fn list_gateways(
             } else {
                 WorkloadState::Degraded
             },
-            p95_latency_ms: if rzp_healthy { 85.0 } else { 380.0 },
-            success_rate: if rzp_healthy { 0.994 } else { 0.842 },
-            active_traffic_pct: if rzp_healthy { 45.0 } else { 5.0 },
+            p95_latency_ms: rzp_lat,
+            success_rate: rzp_sr,
+            active_traffic_pct: if rzp_healthy { 40.0 } else { 5.0 },
             is_healthy: rzp_healthy,
         },
         GatewayHealth {
+            gateway: PaymentGateway::Cashfree,
+            name: "Cashfree Payment Gateway (Orders, UPI & Drop Checkout)".to_string(),
+            status: if cashfree_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: cashfree_lat,
+            success_rate: cashfree_sr,
+            active_traffic_pct: if cashfree_healthy { 30.0 } else { 0.0 },
+            is_healthy: cashfree_healthy,
+        },
+        GatewayHealth {
+            gateway: PaymentGateway::PayU,
+            name: "PayU India (Hosted Checkout, UPI & Cards)".to_string(),
+            status: if payu_healthy {
+                WorkloadState::Healthy
+            } else {
+                WorkloadState::Degraded
+            },
+            p95_latency_ms: payu_lat,
+            success_rate: payu_sr,
+            active_traffic_pct: if payu_healthy { 20.0 } else { 0.0 },
+            is_healthy: payu_healthy,
+        },
+        GatewayHealth {
             gateway: PaymentGateway::PhonePe,
-            name: "PhonePe Direct UPI Switch".to_string(),
+            name: "PhonePe Direct UPI Switch (Extensible Adapter)".to_string(),
             status: if phonepe_healthy {
                 WorkloadState::Healthy
             } else {
@@ -3551,7 +5165,7 @@ async fn list_gateways(
             active_traffic_pct: if phonepe_healthy && !rzp_healthy {
                 65.0
             } else {
-                25.0
+                5.0
             },
             is_healthy: phonepe_healthy,
         },
@@ -3565,25 +5179,12 @@ async fn list_gateways(
             },
             p95_latency_ms: if stripe_healthy { 110.0 } else { 420.0 },
             success_rate: if stripe_healthy { 0.998 } else { 0.890 },
-            active_traffic_pct: 15.0,
+            active_traffic_pct: 5.0,
             is_healthy: stripe_healthy,
         },
         GatewayHealth {
-            gateway: PaymentGateway::Cashfree,
-            name: "Cashfree Payouts & Auto-Collect".to_string(),
-            status: if cashfree_healthy {
-                WorkloadState::Healthy
-            } else {
-                WorkloadState::Degraded
-            },
-            p95_latency_ms: 92.0,
-            success_rate: 0.992,
-            active_traffic_pct: 10.0,
-            is_healthy: cashfree_healthy,
-        },
-        GatewayHealth {
             gateway: PaymentGateway::Paytm,
-            name: "Paytm All-In-One Gateway".to_string(),
+            name: "Paytm All-In-One Gateway (Extensible Adapter)".to_string(),
             status: if paytm_healthy {
                 WorkloadState::Healthy
             } else {
@@ -3591,12 +5192,12 @@ async fn list_gateways(
             },
             p95_latency_ms: 88.0,
             success_rate: 0.991,
-            active_traffic_pct: 5.0,
+            active_traffic_pct: 0.0,
             is_healthy: paytm_healthy,
         },
         GatewayHealth {
             gateway: PaymentGateway::Adyen,
-            name: "Adyen Enterprise Global Gateway".to_string(),
+            name: "Adyen Enterprise Global Gateway (Extensible Adapter)".to_string(),
             status: if adyen_healthy {
                 WorkloadState::Healthy
             } else {
@@ -3761,6 +5362,7 @@ async fn universal_checkout(
         "stripe" => PaymentGateway::Stripe,
         "phonepe" => PaymentGateway::PhonePe,
         "cashfree" => PaymentGateway::Cashfree,
+        "payu" => PaymentGateway::PayU,
         "paytm" => PaymentGateway::Paytm,
         "adyen" => PaymentGateway::Adyen,
         _ => {
@@ -3769,7 +5371,7 @@ async fn universal_checkout(
                 Json(serde_json::json!({
                     "error": "invalid_gateway",
                     "message": format!(
-                        "Invalid or unsupported gateway '{}'. Supported gateways: auto, razorpay, stripe, phonepe, cashfree, paytm, adyen",
+                        "Invalid or unsupported gateway '{}'. Supported gateways: auto, razorpay, cashfree, payu, stripe, phonepe, paytm, adyen",
                         req.gateway
                     )
                 })),
@@ -3777,120 +5379,87 @@ async fn universal_checkout(
         }
     };
 
-    let overrides = state
-        .gateway_overrides
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let rzp_workload = state.state_fabric.get_workload("payment-upi-india-south");
-    let rzp_is_degraded = rzp_workload
-        .as_ref()
-        .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
-        .unwrap_or(false);
-    let rzp_healthy = overrides
-        .get("razorpay")
-        .copied()
-        .unwrap_or(!rzp_is_degraded);
-
-    let (routed, failover, reason) = match requested {
-        PaymentGateway::Auto => {
-            if validated_currency.code() == "USD" || validated_currency.code() == "EUR" {
-                (
-                    PaymentGateway::Stripe,
-                    false,
-                    "Selected primary global currency corridor (Stripe)".to_string(),
-                )
-            } else if rzp_healthy {
-                (
-                    PaymentGateway::Razorpay,
-                    false,
-                    "Selected primary healthy corridor (Razorpay UPI/Cards)".to_string(),
-                )
-            } else {
-                (
-                    PaymentGateway::PhonePe,
-                    true,
-                    "⚠️ Razorpay corridor degraded (P95 > 250ms SLA) -> Autonomous failover executed to PhonePe UPI"
-                        .to_string(),
-                )
-            }
+    let checkout_mode = detect_checkout_mode();
+    match &checkout_mode {
+        PaymentCheckoutMode::Misconfigured(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "payment_mode_misconfigured",
+                    "message": format!("Invalid payment mode configuration: {}", err),
+                    "is_simulated": false
+                })),
+            ));
         }
-        PaymentGateway::Razorpay if !rzp_healthy => (
-            PaymentGateway::PhonePe,
-            true,
-            "⚠️ Requested Razorpay is DEGRADED -> Autonomous failover executed to PhonePe"
-                .to_string(),
-        ),
-        other => (
-            other,
-            false,
-            format!("Direct routed to requested gateway: {}", other.as_str()),
-        ),
-    };
+        PaymentCheckoutMode::Unconfigured => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "payment_mode_unconfigured",
+                    "message": "Payment processing mode is unconfigured. Set provider credentials or ESA_ENABLE_SIMULATED_CHECKOUT=true for local simulation.",
+                    "is_simulated": false
+                })),
+            ));
+        }
+        _ => {}
+    }
+    let is_simulated = matches!(checkout_mode, PaymentCheckoutMode::Simulated);
+    let caller_is_sandbox = caller.environment == "sandbox";
 
     // 4. Determine canonical payment method using documented provider defaults
-    let normalized_method: Result<String, (StatusCode, Json<serde_json::Value>)> = match req
-        .method
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(raw) => {
-            let lower = raw.to_lowercase();
-            if lower == "all" {
-                Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "unsupported_provider_currency_method",
-                        "message": format!(
-                            "Gateway '{}' does not support wildcard payment method 'all'. Explicit payment method required.",
-                            routed.as_str()
-                        )
-                    })),
-                ))
-            } else {
-                Ok(lower)
+    let method_input = req.method.as_deref().or(req.payment_method.as_deref());
+    let normalized_method: Result<String, (StatusCode, Json<serde_json::Value>)> =
+        match method_input.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let lower = raw.to_lowercase();
+                if lower == "all" {
+                    Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "unsupported_provider_currency_method",
+                            "message": "Gateway does not support wildcard payment method 'all'. Explicit payment method required."
+                        })),
+                    ))
+                } else {
+                    Ok(lower)
+                }
             }
-        }
-        None => {
-            // Apply documented provider defaults if method was omitted:
-            // 1. Global / foreign currency corridors on Stripe (USD, EUR, GBP, JPY, SGD, AED, CAD, AUD, CHF, HKD):
-            //    Stripe's documented default is "card".
-            if validated_currency.code() != "INR" && routed == PaymentGateway::Stripe {
-                Ok("card".to_string())
-            } else if validated_currency.code() == "INR"
-                && (routed == PaymentGateway::Razorpay
-                    || routed == PaymentGateway::PhonePe
-                    || routed == PaymentGateway::Cashfree)
-            {
-                // 2. Domestic INR gateways (Razorpay, PhonePe, Cashfree) default to "upi"
-                Ok("upi".to_string())
-            } else {
-                // 3. For Stripe INR (which only supports export/cards) or other gateways without universal policy,
-                //    an explicit payment method is required!
-                Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "unsupported_provider_currency_method",
-                        "message": format!(
-                            "Gateway '{}' requires an explicit payment method for currency '{}' (e.g. 'card')",
-                            routed.as_str(),
-                            validated_currency.code()
-                        )
-                    })),
-                ))
+            None => {
+                if validated_currency.code() == "INR" {
+                    Ok("upi".to_string())
+                } else {
+                    Ok("card".to_string())
+                }
             }
-        }
-    };
+        };
 
     let method_str = normalized_method?;
+    let payment_class = match method_str.as_str() {
+        "card" | "credit" | "debit" => Some(PaymentMethodClass::Card),
+        "netbanking" | "nb" => Some(PaymentMethodClass::NetBanking),
+        "wallet" => Some(PaymentMethodClass::Wallet),
+        "upi" => Some(PaymentMethodClass::Upi),
+        _ => None,
+    };
 
-    // 5. Input Validation & Amount Resolution against the SELECTED gateway provider policy
+    let initial_policy_gateway = match requested {
+        PaymentGateway::Auto => {
+            if validated_currency.code() == "INR" {
+                "razorpay"
+            } else {
+                "stripe"
+            }
+        }
+        other => other.as_str(),
+    };
+
+    // 5. Input Validation & Amount Resolution against the requested gateway provider policy
     let resolved_amount = match esa_core::PaymentAmount::resolve_from_all_inputs_with_provider(
         req.amount_minor,
         req.amount,
         req.amount_cents,
         Some(&req.currency),
-        routed.as_str(),
+        initial_policy_gateway,
         Some(&method_str),
     ) {
         Ok(amt) => amt,
@@ -3920,7 +5489,7 @@ async fn universal_checkout(
                     "error": "amount_below_minimum",
                     "message": format!(
                         "Amount {} is below minimum required {} minor units for provider '{}' currency {} (method: '{}')",
-                        amount_minor, minimum_required, routed.as_str(), currency, method_str
+                        amount_minor, minimum_required, requested.as_str(), currency, method_str
                     )
                 })),
             ));
@@ -3961,90 +5530,507 @@ async fn universal_checkout(
         }
     };
 
-    // 6. Hardened payment mode detection & gating
-    match detect_checkout_mode() {
-        PaymentCheckoutMode::Live { reason } => {
-            return Err((
-                StatusCode::NOT_IMPLEMENTED,
-                Json(serde_json::json!({
-                    "error": "live_checkout_not_implemented",
-                    "message": format!(
-                        "Live gateway order creation is not yet connected to upstream payment networks ({}). Real transactions are disabled in production mode until gateway order integration is deployed.",
-                        reason
-                    ),
-                    "is_simulated": false
-                })),
-            ));
-        }
-        PaymentCheckoutMode::Misconfigured(err) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "payment_mode_misconfigured",
-                    "message": format!("Invalid payment mode configuration: {}", err),
-                    "is_simulated": false
-                })),
-            ));
-        }
-        PaymentCheckoutMode::Unconfigured => {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "payment_mode_unconfigured",
-                    "message": "Payment mode is not configured. Simulation is an explicit opt-in suitable for local/demo use: set ESA_ENABLE_SIMULATED_CHECKOUT=true or ESA_PAYMENT_MODE=sandbox.",
-                    "is_simulated": false
-                })),
-            ));
-        }
-        PaymentCheckoutMode::Simulated => {
-            // Permitted explicit simulation
-        }
-    }
+    let (rzp_override, cashfree_override, payu_override) = {
+        let overrides = state
+            .gateway_overrides
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (
+            overrides.get("razorpay").copied(),
+            overrides.get("cashfree").copied(),
+            overrides.get("payu").copied(),
+        )
+    };
+    let rzp_workload = state.state_fabric.get_workload("payment-upi-india-south");
+    let rzp_is_degraded = rzp_workload
+        .as_ref()
+        .map(|w| w.state == WorkloadState::Degraded || w.state == WorkloadState::Overloaded)
+        .unwrap_or(false);
 
-    let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
-    let checkout_url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
+    let (rzp_configured, rzp_healthy, rzp_supports_method, rzp_env_ok) =
+        if let Some(rzp) = &state.razorpay {
+            use esa_core::provider::PaymentProvider;
+            let h = rzp.health();
+            let healthy = rzp_override.unwrap_or(h.is_healthy && !rzp_is_degraded);
+            let supports = payment_class
+                .as_ref()
+                .map(|m| rzp.supported_methods().contains(m))
+                .unwrap_or(true);
+            let env_ok = !caller_is_sandbox || rzp.is_sandbox();
+            (true, healthy, supports, env_ok)
+        } else {
+            let healthy = rzp_override.unwrap_or(is_simulated && !rzp_is_degraded);
+            (is_simulated, healthy, true, true)
+        };
+    let rzp_eligible = rzp_configured && rzp_healthy && rzp_supports_method && rzp_env_ok;
 
-    // In demo/sandbox mode, ingest a simulated telemetry event into StateFabric so demonstration dashboards animate.
-    let payment_event = PaymentEvent {
-        event_id: tx_id.clone(),
-        event_type: PaymentEventType::PaymentAuthorized,
-        timestamp: chrono::Utc::now(),
-        region: match routed {
-            PaymentGateway::Razorpay | PaymentGateway::PhonePe | PaymentGateway::Cashfree => {
-                Region::IndiaSouth
-            }
-            PaymentGateway::Paytm => Region::IndiaNorth,
-            _ => Region::IndiaWest,
-        },
-        payment_method_class: match method_str.as_str() {
-            "card" | "credit" | "debit" => PaymentMethodClass::Card,
-            "netbanking" | "nb" => PaymentMethodClass::NetBanking,
-            "wallet" => PaymentMethodClass::Wallet,
-            "upi" => PaymentMethodClass::Upi,
-            _ => {
+    let (cf_configured, cf_healthy, cf_supports_method, cf_env_ok) =
+        if let Some(cf) = &state.cashfree {
+            use esa_core::provider::PaymentProvider;
+            let h = cf.health();
+            let healthy = cashfree_override.unwrap_or(h.is_healthy);
+            let supports = payment_class
+                .as_ref()
+                .map(|m| cf.supported_methods().contains(m))
+                .unwrap_or(true);
+            let env_ok = !caller_is_sandbox || cf.is_sandbox();
+            (true, healthy, supports, env_ok)
+        } else {
+            let healthy = cashfree_override.unwrap_or(is_simulated);
+            (is_simulated, healthy, true, true)
+        };
+    let cf_eligible = cf_configured && cf_healthy && cf_supports_method && cf_env_ok;
+
+    let (payu_configured, payu_healthy, payu_supports_method, payu_env_ok) =
+        if let Some(pu) = &state.payu {
+            use esa_core::provider::PaymentProvider;
+            let h = pu.health();
+            let healthy = payu_override.unwrap_or(h.is_healthy);
+            let supports = payment_class
+                .as_ref()
+                .map(|m| pu.supported_methods().contains(m))
+                .unwrap_or(true);
+            let env_ok = !caller_is_sandbox || pu.is_sandbox();
+            (true, healthy, supports, env_ok)
+        } else {
+            let healthy = payu_override.unwrap_or(is_simulated);
+            (is_simulated, healthy, true, true)
+        };
+    let payu_eligible = payu_configured && payu_healthy && payu_supports_method && payu_env_ok;
+
+    let (routed, failover, reason) = match requested {
+        PaymentGateway::Auto => {
+            if validated_currency.code() == "USD" || validated_currency.code() == "EUR" {
+                (
+                    PaymentGateway::Stripe,
+                    false,
+                    "Selected primary global currency corridor (Stripe)".to_string(),
+                )
+            } else if rzp_eligible {
+                (
+                    PaymentGateway::Razorpay,
+                    false,
+                    "Selected primary healthy corridor (Razorpay UPI/Cards)".to_string(),
+                )
+            } else if cf_eligible {
+                (
+                    PaymentGateway::Cashfree,
+                    true,
+                    "⚠️ Razorpay corridor degraded/unavailable -> Autonomous failover executed to Cashfree Payments".to_string(),
+                )
+            } else if payu_eligible {
+                (
+                    PaymentGateway::PayU,
+                    true,
+                    "⚠️ Razorpay and Cashfree corridors degraded/unavailable -> Autonomous failover executed to PayU India".to_string(),
+                )
+            } else if let PaymentCheckoutMode::Live { reason } = &checkout_mode {
                 return Err((
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::NOT_IMPLEMENTED,
                     Json(serde_json::json!({
-                        "error": "unsupported_provider_currency_method",
+                        "error": "live_checkout_not_implemented",
                         "message": format!(
-                            "Gateway '{}' does not support currency '{}' with payment method '{}'",
-                            routed.as_str(),
-                            req.currency,
-                            method_str
-                        )
+                            "Live gateway order creation is not configured for 'auto' ({}). Real transactions require valid provider credentials.",
+                            reason
+                        ),
+                        "is_simulated": false
+                    })),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "no_eligible_provider",
+                        "message": "No eligible or healthy payment gateway provider is available for the requested currency and method"
                     })),
                 ));
             }
-        },
-        pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
-        amount_cents: Some(resolved_amount.amount_minor),
-        amount_minor: Some(resolved_amount.amount_minor),
-        currency: resolved_amount.currency.clone(),
-        processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
-        success: true,
+        }
+        PaymentGateway::Razorpay if !rzp_eligible => {
+            if cf_eligible {
+                (
+                    PaymentGateway::Cashfree,
+                    true,
+                    "⚠️ Requested Razorpay is unavailable/degraded -> Autonomous failover executed to Cashfree Payments".to_string(),
+                )
+            } else if payu_eligible {
+                (
+                    PaymentGateway::PayU,
+                    true,
+                    "⚠️ Requested Razorpay is unavailable/degraded -> Autonomous failover executed to PayU India".to_string(),
+                )
+            } else if rzp_configured {
+                (
+                    PaymentGateway::Razorpay,
+                    false,
+                    "Direct routed to requested gateway: razorpay".to_string(),
+                )
+            } else if let PaymentCheckoutMode::Live { reason } = &checkout_mode {
+                return Err((
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({
+                        "error": "live_checkout_not_implemented",
+                        "message": format!(
+                            "Live gateway order creation is not configured for 'razorpay' ({}). Real transactions require valid provider credentials.",
+                            reason
+                        ),
+                        "is_simulated": false
+                    })),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "no_eligible_provider",
+                        "message": "Requested gateway 'razorpay' is not configured or no eligible failover provider is available"
+                    })),
+                ));
+            }
+        }
+        PaymentGateway::Cashfree if !cf_eligible => {
+            if rzp_eligible {
+                (
+                    PaymentGateway::Razorpay,
+                    true,
+                    "⚠️ Requested Cashfree is unavailable/degraded -> Autonomous failover executed to Razorpay".to_string(),
+                )
+            } else if payu_eligible {
+                (
+                    PaymentGateway::PayU,
+                    true,
+                    "⚠️ Requested Cashfree is unavailable/degraded -> Autonomous failover executed to PayU India".to_string(),
+                )
+            } else if cf_configured {
+                (
+                    PaymentGateway::Cashfree,
+                    false,
+                    "Direct routed to requested gateway: cashfree".to_string(),
+                )
+            } else if let PaymentCheckoutMode::Live { reason } = &checkout_mode {
+                return Err((
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({
+                        "error": "live_checkout_not_implemented",
+                        "message": format!(
+                            "Live gateway order creation is not configured for 'cashfree' ({}). Real transactions require valid provider credentials.",
+                            reason
+                        ),
+                        "is_simulated": false
+                    })),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "no_eligible_provider",
+                        "message": "Requested gateway 'cashfree' is not configured or no eligible failover provider is available"
+                    })),
+                ));
+            }
+        }
+        PaymentGateway::PayU if !payu_eligible => {
+            if rzp_eligible {
+                (
+                    PaymentGateway::Razorpay,
+                    true,
+                    "⚠️ Requested PayU is unavailable/degraded -> Autonomous failover executed to Razorpay".to_string(),
+                )
+            } else if cf_eligible {
+                (
+                    PaymentGateway::Cashfree,
+                    true,
+                    "⚠️ Requested PayU is unavailable/degraded -> Autonomous failover executed to Cashfree Payments".to_string(),
+                )
+            } else if payu_configured {
+                (
+                    PaymentGateway::PayU,
+                    false,
+                    "Direct routed to requested gateway: payu".to_string(),
+                )
+            } else if let PaymentCheckoutMode::Live { reason } = &checkout_mode {
+                return Err((
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({
+                        "error": "live_checkout_not_implemented",
+                        "message": format!(
+                            "Live gateway order creation is not configured for 'payu' ({}). Real transactions require valid provider credentials.",
+                            reason
+                        ),
+                        "is_simulated": false
+                    })),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "no_eligible_provider",
+                        "message": "Requested gateway 'payu' is not configured or no eligible failover provider is available"
+                    })),
+                ));
+            }
+        }
+        PaymentGateway::PhonePe if !is_simulated => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "no_eligible_provider",
+                    "message": "Gateway 'phonepe' is not supported in this multi-gateway MVP"
+                })),
+            ));
+        }
+        other => (
+            other,
+            false,
+            format!("Direct routed to requested gateway: {}", other.as_str()),
+        ),
     };
-    let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
-    publish_payment_side_effects(&state, &apply_res);
+
+    let tx_id = format!("tx_esa_{}", uuid::Uuid::new_v4().simple());
+
+    // 6. Execute order creation against real upstream provider or explicit simulation
+    let customer_id_val = req
+        .customer_id
+        .clone()
+        .unwrap_or_else(|| format!("cust_{}", &tx_id[7..15.min(tx_id.len())]));
+    let return_url_val = req
+        .return_url
+        .clone()
+        .unwrap_or_else(|| format!("http://localhost:3000/checkout/callback?id={}", tx_id));
+    let merchant_id_val = caller.merchant_id.clone();
+
+    let (checkout_session, provider_order_id, is_simulated, checkout_url) = if let (
+        PaymentGateway::Razorpay,
+        Some(rzp),
+    ) =
+        (routed, state.razorpay.as_ref())
+    {
+        use esa_core::provider::PaymentProvider;
+        let create_params = esa_core::provider::CreateOrderParams {
+            internal_transaction_id: tx_id.clone(),
+            amount_minor: resolved_amount.amount_minor as u64,
+            currency: resolved_amount.currency.clone(),
+            payment_method: payment_class,
+            customer_id: customer_id_val.clone(),
+            customer_email: req.customer_email.clone(),
+            customer_phone: req.customer_phone.clone(),
+            customer_name: None,
+            return_url: return_url_val.clone(),
+            notify_url: None,
+            merchant_id: merchant_id_val.clone(),
+            notes: std::collections::HashMap::new(),
+        };
+        match rzp.create_order(&create_params).await {
+            Ok(res) => {
+                let url = format!(
+                    "/checkout/session?id={}&gateway=razorpay&order_id={}",
+                    tx_id, res.provider_order_id
+                );
+                (
+                    Some(res.checkout_session),
+                    Some(res.provider_order_id),
+                    false,
+                    url,
+                )
+            }
+            Err(e) => {
+                tracing::error!(target: "esa_api::checkout", "Razorpay order creation failed: {}", e);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "upstream_provider_error",
+                        "message": format!("Razorpay order creation failed: {}", e),
+                        "gateway": "razorpay"
+                    })),
+                ));
+            }
+        }
+    } else if let (PaymentGateway::Cashfree, Some(cf)) = (routed, state.cashfree.as_ref()) {
+        use esa_core::provider::PaymentProvider;
+        let create_params = esa_core::provider::CreateOrderParams {
+            internal_transaction_id: tx_id.clone(),
+            amount_minor: resolved_amount.amount_minor as u64,
+            currency: resolved_amount.currency.clone(),
+            payment_method: payment_class,
+            customer_id: customer_id_val.clone(),
+            customer_email: req.customer_email.clone(),
+            customer_phone: req.customer_phone.clone(),
+            customer_name: None,
+            return_url: return_url_val.clone(),
+            notify_url: None,
+            merchant_id: merchant_id_val.clone(),
+            notes: std::collections::HashMap::new(),
+        };
+        match cf.create_order(&create_params).await {
+            Ok(res) => {
+                let url = format!(
+                    "/checkout/session?id={}&gateway=cashfree&order_id={}",
+                    tx_id, res.provider_order_id
+                );
+                (
+                    Some(res.checkout_session),
+                    Some(res.provider_order_id),
+                    false,
+                    url,
+                )
+            }
+            Err(e) => {
+                tracing::error!(target: "esa_api::checkout", "Cashfree order creation failed: {}", e);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "upstream_provider_error",
+                        "message": format!("Cashfree order creation failed: {}", e),
+                        "gateway": "cashfree"
+                    })),
+                ));
+            }
+        }
+    } else if let (PaymentGateway::PayU, Some(pu)) = (routed, state.payu.as_ref()) {
+        use esa_core::provider::PaymentProvider;
+        let create_params = esa_core::provider::CreateOrderParams {
+            internal_transaction_id: tx_id.clone(),
+            amount_minor: resolved_amount.amount_minor as u64,
+            currency: resolved_amount.currency.clone(),
+            payment_method: payment_class,
+            customer_id: customer_id_val.clone(),
+            customer_email: req.customer_email.clone(),
+            customer_phone: req.customer_phone.clone(),
+            customer_name: None,
+            return_url: return_url_val.clone(),
+            notify_url: None,
+            merchant_id: merchant_id_val.clone(),
+            notes: std::collections::HashMap::new(),
+        };
+        match pu.create_order(&create_params).await {
+            Ok(res) => {
+                let url = format!(
+                    "/checkout/session?id={}&gateway=payu&order_id={}",
+                    tx_id, res.provider_order_id
+                );
+                (
+                    Some(res.checkout_session),
+                    Some(res.provider_order_id),
+                    false,
+                    url,
+                )
+            }
+            Err(e) => {
+                tracing::error!(target: "esa_api::checkout", "PayU order creation failed: {}", e);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "upstream_provider_error",
+                        "message": format!("PayU order creation failed: {}", e),
+                        "gateway": "payu"
+                    })),
+                ));
+            }
+        }
+    } else {
+        // No live/test adapter instance registered for routed gateway. Check checkout mode.
+        match &checkout_mode {
+            PaymentCheckoutMode::Simulated => {
+                let url = format!("/checkout/session?id={}&gateway={}", tx_id, routed.as_str());
+                let mock_session = match routed {
+                    PaymentGateway::Razorpay => Some(CheckoutSessionData::Razorpay {
+                        order_id: format!("order_mock_rzp_{}", &tx_id[7..15.min(tx_id.len())]),
+                        key_id: "rzp_test_simulated".to_string(),
+                        amount: resolved_amount.amount_minor as u64,
+                        currency: resolved_amount.currency.clone(),
+                        notes: serde_json::json!({}),
+                    }),
+                    PaymentGateway::Cashfree => Some(CheckoutSessionData::Cashfree {
+                        order_id: format!("order_mock_cf_{}", &tx_id[7..15.min(tx_id.len())]),
+                        payment_session_id: format!(
+                            "session_mock_cf_{}",
+                            &tx_id[7..15.min(tx_id.len())]
+                        ),
+                        environment: "sandbox".to_string(),
+                    }),
+                    PaymentGateway::PayU => Some(CheckoutSessionData::Payu {
+                        action_url: "https://test.payu.in/_payment".to_string(),
+                        params: std::collections::HashMap::from([
+                            ("key".to_string(), "simulated_key".to_string()),
+                            ("txnid".to_string(), tx_id.clone()),
+                            (
+                                "amount".to_string(),
+                                format!("{:.2}", resolved_amount.amount_minor as f64 / 100.0),
+                            ),
+                            ("productinfo".to_string(), "ESAPay Checkout".to_string()),
+                            ("firstname".to_string(), "Customer".to_string()),
+                            ("email".to_string(), "customer@example.com".to_string()),
+                        ]),
+                    }),
+                    _ => None,
+                };
+                (mock_session, None, true, url)
+            }
+            PaymentCheckoutMode::Live { reason } => {
+                return Err((
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({
+                        "error": "live_checkout_not_implemented",
+                        "message": format!(
+                            "Live gateway order creation is not configured for '{}' ({}). Real transactions require valid provider credentials.",
+                            routed.as_str(),
+                            reason
+                        ),
+                        "is_simulated": false
+                    })),
+                ));
+            }
+            PaymentCheckoutMode::Misconfigured(err) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "payment_mode_misconfigured",
+                        "message": format!("Invalid payment mode configuration: {}", err),
+                        "is_simulated": false
+                    })),
+                ));
+            }
+            PaymentCheckoutMode::Unconfigured => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "payment_mode_unconfigured",
+                        "message": format!("Gateway '{}' is unconfigured. Set provider credentials or ESA_ENABLE_SIMULATED_CHECKOUT=true for local simulation.", routed.as_str()),
+                        "is_simulated": false
+                    })),
+                ));
+            }
+        }
+    };
+
+    // Persist payment attempt in durable store
+    let attempt = esa_core::provider::PaymentAttemptRecord {
+        transaction_id: tx_id.clone(),
+        merchant_id: caller.merchant_id.clone(),
+        provider: routed.as_str().to_string(),
+        provider_order_id: provider_order_id.clone().or_else(|| Some(tx_id.clone())),
+        payment_reference: None,
+        amount_minor: resolved_amount.amount_minor as u64,
+        currency: resolved_amount.currency.clone(),
+        state: "created".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    if let Err(e) = state.webhook_store.record_payment_attempt(&attempt).await {
+        error!("Failed to persist payment attempt in durable store: {}", e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "persistence_failure",
+                "message": "Failed to persist payment attempt record in durable store"
+            })),
+        ));
+    }
+    if let Ok(mut map) = state.order_merchants.write() {
+        if let Some(p_oid) = &provider_order_id {
+            map.insert(p_oid.clone(), caller.merchant_id.clone());
+        }
+        map.insert(tx_id.clone(), caller.merchant_id.clone());
+    }
 
     Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
@@ -4056,8 +6042,10 @@ async fn universal_checkout(
         failover_triggered: failover,
         routing_reason: reason,
         checkout_url,
-        is_simulated: true,
+        is_simulated,
         timestamp: chrono::Utc::now(),
+        session: checkout_session,
+        provider_order_id,
     }))
 }
 
@@ -4097,6 +6085,8 @@ mod integration_tests {
             audit_store,
             agent_status,
             razorpay: None,
+            cashfree: None,
+            payu: None,
             vitals,
             rate_limiter,
             last_benchmark: Arc::new(std::sync::RwLock::new(None)),
@@ -4117,6 +6107,13 @@ mod integration_tests {
         std::env::remove_var("STRIPE_MODE");
         std::env::remove_var("PHONEPE_MODE");
         std::env::remove_var("CASHFREE_MODE");
+        std::env::remove_var("CASHFREE_ENV");
+        std::env::remove_var("CASHFREE_CLIENT_ID");
+        std::env::remove_var("CASHFREE_CLIENT_SECRET");
+        std::env::remove_var("PAYU_MODE");
+        std::env::remove_var("PAYU_ENV");
+        std::env::remove_var("PAYU_MERCHANT_KEY");
+        std::env::remove_var("PAYU_MERCHANT_SALT");
         std::env::remove_var("PAYTM_MODE");
         std::env::remove_var("ADYEN_MODE");
     }
@@ -4649,6 +6646,23 @@ mod integration_tests {
             account_id: None,
         };
         state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_test_replay_safe_123".to_string(),
+                merchant_id: "merchant_sandbox_01".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some(order_id.to_string()),
+                payment_reference: None,
+                amount_minor: 5000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
 
         // 1. Starts with a payment that has NOT yet been captured
         assert!(
@@ -6807,7 +8821,7 @@ mod integration_tests {
             );
         }
 
-        // 7. Intentional health failover: degraded Razorpay routes "auto" to PhonePe
+        // 7. Intentional health failover: degraded Razorpay routes "auto" to Cashfree
         {
             state
                 .gateway_overrides
@@ -6839,7 +8853,7 @@ mod integration_tests {
             let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             assert_eq!(
                 json.get("routed_gateway").and_then(|v| v.as_str()),
-                Some("phonepe")
+                Some("cashfree")
             );
             assert_eq!(
                 json.get("failover_triggered").and_then(|v| v.as_bool()),
@@ -6847,7 +8861,7 @@ mod integration_tests {
             );
         }
 
-        // 8. Intentional health failover: degraded Razorpay routes explicit "razorpay" to PhonePe
+        // 8. Intentional health failover: degraded Razorpay routes explicit "razorpay" to Cashfree
         {
             let app = build_app(state.clone());
             let req_body = serde_json::to_string(&serde_json::json!({
@@ -6873,11 +8887,87 @@ mod integration_tests {
             let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             assert_eq!(
                 json.get("routed_gateway").and_then(|v| v.as_str()),
-                Some("phonepe")
+                Some("cashfree")
             );
             assert_eq!(
                 json.get("failover_triggered").and_then(|v| v.as_bool()),
                 Some(true)
+            );
+        }
+
+        // 9. When both Razorpay and Cashfree are degraded, failover routes to PayU
+        {
+            state
+                .gateway_overrides
+                .write()
+                .unwrap()
+                .insert("cashfree".to_string(), false);
+
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "auto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("payu")
+            );
+            assert_eq!(
+                json.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+
+        // 10. When all eligible providers are degraded, return 503 SERVICE UNAVAILABLE
+        {
+            state
+                .gateway_overrides
+                .write()
+                .unwrap()
+                .insert("payu".to_string(), false);
+
+            let app = build_app(state.clone());
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 1000,
+                "currency": "INR",
+                "gateway": "auto",
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-gw-val-key")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("no_eligible_provider")
             );
         }
     }
@@ -9231,6 +11321,41 @@ mod integration_tests {
             account_id: None,
         };
         state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_order_matching".to_string(),
+                merchant_id: "merchant_sandbox_01".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_matching".to_string()),
+                payment_reference: None,
+                amount_minor: 5000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_order_other".to_string(),
+                merchant_id: "other_merchant_999".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_other".to_string()),
+                payment_reference: None,
+                amount_minor: 5000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
         let app = build_app(state.clone());
 
         // 1. Test Razorpay Order Creation binds caller's merchant_id to notes and durable mapping
@@ -10592,5 +12717,1039 @@ mod integration_tests {
             initial_len, after_len,
             "Overflow traffic must not increase the number of keyed entries"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cashfree_full_lifecycle_and_webhook_verification() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("esa_test_merchant_live");
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mock_app = Router::new()
+            .route(
+                "/orders",
+                post(|| async {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "order_id": "order_cf_test_100",
+                            "payment_session_id": "session_cf_test_999",
+                            "order_status": "ACTIVE",
+                            "order_amount": 500.0,
+                            "order_currency": "INR"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/orders/:order_id",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "order_id": "order_cf_test_100",
+                            "order_status": "PAID",
+                            "order_amount": 500.0,
+                            "order_currency": "INR"
+                        })),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_app).await;
+        });
+        let mock_url = format!("http://{}", addr);
+
+        let mut state = create_test_state();
+        let cf_config = CashfreeConfig {
+            client_id: "test_cf_client_id".to_string(),
+            client_secret: "test_cf_client_secret_super_secure_key".to_string(),
+            api_version: "2023-08-01".to_string(),
+            env: esa_cashfree::CashfreeEnv::Sandbox,
+            api_base: mock_url,
+        };
+        let cf_provider = Arc::new(CashfreeProvider::new(cf_config));
+        state.cashfree = Some(cf_provider);
+
+        let app = build_app(state.clone());
+
+        // 1. Check Cashfree status
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/payments/cashfree/status")
+            .header("x-api-key", "esa_test_merchant_live")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 2. Test Checkout routing directly to Cashfree
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount_minor": 50000,
+            "currency": "INR",
+            "gateway": "cashfree",
+            "method": "upi",
+            "customer_id": "cust_cf_123"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("x-api-key", "esa_test_merchant_live")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decision.get("routed_gateway").and_then(|v| v.as_str()),
+            Some("cashfree")
+        );
+        assert_eq!(
+            decision.get("amount_minor").and_then(|v| v.as_i64()),
+            Some(50000)
+        );
+        assert!(decision.get("session").is_some());
+
+        // 3. Webhook signature verification
+        let webhook_payload = serde_json::json!({
+            "data": {
+                "order": {
+                    "order_id": "order_cf_test_100",
+                    "order_amount": 500.0,
+                    "order_currency": "INR"
+                },
+                "payment": {
+                    "cf_payment_id": "pay_cf_test_999",
+                    "payment_status": "SUCCESS",
+                    "payment_amount": 500.0,
+                    "payment_currency": "INR",
+                    "payment_method": "upi",
+                    "payment_time": "2026-11-11T12:00:00Z"
+                }
+            },
+            "event_time": "2026-11-11T12:00:01Z",
+            "type": "PAYMENT_SUCCESS_WEBHOOK"
+        });
+        let raw_body = serde_json::to_vec(&webhook_payload).unwrap();
+        let timestamp = "1762862401000";
+
+        // Compute HMAC signature: HMAC-SHA256(secret, timestamp + raw_body)
+        let mut mac =
+            HmacSha256::new_from_slice(b"test_cf_client_secret_super_secure_key").unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(&raw_body);
+        let signature = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            mac.finalize().into_bytes(),
+        );
+
+        // Send valid webhook
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/webhook")
+            .header("content-type", "application/json")
+            .header("x-webhook-timestamp", timestamp)
+            .header("x-webhook-signature", &signature)
+            .body(axum::body::Body::from(raw_body.clone()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Send tampered signature -> must be 401 Unauthorized
+        let req_tampered = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/webhook")
+            .header("content-type", "application/json")
+            .header("x-webhook-timestamp", timestamp)
+            .header("x-webhook-signature", "invalid_forged_base64_sig==")
+            .body(axum::body::Body::from(raw_body))
+            .unwrap();
+
+        let resp_tampered = app.clone().oneshot(req_tampered).await.unwrap();
+        assert_eq!(resp_tampered.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_payu_hosted_checkout_hash_and_callback_verification() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("esa_test_merchant_live");
+
+        let payu_mock_app = Router::new().route(
+            "/merchant/postservice",
+            post(
+                |axum::extract::Form(form): axum::extract::Form<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let txnid = form.get("var1").cloned().unwrap_or_default();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": 1,
+                            "msg": "Transaction Fetched Successfully",
+                            "transaction_details": {
+                                txnid: {
+                                    "mihpayid": "payu_mih_88888",
+                                    "status": "success",
+                                    "amt": "500.00",
+                                    "mode": "UPI"
+                                }
+                            }
+                        })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, payu_mock_app).await;
+        });
+        let verify_mock_url = format!("http://{}/merchant/postservice?form=2", addr);
+
+        let mut state = create_test_state();
+        let payu_config = PayUConfig {
+            merchant_key: "test_payu_key".to_string(),
+            merchant_salt: "test_payu_salt_12345".to_string(),
+            env: esa_payu::PayUEnv::Test,
+            payment_url: "https://test.payu.in/_payment".to_string(),
+            verify_url: verify_mock_url,
+        };
+        let payu_provider = Arc::new(PayUProvider::new(payu_config));
+        state.payu = Some(payu_provider);
+
+        let app = build_app(state.clone());
+
+        // 1. Check PayU status
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/payments/payu/status")
+            .header("x-api-key", "esa_test_merchant_live")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 2. Checkout via PayU
+        let req_body = serde_json::to_string(&serde_json::json!({
+            "amount_minor": 50000,
+            "currency": "INR",
+            "gateway": "payu",
+            "method": "upi",
+            "customer_email": "payu_customer@example.com",
+            "customer_phone": "9999999999"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("x-api-key", "esa_test_merchant_live")
+            .body(axum::body::Body::from(req_body))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decision.get("routed_gateway").and_then(|v| v.as_str()),
+            Some("payu")
+        );
+        let session = decision
+            .get("session")
+            .expect("PayU session must be present");
+        let details = session.get("data").expect("data must be present");
+        assert_eq!(
+            details.get("action_url").and_then(|v| v.as_str()),
+            Some("https://test.payu.in/_payment")
+        );
+
+        let params = details.get("params").expect("params must be present");
+        let txnid = params.get("txnid").and_then(|v| v.as_str()).unwrap();
+        let amount = params.get("amount").and_then(|v| v.as_str()).unwrap();
+        let hash = params.get("hash").and_then(|v| v.as_str()).unwrap();
+        let productinfo = params.get("productinfo").and_then(|v| v.as_str()).unwrap();
+        let firstname = params.get("firstname").and_then(|v| v.as_str()).unwrap();
+        let email = params.get("email").and_then(|v| v.as_str()).unwrap();
+        let udf1 = params.get("udf1").and_then(|v| v.as_str());
+
+        // Verify that the hash in params is genuinely calculated via PayU SHA-512 request formula
+        let expected_hash = esa_payu::hash::calculate_request_hash(
+            "test_payu_key",
+            txnid,
+            amount,
+            productinfo,
+            firstname,
+            email,
+            udf1,
+            None,
+            None,
+            None,
+            None,
+            "test_payu_salt_12345",
+        );
+        assert_eq!(hash, expected_hash);
+
+        // 3. Callback Reverse-Hash Verification
+        let cb_status = "success";
+        let cb_hash = esa_payu::hash::calculate_reverse_hash(
+            "test_payu_salt_12345",
+            cb_status,
+            udf1,
+            None,
+            None,
+            None,
+            None,
+            email,
+            firstname,
+            productinfo,
+            amount,
+            txnid,
+            "test_payu_key",
+            None,
+        );
+
+        let form_body = format!(
+            "key=test_payu_key&txnid={}&amount={}&productinfo={}&firstname={}&email={}&udf1={}&status={}&hash={}&mihpayid=payu_mih_88888",
+            txnid, amount, productinfo.replace(' ', "+"), firstname, email.replace('@', "%40"), udf1.unwrap_or(""), cb_status, cb_hash
+        );
+
+        let req_cb = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/callback/success")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(form_body))
+            .unwrap();
+
+        let resp_cb = app.clone().oneshot(req_cb).await.unwrap();
+        assert_eq!(resp_cb.status(), StatusCode::OK);
+        let cb_bytes = axum::body::to_bytes(resp_cb.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let cb_json: serde_json::Value = serde_json::from_slice(&cb_bytes).unwrap();
+        assert_eq!(
+            cb_json.get("status").and_then(|v| v.as_str()),
+            Some("success")
+        );
+
+        // Tampered reverse hash callback -> must be rejected
+        let bad_form_body = format!(
+            "key=test_payu_key&txnid={}&amount={}&productinfo=ESA+Payment+esa_test_merchant_live&firstname=Customer&email=payu_customer%40example.com&udf1=esa_test_merchant_live&status={}&hash=badhash00000&mihpayid=payu_mih_88888",
+            txnid, amount, cb_status
+        );
+        let req_bad_cb = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/callback/success")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(bad_form_body))
+            .unwrap();
+
+        let resp_bad_cb = app.clone().oneshot(req_bad_cb).await.unwrap();
+        assert_eq!(resp_bad_cb.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_multi_gateway_intelligent_failover_chain() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("esa_test_merchant_live");
+        let mut state = create_test_state();
+
+        let rzp_mock_app = Router::new().route(
+            "/orders",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "id": "order_rzp_mock_001",
+                        "entity": "order",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "created"
+                    })),
+                )
+            }),
+        );
+        let rzp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rzp_addr = rzp_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(rzp_listener, rzp_mock_app).await;
+        });
+
+        let cf_mock_app = Router::new().route(
+            "/orders",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "order_id": "order_cf_mock_001",
+                        "payment_session_id": "session_cf_mock_12345",
+                        "order_status": "ACTIVE",
+                        "order_amount": 100.0,
+                        "order_currency": "INR"
+                    })),
+                )
+            }),
+        );
+        let cf_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cf_addr = cf_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(cf_listener, cf_mock_app).await;
+        });
+
+        // 1. Configure all three providers: Razorpay, Cashfree, PayU
+        let rzp_config = RazorpayConfig {
+            key_id: "rzp_test_key_123".to_string(),
+            key_secret: "rzp_test_secret_456".to_string(),
+            webhook_secret: "rzp_test_webhook_sec".to_string(),
+            api_base: format!("http://{}", rzp_addr),
+            mode: esa_razorpay::RazorpayMode::Test,
+            test_mode_only: true,
+            webhook_rate_limit_per_sec: 1000,
+            api_rate_limit_per_sec: 1000,
+            account_id: None,
+        };
+        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
+
+        let cf_config = CashfreeConfig {
+            client_id: "test_cf_id".to_string(),
+            client_secret: "test_cf_sec".to_string(),
+            api_version: "2023-08-01".to_string(),
+            env: esa_cashfree::CashfreeEnv::Sandbox,
+            api_base: format!("http://{}", cf_addr),
+        };
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
+
+        let payu_config = PayUConfig {
+            merchant_key: "test_payu_key".to_string(),
+            merchant_salt: "test_payu_salt".to_string(),
+            env: esa_payu::PayUEnv::Test,
+            payment_url: "https://test.payu.in/_payment".to_string(),
+            verify_url: "https://test.payu.in/merchant/postservice?form=2".to_string(),
+        };
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
+
+        let app = build_app(state.clone());
+
+        // A. Primary corridor healthy: "auto" routes to Razorpay
+        {
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 10000,
+                "currency": "INR",
+                "gateway": "auto",
+                "method": "upi"
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("x-api-key", "esa_test_merchant_live")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                decision.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("razorpay")
+            );
+            assert_eq!(
+                decision.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+        }
+
+        // B. Razorpay degraded: "auto" automatically fails over to Cashfree
+        {
+            state
+                .gateway_overrides
+                .write()
+                .unwrap()
+                .insert("razorpay".to_string(), false);
+
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 10000,
+                "currency": "INR",
+                "gateway": "auto",
+                "method": "upi"
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("x-api-key", "esa_test_merchant_live")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                decision.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("cashfree")
+            );
+            assert_eq!(
+                decision.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+
+        // C. Both Razorpay and Cashfree degraded: "auto" automatically fails over to PayU
+        {
+            state
+                .gateway_overrides
+                .write()
+                .unwrap()
+                .insert("cashfree".to_string(), false);
+
+            let req_body = serde_json::to_string(&serde_json::json!({
+                "amount_minor": 10000,
+                "currency": "INR",
+                "gateway": "auto",
+                "method": "upi"
+            }))
+            .unwrap();
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/payments/checkout")
+                .header("content-type", "application/json")
+                .header("x-api-key", "esa_test_merchant_live")
+                .body(axum::body::Body::from(req_body))
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap();
+            let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                decision.get("routed_gateway").and_then(|v| v.as_str()),
+                Some("payu")
+            );
+            assert_eq!(
+                decision.get("failover_triggered").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cross_merchant_isolation_for_all_providers() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        let mut state = create_test_state();
+
+        let cf_config = CashfreeConfig {
+            client_id: "test_cf_client_id".to_string(),
+            client_secret: "test_cf_client_secret_super_secure_key".to_string(),
+            api_version: "2023-08-01".to_string(),
+            env: esa_cashfree::CashfreeEnv::Sandbox,
+            api_base: "http://127.0.0.1:9".to_string(),
+        };
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
+
+        let payu_config = PayUConfig {
+            merchant_key: "test_payu_key".to_string(),
+            merchant_salt: "test_payu_salt".to_string(),
+            env: esa_payu::PayUEnv::Test,
+            payment_url: "https://test.payu.in/_payment".to_string(),
+            verify_url: "http://127.0.0.1:9".to_string(),
+        };
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
+
+        let key_alpha = "esa_sbx_merchant_alpha_sec_123456";
+        let key_beta = "esa_sbx_merchant_beta_sec_654321";
+        state
+            .sandbox_keys
+            .insert_key(&api_keys::SandboxKeyRecord {
+                key_hash: api_keys::hash_api_key(key_alpha),
+                key_prefix: "esa_sbx_".to_string(),
+                merchant_id: "merchant_alpha".to_string(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+                revoked: false,
+            })
+            .await
+            .unwrap();
+
+        state
+            .sandbox_keys
+            .insert_key(&api_keys::SandboxKeyRecord {
+                key_hash: api_keys::hash_api_key(key_beta),
+                key_prefix: "esa_sbx_".to_string(),
+                merchant_id: "merchant_beta".to_string(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+                revoked: false,
+            })
+            .await
+            .unwrap();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_cf_alpha_order".to_string(),
+                merchant_id: "merchant_alpha".to_string(),
+                provider: "cashfree".to_string(),
+                provider_order_id: Some("order_cf_alpha".to_string()),
+                payment_reference: Some("cf_pay_alpha_1".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_payu_alpha_order".to_string(),
+                merchant_id: "merchant_alpha".to_string(),
+                provider: "payu".to_string(),
+                provider_order_id: Some("tx_payu_alpha".to_string()),
+                payment_reference: Some("mih_alpha_1".to_string()),
+                amount_minor: 40000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let app = build_app(state.clone());
+
+        // Test A: Cashfree Order Retrieval Isolation
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/payments/cashfree/orders/order_cf_alpha")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/payments/cashfree/orders/non_existent_order_id")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Test B: Cashfree Confirmation Isolation
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "order_id": "order_cf_alpha"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Test C: Cashfree Refund Isolation
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/refunds")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "order_id": "order_cf_alpha",
+                    "refund_id": "rf_beta_hack",
+                    "amount_minor": 1000
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Test D: PayU Verification Isolation
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/verify")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "txnid": "tx_payu_alpha"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/verify")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "txnid": "non_existent_payu_txnid"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Test E: PayU Refund Isolation
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/refunds")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_beta)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "mihpayid": "tx_payu_alpha",
+                    "refund_id": "rf_beta_payu_hack",
+                    "amount_minor": 1000
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_refund_lifecycle_state_transitions() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        let mut state = create_test_state();
+
+        let cf_config = CashfreeConfig {
+            client_id: "test_cf_client_id".to_string(),
+            client_secret: "test_cf_client_secret_super_secure_key".to_string(),
+            api_version: "2023-08-01".to_string(),
+            env: esa_cashfree::CashfreeEnv::Sandbox,
+            api_base: "http://127.0.0.1:9".to_string(),
+        };
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
+
+        let key_ref = "esa_sbx_merchant_refund_key_123456";
+        state
+            .sandbox_keys
+            .insert_key(&api_keys::SandboxKeyRecord {
+                key_hash: api_keys::hash_api_key(key_ref),
+                key_prefix: "esa_sbx_".to_string(),
+                merchant_id: "merchant_refund".to_string(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+                revoked: false,
+            })
+            .await
+            .unwrap();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_cf_uncaptured".to_string(),
+                merchant_id: "merchant_refund".to_string(),
+                provider: "cashfree".to_string(),
+                provider_order_id: Some("order_cf_uncaptured".to_string()),
+                payment_reference: None,
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: "tx_cf_captured".to_string(),
+                merchant_id: "merchant_refund".to_string(),
+                provider: "cashfree".to_string(),
+                provider_order_id: Some("order_cf_captured".to_string()),
+                payment_reference: Some("cf_pay_ref_1".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let app = build_app(state.clone());
+
+        // Case 1: Refund on uncaptured payment -> 400 Bad Request
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/refunds")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_ref)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "order_id": "order_cf_uncaptured",
+                    "refund_id": "rf_cf_001",
+                    "amount_minor": 5000
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(err_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Only captured or partially refunded payments can be refunded"));
+
+        // Case 2: Refund amount exceeds captured balance (15000 > 10000) -> 400 Bad Request
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/cashfree/refunds")
+            .header("content-type", "application/json")
+            .header("x-api-key", key_ref)
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "order_id": "order_cf_captured",
+                    "refund_id": "rf_cf_002",
+                    "amount_minor": 15000
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(err_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Refund amount exceeds refundable balance"));
+    }
+
+    #[tokio::test]
+    async fn test_payu_webhook_deterministic_idempotency_and_unknown_status() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+
+        let mut state = create_test_state();
+
+        let payu_config = PayUConfig {
+            merchant_key: "test_key".to_string(),
+            merchant_salt: "test_salt".to_string(),
+            env: esa_payu::PayUEnv::Test,
+            payment_url: "https://test.payu.in/_payment".to_string(),
+            verify_url: "http://127.0.0.1:9".to_string(),
+        };
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
+
+        let _ = state.state_fabric.upsert_workload(WorkloadEntity {
+            workload_id: "payment-upi-india-north".to_string(),
+            shard_id: "shard-001".to_string(),
+            state: WorkloadState::Healthy,
+            region: Region::IndiaNorth,
+            metrics: WorkloadMetrics {
+                rate_per_min: 1000.0,
+                p50_latency_ms: 50.0,
+                p95_latency_ms: 120.0,
+                p99_latency_ms: 200.0,
+                error_rate: 0.001,
+                queue_depth: 100,
+                timestamp: chrono::Utc::now(),
+            },
+            replication: ReplicationPolicy {
+                min_replicas: 1,
+                max_replicas: 5,
+                current_replicas: 1,
+                consistency_mode: ConsistencyMode::Eventual,
+            },
+            locality: LocalityPreference {
+                preferred_region: Region::IndiaSouth,
+                fallback_regions: vec![Region::IndiaNorth],
+            },
+            lifecycle: LifecycleState::Active,
+            version: 1,
+            updated_at: chrono::Utc::now(),
+        });
+
+        let app = build_app(state.clone());
+
+        // 1. Formulate valid PayU webhook for success
+        let txnid = "tx_payu_det_001";
+        let amount_str = "100.00";
+        let status = "success";
+        let hash = esa_payu::hash::calculate_reverse_hash(
+            "test_salt",
+            status,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test@example.com",
+            "Tester",
+            "Product",
+            amount_str,
+            txnid,
+            "test_key",
+            None,
+        );
+
+        let payload = serde_json::json!({
+            "key": "test_key",
+            "txnid": txnid,
+            "amount": amount_str,
+            "productinfo": "Product",
+            "firstname": "Tester",
+            "email": "test@example.com",
+            "status": status,
+            "mihpayid": "999111222",
+            "hash": hash,
+        });
+
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/webhook")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&payload).unwrap(),
+            ))
+            .unwrap();
+
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let bytes1 = axum::body::to_bytes(resp1.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let res1: serde_json::Value = serde_json::from_slice(&bytes1).unwrap();
+        assert_eq!(res1["status"].as_str(), Some("OK"));
+
+        let rate_after_first = state
+            .state_fabric
+            .get_workload("payment-upi-india-north")
+            .unwrap()
+            .metrics
+            .rate_per_min;
+        assert!(rate_after_first > 1000.0);
+
+        // 2. Duplicate delivery of the exact same PayU webhook
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/webhook")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&payload).unwrap(),
+            ))
+            .unwrap();
+
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let bytes2 = axum::body::to_bytes(resp2.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let res2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+        assert_eq!(res2["status"].as_str(), Some("already_processed"));
+        assert_eq!(res2["duplicate"].as_bool(), Some(true));
+
+        // Workload counter must NOT have increased on duplicate
+        let rate_after_second = state
+            .state_fabric
+            .get_workload("payment-upi-india-north")
+            .unwrap()
+            .metrics
+            .rate_per_min;
+        assert_eq!(rate_after_second, rate_after_first);
+
+        // 3. Webhook with unrecognized status
+        let unrec_status = "unrecognized_status_xyz";
+        let unrec_hash = esa_payu::hash::calculate_reverse_hash(
+            "test_salt",
+            unrec_status,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test@example.com",
+            "Tester",
+            "Product",
+            amount_str,
+            "tx_payu_unrec_002",
+            "test_key",
+            None,
+        );
+
+        let unrec_payload = serde_json::json!({
+            "key": "test_key",
+            "txnid": "tx_payu_unrec_002",
+            "amount": amount_str,
+            "productinfo": "Product",
+            "firstname": "Tester",
+            "email": "test@example.com",
+            "status": unrec_status,
+            "mihpayid": "999111333",
+            "hash": unrec_hash,
+        });
+
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/payu/webhook")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&unrec_payload).unwrap(),
+            ))
+            .unwrap();
+
+        let resp3 = app.clone().oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::BAD_REQUEST);
+        let bytes3 = axum::body::to_bytes(resp3.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let res3: serde_json::Value = serde_json::from_slice(&bytes3).unwrap();
+        assert!(res3["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unrecognized PayU event status"));
     }
 }
