@@ -102,4 +102,26 @@ impl RazorpayClient {
         info!("Created Razorpay order for receipt {}", receipt);
         Ok(body)
     }
+
+    /// Fetch an order by ID (rate-limited). Returns JSON entity for debugging/status.
+    pub async fn get_order(&self, order_id: &str) -> Result<serde_json::Value> {
+        self.rate_limiter.wait().await;
+
+        let url = format!("{}/orders/{}", self.config.api_base, order_id);
+        let response = self
+            .http
+            .get(&url)
+            .basic_auth(&self.config.key_id, Some(&self.config.key_secret))
+            .header("User-Agent", "ESA-Razorpay-Adapter/0.1")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Razorpay API error: HTTP {}", response.status());
+        }
+
+        let body = response.json().await?;
+        info!("Fetched Razorpay order {}", order_id);
+        Ok(body)
+    }
 }

@@ -48,8 +48,12 @@ impl RazorpayAdapter {
     }
 
     pub fn status(&self) -> serde_json::Value {
+        self.status_for_caller(false)
+    }
+
+    pub fn status_for_caller(&self, is_sandbox_caller: bool) -> serde_json::Value {
         serde_json::json!({
-            "razorpay": self.config.public_status(),
+            "razorpay": self.config.public_status_for_caller(is_sandbox_caller),
             "dedupe_cache_size": self.deduper.count(),
         })
     }

@@ -90,10 +90,10 @@ pub enum TelemetryMessage {
 pub fn websocket_handler_with_auth(
     ws: WebSocketUpgrade,
     broadcaster: Arc<TelemetryBroadcaster>,
-    pre_authenticated: bool,
+    pre_auth_identity: Option<crate::api_keys::CallerIdentity>,
     require_auth: bool,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, pre_authenticated, require_auth))
+    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, pre_auth_identity, require_auth))
 }
 
 #[allow(dead_code)]
@@ -101,19 +101,19 @@ pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(broadcaster): State<Arc<TelemetryBroadcaster>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, false, false))
+    ws.on_upgrade(move |socket| handle_socket(socket, broadcaster, None, false))
 }
 
 async fn handle_socket(
     socket: WebSocket,
     broadcaster: Arc<TelemetryBroadcaster>,
-    pre_authenticated: bool,
+    pre_auth_identity: Option<crate::api_keys::CallerIdentity>,
     require_auth: bool,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
-    let authenticated = if pre_authenticated {
-        true
+    let identity = if let Some(id) = pre_auth_identity.clone() {
+        Some(id)
     } else {
         // Wait up to 5 seconds for in-band auth frame
         match tokio::time::timeout(tokio::time::Duration::from_secs(5), receiver.next()).await {
@@ -126,37 +126,56 @@ async fn handle_socket(
                             .and_then(|t| t.as_str())
                             .or_else(|| v.get("apiKey").and_then(|t| t.as_str()));
                         if let Some(t) = token {
-                            crate::api_keys::is_key_authorized_async(t).await
+                            crate::api_keys::authenticate_token_str(t).await.ok()
                         } else {
-                            false
+                            None
                         }
                     } else {
-                        false
+                        None
                     }
                 } else {
-                    false
+                    None
                 }
             }
-            _ => false,
+            _ => None,
         }
     };
 
-    if !authenticated {
-        if require_auth {
-            info!("Closing unauthenticated WebSocket client in production mode");
-            let _ = sender
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 4401,
-                    reason: "Unauthorized: Invalid or missing WebSocket authentication".into(),
-                })))
-                .await;
-            return;
-        } else {
-            info!(
-                "WebSocket client connected without credentials (allowed in non-production mode)"
-            );
+    let active_identity = match identity {
+        Some(id) => {
+            if require_auth && !id.is_admin() && !id.has_scope("telemetry:admin") {
+                info!("Closing non-admin WebSocket client in production mode (insufficient scope)");
+                let _ = sender
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 4403,
+                        reason: "Forbidden: Global telemetry stream requires administrative scope"
+                            .into(),
+                    })))
+                    .await;
+                return;
+            }
+            Some(id)
         }
-    } else if !pre_authenticated {
+        None => {
+            if require_auth {
+                info!("Closing unauthenticated WebSocket client in production mode");
+                let _ = sender
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 4401,
+                        reason: "Unauthorized: Invalid or missing WebSocket authentication".into(),
+                    })))
+                    .await;
+                return;
+            } else {
+                info!(
+                    "WebSocket client connected without credentials (allowed in non-production mode)"
+                );
+                None
+            }
+        }
+    };
+
+    if active_identity.is_some() && pre_auth_identity.is_none() {
         let ack = serde_json::json!({
             "type": "auth_ack",
             "status": "authenticated",
