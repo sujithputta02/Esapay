@@ -216,6 +216,110 @@ impl IpCidr {
     }
 }
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::sync::OnceLock;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Minimum key length in bytes required for configured HMAC log correlation secrets.
+pub const MIN_LOG_HMAC_SECRET_BYTES: usize = 32;
+
+/// Validates the configured `ESA_LOG_HMAC_SECRET` environment variable.
+///
+/// Rules:
+/// - If omitted or empty: valid (falls back to process-lifetime random secret with 244 bits of entropy).
+/// - If configured and non-empty: must be at least 32 bytes in length. Shorter values are strictly rejected.
+/// - Never logs the secret or any part of it.
+/// - Length validation cannot establish entropy or randomness; operators must configure a cryptographically
+///   secure random secret (e.g. `openssl rand -hex 32`).
+pub fn validate_log_hmac_secret_configuration() -> Result<(), String> {
+    if let Ok(val) = std::env::var("ESA_LOG_HMAC_SECRET") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() && trimmed.len() < MIN_LOG_HMAC_SECRET_BYTES {
+            return Err(format!(
+                "Configured ESA_LOG_HMAC_SECRET is too short ({} bytes). Keyed HMAC logging requires at least {} bytes for cryptographic security. Note: length validation cannot establish entropy; operators must configure a cryptographically random value.",
+                trimmed.len(),
+                MIN_LOG_HMAC_SECRET_BYTES
+            ));
+        }
+    }
+    Ok(())
+}
+
+static PROCESS_FALLBACK_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
+
+/// Retrieves or generates a process-lifetime fallback secret for HMAC-SHA256 logging.
+///
+/// Fallback Entropy & Randomness Design:
+/// - Generated on first use per process lifetime via two independent OS CSPRNG UUIDv4 values.
+/// - RFC 4122 reserves 6 bits per UUID for version and variant (122 random bits per UUIDv4).
+/// - Two independent UUIDv4s provide exactly 244 bits of cryptographic CSPRNG entropy from the
+///   underlying operating system's cryptographic random number source across the 32-byte (256-bit) buffer.
+/// - 244 bits of cryptographic entropy well exceeds the industry standard 128-bit security margin for HMAC keys,
+///   preventing offline dictionary and rainbow-table precomputation across the lifetime of the process.
+fn get_fallback_secret() -> &'static [u8; 32] {
+    PROCESS_FALLBACK_SECRET.get_or_init(|| {
+        let mut secret = [0u8; 32];
+        let (u1, u2) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        secret[..16].copy_from_slice(u1.as_bytes());
+        secret[16..].copy_from_slice(u2.as_bytes());
+        secret
+    })
+}
+
+/// Generates a privacy-preserving pseudonymous identifier for structured logging without exposing
+/// raw client IPs, API tokens, or merchant IDs.
+///
+/// Security & Privacy Design:
+/// - Uses keyed HMAC-SHA256 to prevent dictionary and rainbow-table precomputation attacks against small
+///   input spaces (e.g. IPv4 addresses).
+/// - Truncated to 16 hex characters (64 bits of HMAC output) to provide high collision resistance while
+///   maintaining readable log tokens.
+/// - If `ESA_LOG_HMAC_SECRET` is configured in the environment, it is used as the HMAC key to enable stable,
+///   pseudonymous log correlation across multiple cluster nodes and service restarts.
+/// - If configured, `ESA_LOG_HMAC_SECRET` must be at least 32 bytes (validated via `validate_log_hmac_secret_configuration`).
+/// - If `ESA_LOG_HMAC_SECRET` is omitted or empty, falls back to a 244-bit entropy process-lifetime random secret,
+///   providing pseudonymous correlation within a single process run while preventing cross-restart tracking.
+/// - Note: Length validation cannot establish entropy; operators must configure a cryptographically random value.
+/// - Note: This produces pseudonymous identifiers for log correlation, not full anonymization.
+pub fn privacy_preserving_client_id(raw: &str) -> String {
+    let env_val = std::env::var("ESA_LOG_HMAC_SECRET").ok();
+    let key: &[u8] = match env_val.as_deref().map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => {
+            if trimmed.len() < MIN_LOG_HMAC_SECRET_BYTES {
+                panic!(
+                    "Configured ESA_LOG_HMAC_SECRET is too short ({} bytes). Keyed HMAC logging requires at least {} bytes.",
+                    trimmed.len(),
+                    MIN_LOG_HMAC_SECRET_BYTES
+                );
+            }
+            trimmed.as_bytes()
+        }
+        _ => get_fallback_secret(),
+    };
+
+    let hash = if let Ok(mut mac) = HmacSha256::new_from_slice(key) {
+        mac.update(raw.as_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    } else {
+        use sha2::Digest;
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        hasher.update(raw.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    let prefix = if raw.starts_with("auth_") {
+        "auth_user:"
+    } else if raw.starts_with("ip:") {
+        "ip_hash:"
+    } else {
+        "client_hash:"
+    };
+    format!("{}{}", prefix, &hash[..16])
+}
+
 /// Configuration for trusted reverse proxy networks.
 ///
 /// Differentiates between generic reverse proxies (which must never be trusted to forward arbitrary
@@ -252,13 +356,41 @@ impl TrustedProxyConfig {
             }
             Vec::new()
         } else {
-            generic_str.split(',').filter_map(IpCidr::parse).collect()
+            let mut list = Vec::new();
+            for token in generic_str.split(',') {
+                let clean = token.trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                match IpCidr::parse(clean) {
+                    Some(cidr) => list.push(cidr),
+                    None => {
+                        tracing::warn!(
+                            token = %clean,
+                            "Failed to parse TRUSTED_PROXIES entry as valid IPv4 or IPv6 CIDR; entry ignored"
+                        );
+                    }
+                }
+            }
+            list
         };
 
-        let cloudflare_proxies = cloudflare_str
-            .split(',')
-            .filter_map(IpCidr::parse)
-            .collect();
+        let mut cloudflare_proxies = Vec::new();
+        for token in cloudflare_str.split(',') {
+            let clean = token.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            match IpCidr::parse(clean) {
+                Some(cidr) => cloudflare_proxies.push(cidr),
+                None => {
+                    tracing::warn!(
+                        token = %clean,
+                        "Failed to parse CLOUDFLARE_PROXIES entry as valid IPv4 or IPv6 CIDR; entry ignored"
+                    );
+                }
+            }
+        }
 
         Self {
             generic_proxies,
@@ -560,6 +692,7 @@ impl ApiRateLimiter {
 
     pub fn check_checkout(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.checkout_limiter.check().is_err() {
+            tracing::warn!(limiter = "checkout", "Payment checkout rate limit exceeded");
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
@@ -577,6 +710,10 @@ impl ApiRateLimiter {
     #[allow(dead_code)]
     pub fn check_keys(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                limiter = "aggregate_keys",
+                "Process-level API key operation rate limit exceeded"
+            );
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
@@ -593,6 +730,10 @@ impl ApiRateLimiter {
     /// Per-source rate limit check for sandbox key generation with process-local aggregate safeguard
     pub fn check_generate_sandbox(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                limiter = "generate_sandbox_aggregate",
+                "Process-level aggregate API key generation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -615,6 +756,12 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            let client_ref = privacy_preserving_client_id(client_key);
+            tracing::warn!(
+                client_ref = %client_ref,
+                limiter = "generate_sandbox_per_client",
+                "Client sandbox key generation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -632,6 +779,10 @@ impl ApiRateLimiter {
     /// Per-source rate limit check for key validation with process-local aggregate safeguard
     pub fn check_validate_key(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
+            tracing::warn!(
+                limiter = "validate_key_aggregate",
+                "Process-level aggregate API key validation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -654,6 +805,12 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            let client_ref = privacy_preserving_client_id(client_key);
+            tracing::warn!(
+                client_ref = %client_ref,
+                limiter = "validate_key_per_client",
+                "Client API key validation rate limit exceeded"
+            );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -670,6 +827,7 @@ impl ApiRateLimiter {
 
     pub fn check_demo(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         if self.demo_limiter.check().is_err() {
+            tracing::warn!(limiter = "demo", "Scenario simulation rate limit exceeded");
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
