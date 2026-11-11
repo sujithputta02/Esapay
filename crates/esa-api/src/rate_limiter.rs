@@ -222,8 +222,42 @@ use std::sync::OnceLock;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Minimum key length in bytes required for configured HMAC log correlation secrets.
+pub const MIN_LOG_HMAC_SECRET_BYTES: usize = 32;
+
+/// Validates the configured `ESA_LOG_HMAC_SECRET` environment variable.
+///
+/// Rules:
+/// - If omitted or empty: valid (falls back to process-lifetime random secret with 244 bits of entropy).
+/// - If configured and non-empty: must be at least 32 bytes in length. Shorter values are strictly rejected.
+/// - Never logs the secret or any part of it.
+/// - Length validation cannot establish entropy or randomness; operators must configure a cryptographically
+///   secure random secret (e.g. `openssl rand -hex 32`).
+pub fn validate_log_hmac_secret_configuration() -> Result<(), String> {
+    if let Ok(val) = std::env::var("ESA_LOG_HMAC_SECRET") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() && trimmed.len() < MIN_LOG_HMAC_SECRET_BYTES {
+            return Err(format!(
+                "Configured ESA_LOG_HMAC_SECRET is too short ({} bytes). Keyed HMAC logging requires at least {} bytes for cryptographic security. Note: length validation cannot establish entropy; operators must configure a cryptographically random value.",
+                trimmed.len(),
+                MIN_LOG_HMAC_SECRET_BYTES
+            ));
+        }
+    }
+    Ok(())
+}
+
 static PROCESS_FALLBACK_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
 
+/// Retrieves or generates a process-lifetime fallback secret for HMAC-SHA256 logging.
+///
+/// Fallback Entropy & Randomness Design:
+/// - Generated on first use per process lifetime via two independent OS CSPRNG UUIDv4 values.
+/// - RFC 4122 reserves 6 bits per UUID for version and variant (122 random bits per UUIDv4).
+/// - Two independent UUIDv4s provide exactly 244 bits of cryptographic CSPRNG entropy from the
+///   underlying operating system's cryptographic random number source across the 32-byte (256-bit) buffer.
+/// - 244 bits of cryptographic entropy well exceeds the industry standard 128-bit security margin for HMAC keys,
+///   preventing offline dictionary and rainbow-table precomputation across the lifetime of the process.
 fn get_fallback_secret() -> &'static [u8; 32] {
     PROCESS_FALLBACK_SECRET.get_or_init(|| {
         let mut secret = [0u8; 32];
@@ -240,15 +274,28 @@ fn get_fallback_secret() -> &'static [u8; 32] {
 /// Security & Privacy Design:
 /// - Uses keyed HMAC-SHA256 to prevent dictionary and rainbow-table precomputation attacks against small
 ///   input spaces (e.g. IPv4 addresses).
+/// - Truncated to 16 hex characters (64 bits of HMAC output) to provide high collision resistance while
+///   maintaining readable log tokens.
 /// - If `ESA_LOG_HMAC_SECRET` is configured in the environment, it is used as the HMAC key to enable stable,
 ///   pseudonymous log correlation across multiple cluster nodes and service restarts.
-/// - If `ESA_LOG_HMAC_SECRET` is omitted or empty, falls back to a 256-bit process-lifetime random secret,
+/// - If configured, `ESA_LOG_HMAC_SECRET` must be at least 32 bytes (validated via `validate_log_hmac_secret_configuration`).
+/// - If `ESA_LOG_HMAC_SECRET` is omitted or empty, falls back to a 244-bit entropy process-lifetime random secret,
 ///   providing pseudonymous correlation within a single process run while preventing cross-restart tracking.
+/// - Note: Length validation cannot establish entropy; operators must configure a cryptographically random value.
 /// - Note: This produces pseudonymous identifiers for log correlation, not full anonymization.
 pub fn privacy_preserving_client_id(raw: &str) -> String {
     let env_val = std::env::var("ESA_LOG_HMAC_SECRET").ok();
     let key: &[u8] = match env_val.as_deref().map(str::trim) {
-        Some(trimmed) if !trimmed.is_empty() => trimmed.as_bytes(),
+        Some(trimmed) if !trimmed.is_empty() => {
+            if trimmed.len() < MIN_LOG_HMAC_SECRET_BYTES {
+                panic!(
+                    "Configured ESA_LOG_HMAC_SECRET is too short ({} bytes). Keyed HMAC logging requires at least {} bytes.",
+                    trimmed.len(),
+                    MIN_LOG_HMAC_SECRET_BYTES
+                );
+            }
+            trimmed.as_bytes()
+        }
         _ => get_fallback_secret(),
     };
 
@@ -270,7 +317,7 @@ pub fn privacy_preserving_client_id(raw: &str) -> String {
     } else {
         "client_hash:"
     };
-    format!("{}{}", prefix, &hash[..12])
+    format!("{}{}", prefix, &hash[..16])
 }
 
 /// Configuration for trusted reverse proxy networks.
