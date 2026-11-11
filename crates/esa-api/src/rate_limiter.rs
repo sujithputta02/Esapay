@@ -216,6 +216,22 @@ impl IpCidr {
     }
 }
 
+/// Generates a privacy-preserving identifier for structured logging without exposing raw client IPs or identities.
+pub fn privacy_preserving_client_id(raw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let prefix = if raw.starts_with("auth_") {
+        "auth_user:"
+    } else if raw.starts_with("ip:") {
+        "ip_hash:"
+    } else {
+        "client_hash:"
+    };
+    format!("{}{}", prefix, &hash[..12])
+}
+
 /// Configuration for trusted reverse proxy networks.
 ///
 /// Differentiates between generic reverse proxies (which must never be trusted to forward arbitrary
@@ -627,7 +643,6 @@ impl ApiRateLimiter {
     pub fn check_generate_sandbox(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
             tracing::warn!(
-                client_key = %client_key,
                 limiter = "generate_sandbox_aggregate",
                 "Process-level aggregate API key generation rate limit exceeded"
             );
@@ -653,8 +668,9 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            let client_ref = privacy_preserving_client_id(client_key);
             tracing::warn!(
-                client_key = %client_key,
+                client_ref = %client_ref,
                 limiter = "generate_sandbox_per_client",
                 "Client sandbox key generation rate limit exceeded"
             );
@@ -676,7 +692,6 @@ impl ApiRateLimiter {
     pub fn check_validate_key(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
             tracing::warn!(
-                client_key = %client_key,
                 limiter = "validate_key_aggregate",
                 "Process-level aggregate API key validation rate limit exceeded"
             );
@@ -702,8 +717,9 @@ impl ApiRateLimiter {
             .check_key(&client_key.to_string())
             .is_err()
         {
+            let client_ref = privacy_preserving_client_id(client_key);
             tracing::warn!(
-                client_key = %client_key,
+                client_ref = %client_ref,
                 limiter = "validate_key_per_client",
                 "Client API key validation rate limit exceeded"
             );

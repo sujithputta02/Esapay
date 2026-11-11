@@ -255,6 +255,77 @@ pub(crate) fn is_production_mode() -> bool {
     }
 }
 
+/// Validates admin API key configuration.
+///
+/// In live/production mode:
+/// - A secure administrative key of at least 32 characters is strictly required.
+/// - Shorter keys or missing keys fail closed.
+/// - Never logs the key or any part of it.
+///
+/// Non-production modes (dev/test/simulation) do not enforce this requirement.
+pub fn validate_admin_key_configuration(is_production: bool) -> anyhow::Result<()> {
+    if !is_production {
+        return Ok(());
+    }
+
+    match std::env::var("ESA_ADMIN_API_KEY") {
+        Ok(key) => {
+            let trimmed = key.trim();
+            if trimmed.len() < 32 {
+                anyhow::bail!(
+                    "ESA_ADMIN_API_KEY is too short ({} chars). Production mode strictly requires at least 32 random characters.",
+                    trimmed.len()
+                );
+            }
+            Ok(())
+        }
+        Err(_) => {
+            anyhow::bail!(
+                "ESA_ADMIN_API_KEY is missing in live/production mode. A secure administrative key of at least 32 characters is strictly required."
+            );
+        }
+    }
+}
+
+/// Request correlation ID extracted from incoming headers (`x-request-id` or `x-correlation-id`)
+/// or generated as a server fallback UUIDv4.
+///
+/// Available to all handlers and downstream layers via Axum request extensions:
+/// `Extension(req_id): Extension<RequestCorrelationId>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestCorrelationId(pub String);
+
+impl std::fmt::Display for RequestCorrelationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::ops::Deref for RequestCorrelationId {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Safely sanitizes incoming correlation IDs.
+/// Only permits ASCII alphanumeric characters, hyphens, and underscores up to 64 chars.
+/// Never treats client-supplied correlation IDs as identity or authentication.
+pub fn sanitize_correlation_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 /// Evaluates whether demonstration, benchmark, or chaos mutation endpoints are permitted.
 /// Conceptually distinct from checkout mode: mutation endpoints (spike injection,
 /// data reset, state seed, benchmark runs, simulated failover) are ONLY permitted in an
@@ -501,15 +572,7 @@ async fn main() -> anyhow::Result<()> {
         }
         PaymentCheckoutMode::Live { reason } => {
             info!("Production live mode detected: {}", reason);
-            if let Ok(key) = std::env::var("ESA_ADMIN_API_KEY") {
-                if key.trim().is_empty() {
-                    anyhow::bail!(
-                        "ESA_ADMIN_API_KEY is configured but empty in live/production mode"
-                    );
-                }
-            } else {
-                warn!("ESA_ADMIN_API_KEY is not set in live/production mode; admin endpoints will be inaccessible");
-            }
+            validate_admin_key_configuration(true)?;
         }
         PaymentCheckoutMode::Simulated => {
             info!("Simulation payment checkout mode active");
@@ -677,7 +740,7 @@ async fn main() -> anyhow::Result<()> {
                     p99_latency_ms: 180.0,
                     error_rate: 0.01,
                     queue_depth: 250,
-                    timestamp: Utc::now(),
+                    timestamp: chrono::Utc::now(),
                 },
                 replication: ReplicationPolicy {
                     min_replicas: 2,
@@ -691,7 +754,7 @@ async fn main() -> anyhow::Result<()> {
                 },
                 lifecycle: LifecycleState::Active,
                 version: 1,
-                updated_at: Utc::now(),
+                updated_at: chrono::Utc::now(),
             },
             WorkloadEntity {
                 workload_id: "payment-cards-india-west".to_string(),
@@ -1018,7 +1081,7 @@ fn build_app(app_state: AppState) -> Router {
     };
 
     app.layer(axum::middleware::from_fn(
-        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+        |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
             let is_https = req
                 .headers()
                 .get("x-forwarded-proto")
@@ -1027,16 +1090,34 @@ fn build_app(app_state: AppState) -> Router {
                 .unwrap_or(false);
             let is_prod = is_production_mode();
 
-            let request_id = req
+            let raw_corr = req
                 .headers()
                 .get("x-request-id")
                 .or_else(|| req.headers().get("x-correlation-id"))
-                .and_then(|v| v.to_str().ok())
-                .filter(|s| !s.trim().is_empty() && s.len() <= 128)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                .and_then(|v| v.to_str().ok());
 
-            let mut res = next.run(req).await;
+            let validated_id = raw_corr.and_then(sanitize_correlation_id);
+            let request_id = validated_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+            let correlation_id = RequestCorrelationId(request_id.clone());
+            req.extensions_mut().insert(correlation_id);
+
+            let method = req.method().clone();
+            let uri = req.uri().clone();
+            let span = tracing::info_span!(
+                "http_request",
+                request_id = %request_id,
+                method = %method,
+                uri = %uri,
+            );
+
+            let res = {
+                let _guard = span.enter();
+                tracing::debug!("Processing HTTP request");
+                next.run(req).await
+            };
+
+            let mut res = res;
             let headers = res.headers_mut();
             if let Ok(val) = request_id.parse() {
                 headers.insert("x-request-id", val);
@@ -4351,7 +4432,7 @@ mod integration_tests {
         let state = create_test_state();
         let app = build_app(state.clone());
 
-        // 1. Explicit incoming X-Request-ID is echoed back
+        // 1. Explicit valid incoming X-Request-ID is echoed back
         let custom_id = "test-corr-id-987654";
         let req = Request::builder()
             .method("GET")
@@ -4369,14 +4450,36 @@ mod integration_tests {
             Some(custom_id)
         );
 
-        // 2. Omitted X-Request-ID generates a fresh UUIDv4 in response header
+        // 2. Invalid correlation ID (contains spaces, symbols, or disallowed characters) falls back to safe UUIDv4
+        let malformed_id = "invalid id with spaces & symbols !@#$";
+        let req_malformed = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .header("x-request-id", malformed_id)
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_malformed = app.clone().oneshot(req_malformed).await.unwrap();
+        assert_eq!(resp_malformed.status(), StatusCode::OK);
+        let fallback_id = resp_malformed
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("x-request-id header must be generated");
+        assert_ne!(fallback_id, malformed_id);
+        assert!(
+            uuid::Uuid::parse_str(fallback_id).is_ok(),
+            "Fallback correlation ID must be a valid UUIDv4"
+        );
+
+        // 3. Omitted X-Request-ID generates a fresh UUIDv4 in response header
         let req_auto = Request::builder()
             .method("GET")
             .uri("/health")
             .body(axum::body::Body::empty())
             .unwrap();
 
-        let resp_auto = app.oneshot(req_auto).await.unwrap();
+        let resp_auto = app.clone().oneshot(req_auto).await.unwrap();
         assert_eq!(resp_auto.status(), StatusCode::OK);
         let generated_id = resp_auto
             .headers()
@@ -4386,6 +4489,58 @@ mod integration_tests {
         assert!(
             uuid::Uuid::parse_str(generated_id).is_ok(),
             "Generated request ID must be a valid UUIDv4"
+        );
+
+        // 4. Request context extension propagation:
+        // Build a test router with an endpoint extracting RequestCorrelationId extension
+        let test_router =
+            Router::new()
+                .route(
+                    "/test/correlation",
+                    get(
+                        |axum::Extension(corr): axum::Extension<RequestCorrelationId>| async move {
+                            corr.0
+                        },
+                    ),
+                )
+                .layer(axum::middleware::from_fn(
+                    |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                        let raw_corr = req
+                            .headers()
+                            .get("x-request-id")
+                            .or_else(|| req.headers().get("x-correlation-id"))
+                            .and_then(|v| v.to_str().ok());
+
+                        let validated_id = raw_corr.and_then(sanitize_correlation_id);
+                        let request_id =
+                            validated_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        let correlation_id = RequestCorrelationId(request_id.clone());
+                        req.extensions_mut().insert(correlation_id);
+
+                        let mut res = next.run(req).await;
+                        if let Ok(val) = request_id.parse() {
+                            res.headers_mut().insert("x-request-id", val);
+                        }
+                        res
+                    },
+                ));
+
+        let req_ext = Request::builder()
+            .method("GET")
+            .uri("/test/correlation")
+            .header("x-request-id", "trace-extension-verified-42")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp_ext = test_router.oneshot(req_ext).await.unwrap();
+        assert_eq!(resp_ext.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp_ext.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert_eq!(
+            body_str, "trace-extension-verified-42",
+            "RequestCorrelationId must be propagated through request extensions"
         );
     }
 
@@ -4456,29 +4611,51 @@ mod integration_tests {
         };
         state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
 
-        // Pre-seed an authoritative captured payment record in durable store
-        let captured_params = esa_state::WebhookEventParams {
-            provider: "razorpay",
-            provider_event_id: "event_pre_captured_123",
-            event_type: PaymentEventType::PaymentCaptured,
-            payment_id,
-            amount_minor: 5000,
-            currency: "INR",
-            refund_id: None,
-            refund_amount_minor: None,
-            refund_status: None,
-            payload: &serde_json::json!({ "id": payment_id, "amount": 5000 }),
-        };
-        let apply_res = state
-            .webhook_store
-            .process_webhook_event(&captured_params)
-            .await;
-        assert!(matches!(
-            apply_res,
-            Ok(esa_state::WebhookProcessingResult::Applied { .. })
-        ));
+        // 1. Starts with a payment that has NOT yet been captured
+        assert!(
+            state
+                .webhook_store
+                .get_payment_record(payment_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "Payment must start uncaptured"
+        );
 
-        // Track initial workload metrics
+        // Seed workload for confirmation event metric application
+        state
+            .state_fabric
+            .upsert_workload(WorkloadEntity {
+                workload_id: "payment-upi-india-south".to_string(),
+                shard_id: "shard-001".to_string(),
+                state: WorkloadState::Healthy,
+                region: Region::IndiaSouth,
+                metrics: WorkloadMetrics {
+                    rate_per_min: 3000.0,
+                    p50_latency_ms: 45.0,
+                    p95_latency_ms: 120.0,
+                    p99_latency_ms: 180.0,
+                    error_rate: 0.01,
+                    queue_depth: 250,
+                    timestamp: chrono::Utc::now(),
+                },
+                replication: ReplicationPolicy {
+                    min_replicas: 2,
+                    max_replicas: 10,
+                    current_replicas: 3,
+                    consistency_mode: ConsistencyMode::Strong,
+                },
+                locality: LocalityPreference {
+                    preferred_region: Region::IndiaSouth,
+                    fallback_regions: vec![Region::IndiaWest, Region::IndiaNorth],
+                },
+                lifecycle: LifecycleState::Active,
+                version: 1,
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        // Track initial workload baseline
         let initial_rate = state
             .state_fabric
             .get_workload("payment-upi-india-south")
@@ -4487,9 +4664,69 @@ mod integration_tests {
 
         let app = build_app(state.clone());
 
-        // Repeated confirmation requests for this already-captured payment
+        // 2. First confirmation request
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/razorpay/confirm")
+            .header("content-type", "application/json")
+            .header("x-api-key", "esa_test_key_root")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&serde_json::json!({
+                    "payment_id": payment_id
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+        assert_eq!(
+            json1.get("status").and_then(|v| v.as_str()),
+            Some("accepted")
+        );
+        assert_eq!(
+            json1.get("workload_updated").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // 3. Verifies durable webhook store transitioned payment to Captured
+        let payment_record = state
+            .webhook_store
+            .get_payment_record(payment_id)
+            .await
+            .unwrap()
+            .expect("Payment record must exist after confirmation");
+        assert_eq!(payment_record.state, PaymentState::Captured);
+        assert_eq!(payment_record.amount_minor, 5000);
+        assert_eq!(payment_record.currency, "INR");
+
+        // 4. Verifies confirmation event was persisted in webhook inbox
+        let inbox_record = state
+            .webhook_store
+            .get_inbox_record("razorpay", &format!("confirm_{}", payment_id))
+            .await
+            .unwrap()
+            .expect("Confirmation inbox record must exist");
+        assert_eq!(inbox_record.status, esa_state::WebhookStatus::Processed);
+
+        // Track workload metrics after first confirmation
+        let rate_after_first = state
+            .state_fabric
+            .get_workload("payment-upi-india-south")
+            .map(|w| w.metrics.rate_per_min)
+            .unwrap_or(0.0);
+        assert!(
+            rate_after_first > initial_rate,
+            "Initial confirmation should apply workload metrics"
+        );
+
+        // 5 & 6. Repeated confirmation requests return idempotent response
         for _ in 0..3 {
-            let req = Request::builder()
+            let req_repeat = Request::builder()
                 .method("POST")
                 .uri("/api/v1/razorpay/confirm")
                 .header("content-type", "application/json")
@@ -4502,31 +4739,202 @@ mod integration_tests {
                 ))
                 .unwrap();
 
-            let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            let resp_repeat = app.clone().oneshot(req_repeat).await.unwrap();
+            assert_eq!(resp_repeat.status(), StatusCode::OK);
+            let body_repeat = axum::body::to_bytes(resp_repeat.into_body(), usize::MAX)
                 .await
                 .unwrap();
-            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let json_repeat: serde_json::Value = serde_json::from_slice(&body_repeat).unwrap();
             assert_eq!(
-                json.get("status").and_then(|v| v.as_str()),
+                json_repeat.get("status").and_then(|v| v.as_str()),
                 Some("already_confirmed")
             );
-            assert_eq!(json.get("idempotent").and_then(|v| v.as_bool()), Some(true));
+            assert_eq!(
+                json_repeat.get("idempotent").and_then(|v| v.as_bool()),
+                Some(true)
+            );
         }
 
-        // Verify workload metrics did NOT compound or inflate
+        // 7. Confirms there is NO duplicate event or workload metric inflation
         let final_rate = state
             .state_fabric
             .get_workload("payment-upi-india-south")
             .map(|w| w.metrics.rate_per_min)
             .unwrap_or(0.0);
         assert_eq!(
-            initial_rate, final_rate,
-            "Repeated confirmations must not compound workload metrics"
+            rate_after_first, final_rate,
+            "Repeated confirmations must not compound or inflate workload metrics"
         );
 
         std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    struct FailingHealthWebhookStore {
+        connection_secret_leak: String,
+    }
+
+    #[esa_state::async_trait]
+    impl WebhookStore for FailingHealthWebhookStore {
+        async fn health_check(&self) -> Result<(), esa_state::WebhookStoreError> {
+            Err(esa_state::WebhookStoreError::Database(format!(
+                "Fatal connection timeout to {}",
+                self.connection_secret_leak
+            )))
+        }
+
+        async fn process_webhook_event(
+            &self,
+            _params: &esa_state::WebhookEventParams<'_>,
+        ) -> Result<esa_state::WebhookProcessingResult, esa_state::WebhookStoreError> {
+            Err(esa_state::WebhookStoreError::Database("unreachable".into()))
+        }
+
+        async fn get_inbox_record(
+            &self,
+            _provider: &str,
+            _provider_event_id: &str,
+        ) -> Result<Option<esa_state::WebhookInboxRecord>, esa_state::WebhookStoreError> {
+            Ok(None)
+        }
+
+        async fn get_payment_record(
+            &self,
+            _payment_id: &str,
+        ) -> Result<Option<PaymentEntity>, esa_state::WebhookStoreError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readiness_failure_behavior_and_liveness_isolation() {
+        let mut state = create_test_state();
+        let secret_leak = "postgres://admin_user:super_secret_db_password_123@db.internal:5432/esa";
+        state.webhook_store = Arc::new(FailingHealthWebhookStore {
+            connection_secret_leak: secret_leak.to_string(),
+        });
+
+        let app = build_app(state);
+
+        // 1. /ready and /readyz return HTTP 503 when store is unhealthy
+        for uri in &["/ready", "/readyz", "/api/ready", "/api/v1/ready"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body_str = String::from_utf8(body.to_vec()).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+
+            assert_eq!(
+                json.get("status").and_then(|v| v.as_str()),
+                Some("not_ready")
+            );
+            assert_eq!(
+                json.get("database").and_then(|v| v.as_str()),
+                Some("unhealthy")
+            );
+            assert_eq!(
+                json.get("error").and_then(|v| v.as_str()),
+                Some("database connection check failed")
+            );
+
+            // 2. The response MUST NOT leak database credentials or connection details
+            assert!(
+                !body_str.contains("super_secret_db_password"),
+                "Readiness error must never leak database password to caller"
+            );
+            assert!(
+                !body_str.contains("db.internal"),
+                "Readiness error must never leak internal hostnames"
+            );
+        }
+
+        // 3. /health, /healthz, and /livez remain liveness checks and continue returning HTTP 200
+        for uri in &["/health", "/healthz", "/livez"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(*uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("healthy"));
+        }
+    }
+
+    #[test]
+    fn test_admin_key_configuration_enforcement() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+
+        // 1. In non-production mode: missing or short key does not bail
+        assert!(validate_admin_key_configuration(false).is_ok());
+
+        std::env::set_var("ESA_ADMIN_API_KEY", "short_secret");
+        assert!(validate_admin_key_configuration(false).is_ok());
+
+        // 2. In production mode with missing key: strictly fails closed
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+        let res_missing = validate_admin_key_configuration(true);
+        assert!(res_missing.is_err());
+        assert!(res_missing
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("ESA_ADMIN_API_KEY is missing in live/production mode"));
+
+        // 3. In production mode with short key (< 32 chars): strictly rejected
+        std::env::set_var("ESA_ADMIN_API_KEY", "short_key_only_24_chars_");
+        let res_short = validate_admin_key_configuration(true);
+        assert!(res_short.is_err());
+        let short_err = res_short.err().unwrap().to_string();
+        assert!(short_err.contains("too short"));
+        assert!(short_err.contains("at least 32 random characters"));
+        assert!(!short_err.contains("short_key_only_24_chars_")); // Never logs the key!
+
+        // 4. In production mode with valid key (>= 32 chars): succeeds
+        std::env::set_var(
+            "ESA_ADMIN_API_KEY",
+            "esa_admin_sec_super_strong_key_at_least_32_characters_123456",
+        );
+        assert!(validate_admin_key_configuration(true).is_ok());
+
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+    }
+
+    #[test]
+    fn test_rate_limiter_privacy_preserving_identifiers() {
+        let ip_key = "ip:198.51.100.1";
+        let auth_key = "auth_merchant_987654321";
+        let other_key = "custom_client_ref";
+
+        let ip_ref = rate_limiter::privacy_preserving_client_id(ip_key);
+        let auth_ref = rate_limiter::privacy_preserving_client_id(auth_key);
+        let other_ref = rate_limiter::privacy_preserving_client_id(other_key);
+
+        assert!(ip_ref.starts_with("ip_hash:"));
+        assert!(!ip_ref.contains("198.51.100.1"));
+        assert_eq!(ip_ref.len(), 8 + 12); // "ip_hash:" + 12 hex chars
+
+        assert!(auth_ref.starts_with("auth_user:"));
+        assert!(!auth_ref.contains("987654321"));
+
+        assert!(other_ref.starts_with("client_hash:"));
+
+        // Deterministic
+        assert_eq!(ip_ref, rate_limiter::privacy_preserving_client_id(ip_key));
     }
 
     #[tokio::test]
