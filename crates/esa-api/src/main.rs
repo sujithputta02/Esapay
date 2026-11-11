@@ -9598,4 +9598,109 @@ mod integration_tests {
             body["message"]
         );
     }
+
+    #[tokio::test]
+    async fn test_rate_limiter_cf_connecting_ip_and_strict_bounded_concurrency() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+
+        // 1. Generic trusted proxy ignores CF-Connecting-IP and uses XFF
+        std::env::set_var("TRUSTED_PROXIES", "10.0.0.0/8");
+        std::env::remove_var("CLOUDFLARE_PROXIES");
+
+        let state = create_test_state();
+        let app = build_app(state);
+
+        let generic_proxy: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+
+        async fn send_req(
+            app: Router,
+            peer: SocketAddr,
+            hdrs: Vec<(&'static str, &'static str)>,
+        ) -> axum::response::Response {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/keys/generate-sandbox")
+                .header("content-type", "application/json");
+            for (k, v) in hdrs {
+                builder = builder.header(k, v);
+            }
+            let mut req = builder.body(axum::body::Body::empty()).unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            app.oneshot(req).await.unwrap()
+        }
+
+        // Send request from generic proxy with spoofed CF-Connecting-IP and real XFF
+        let r_gen = send_req(
+            app.clone(),
+            generic_proxy,
+            vec![
+                ("cf-connecting-ip", "1.1.1.1"),
+                ("x-forwarded-for", "203.0.113.77"),
+            ],
+        )
+        .await;
+        assert_eq!(r_gen.status(), StatusCode::OK);
+
+        // 2. Cloudflare proxy honors CF-Connecting-IP
+        std::env::set_var("CLOUDFLARE_PROXIES", "173.245.48.0/20");
+        let cf_proxy: SocketAddr = "173.245.48.1:443".parse().unwrap();
+        let r_cf = send_req(
+            app.clone(),
+            cf_proxy,
+            vec![("cf-connecting-ip", "203.0.113.99")],
+        )
+        .await;
+        assert_eq!(r_cf.status(), StatusCode::OK);
+
+        // Clean up environment
+        std::env::remove_var("TRUSTED_PROXIES");
+        std::env::remove_var("CLOUDFLARE_PROXIES");
+
+        // 3. Strict capacity bound under concurrent requests
+        let bound = 4;
+        let mut bounded_state = create_test_state();
+        bounded_state.rate_limiter = rate_limiter::ApiRateLimiter::new_with_bounded_capacity(
+            10, 10, 100, 100, 10, 10, 10, 10, 10, 10, bound,
+        );
+        let bounded_app = build_app(bounded_state.clone());
+
+        // Launch 40 concurrent requests with 40 distinct peer IPs
+        let mut handles = Vec::new();
+        for i in 0..40 {
+            let app_clone = bounded_app.clone();
+            let peer: SocketAddr = format!("198.51.100.{}:1234", i + 1).parse().unwrap();
+            handles.push(tokio::spawn(async move {
+                send_req(app_clone, peer, vec![]).await
+            }));
+        }
+
+        for h in handles {
+            let res = h.await.unwrap();
+            assert!(
+                res.status() == StatusCode::OK || res.status() == StatusCode::TOO_MANY_REQUESTS
+            );
+        }
+
+        // Strict capacity assertion: limiter length can NEVER exceed bound!
+        assert!(
+            bounded_state.rate_limiter.gen_len() <= bound,
+            "Limiter entries {} exceeded strict capacity bound {}",
+            bounded_state.rate_limiter.gen_len(),
+            bound
+        );
+
+        // 4. Overflow requests do not create additional keyed entries
+        let initial_len = bounded_state.rate_limiter.gen_len();
+        for i in 100..120 {
+            let peer: SocketAddr = format!("198.51.200.{}:4321", i).parse().unwrap();
+            let _ = send_req(bounded_app.clone(), peer, vec![]).await;
+        }
+        let after_len = bounded_state.rate_limiter.gen_len();
+        assert_eq!(
+            initial_len, after_len,
+            "Overflow traffic must not increase the number of keyed entries"
+        );
+    }
 }

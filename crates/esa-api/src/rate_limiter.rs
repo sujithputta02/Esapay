@@ -1,9 +1,11 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use governor::clock::DefaultClock;
-use governor::state::keyed::DefaultKeyedStateStore;
-use governor::state::{InMemoryState, NotKeyed};
+use governor::nanos::Nanos;
+use governor::state::keyed::{DefaultKeyedStateStore, ShrinkableKeyedStateStore};
+use governor::state::{InMemoryState, NotKeyed, StateStore};
 use governor::{Quota, RateLimiter as GovRateLimiter};
+use parking_lot::Mutex;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
@@ -18,7 +20,96 @@ pub type RateLimitError = (
 );
 
 /// Maximum number of active tracked keys in keyed rate limiters to prevent unbounded memory growth
-const MAX_KEYED_ENTRIES: usize = 10_000;
+pub const MAX_KEYED_ENTRIES: usize = 10_000;
+
+/// Bounded keyed state store backed by Governor's `DefaultKeyedStateStore`.
+///
+/// Guarantees that the number of active distinct rate-limiter keys can never exceed `capacity`.
+/// Under high concurrency, key admission is synchronized such that once capacity is reached,
+/// all new distinct keys are atomically routed to a shared `overflow_key` bucket.
+/// Established keys bypass the lock and execute concurrently.
+pub struct BoundedKeyedStateStore<K = String> {
+    inner: DefaultKeyedStateStore<K>,
+    capacity: usize,
+    overflow_key: K,
+    admission_lock: Mutex<()>,
+}
+
+impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> BoundedKeyedStateStore<K> {
+    pub fn new(capacity: usize, overflow_key: K) -> Self {
+        Self {
+            inner: DefaultKeyedStateStore::default(),
+            capacity: capacity.max(1),
+            overflow_key,
+            admission_lock: Mutex::new(()),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> StateStore
+    for BoundedKeyedStateStore<K>
+{
+    type Key = K;
+
+    fn measure_and_replace<T, F, E>(&self, key: &Self::Key, f: F) -> Result<T, E>
+    where
+        F: Fn(Option<Nanos>) -> Result<(T, Nanos), E>,
+    {
+        // Fast path for established keys: lock-free concurrent measurement
+        if self.inner.contains_key(key) {
+            return self.inner.measure_and_replace(key, f);
+        }
+
+        // New key path: synchronize admission to strictly bound capacity under concurrency
+        let _guard = self.admission_lock.lock();
+
+        // Double-check: was the key admitted by another thread while waiting for the lock?
+        if self.inner.contains_key(key) {
+            return self.inner.measure_and_replace(key, f);
+        }
+
+        // Enforce capacity bound: if at capacity, route to overflow_key
+        let has_overflow = self.inner.contains_key(&self.overflow_key);
+        let effective_limit = self
+            .capacity
+            .saturating_sub(if has_overflow { 0 } else { 1 });
+
+        let target_key = if self.inner.len() >= effective_limit {
+            &self.overflow_key
+        } else {
+            key
+        };
+
+        self.inner.measure_and_replace(target_key, f)
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> ShrinkableKeyedStateStore<K>
+    for BoundedKeyedStateStore<K>
+{
+    fn retain_recent(&self, drop_below: Nanos) {
+        let _guard = self.admission_lock.lock();
+        self.inner.retain_recent(drop_below);
+    }
+
+    fn shrink_to_fit(&self) {
+        let _guard = self.admission_lock.lock();
+        self.inner.shrink_to_fit();
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
 
 /// Represents an IPv4 or IPv6 CIDR block for trusted proxy IP verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,56 +172,78 @@ impl IpCidr {
 }
 
 /// Configuration for trusted reverse proxy networks.
+///
+/// Differentiates between generic reverse proxies (which must never be trusted to forward arbitrary
+/// provider-specific headers like `CF-Connecting-IP`) and specifically configured Cloudflare edge proxies.
 #[derive(Debug, Clone)]
 pub struct TrustedProxyConfig {
-    cidrs: Vec<IpCidr>,
+    generic_proxies: Vec<IpCidr>,
+    cloudflare_proxies: Vec<IpCidr>,
 }
 
 impl TrustedProxyConfig {
     pub fn from_env() -> Self {
-        let val = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
-        Self::parse(&val)
+        let generic_val = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
+        let cloudflare_val = std::env::var("CLOUDFLARE_PROXIES").unwrap_or_default();
+        Self::parse(&generic_val, &cloudflare_val)
     }
 
-    pub fn parse(s: &str) -> Self {
-        let s = s.trim();
-        if s.is_empty() || s.eq_ignore_ascii_case("false") || s == "0" {
-            return Self { cidrs: Vec::new() };
-        }
+    pub fn parse(generic_str: &str, cloudflare_str: &str) -> Self {
+        let generic_str = generic_str.trim();
 
-        if s.eq_ignore_ascii_case("true") || s == "1" {
-            // Default loopback and RFC 1918 / private networks
-            let defaults = [
-                "127.0.0.0/8",
-                "10.0.0.0/8",
-                "172.16.0.0/12",
-                "192.168.0.0/16",
-                "169.254.0.0/16",
-                "::1/128",
-                "fc00::/7",
-                "fe80::/10",
-            ];
-            let cidrs = defaults.iter().filter_map(|c| IpCidr::parse(c)).collect();
-            return Self { cidrs };
-        }
+        // The boolean "true" or "1" shorthand is explicitly rejected to avoid unintentionally
+        // trusting broad internal networks, containers, or application workloads.
+        // Reverse-proxy trust MUST be established with explicit proxy CIDRs/IPs.
+        let generic_proxies = if generic_str.is_empty()
+            || generic_str.eq_ignore_ascii_case("false")
+            || generic_str == "0"
+            || generic_str.eq_ignore_ascii_case("true")
+            || generic_str == "1"
+        {
+            if generic_str.eq_ignore_ascii_case("true") || generic_str == "1" {
+                tracing::warn!(
+                    "TRUSTED_PROXIES=true shorthand is rejected. Please configure explicit proxy CIDRs (e.g. TRUSTED_PROXIES=10.0.0.1/32) to identify actual reverse-proxy infrastructure."
+                );
+            }
+            Vec::new()
+        } else {
+            generic_str.split(',').filter_map(IpCidr::parse).collect()
+        };
 
-        let cidrs = s.split(',').filter_map(IpCidr::parse).collect();
-        Self { cidrs }
+        let cloudflare_proxies = cloudflare_str
+            .split(',')
+            .filter_map(IpCidr::parse)
+            .collect();
+
+        Self {
+            generic_proxies,
+            cloudflare_proxies,
+        }
     }
 
-    pub fn is_trusted(&self, ip: IpAddr) -> bool {
-        self.cidrs.iter().any(|cidr| cidr.contains(ip))
+    pub fn is_trusted_generic(&self, ip: IpAddr) -> bool {
+        self.generic_proxies.iter().any(|cidr| cidr.contains(ip))
+    }
+
+    pub fn is_trusted_cloudflare(&self, ip: IpAddr) -> bool {
+        self.cloudflare_proxies.iter().any(|cidr| cidr.contains(ip))
+    }
+
+    pub fn is_trusted_any(&self, ip: IpAddr) -> bool {
+        self.is_trusted_generic(ip) || self.is_trusted_cloudflare(ip)
     }
 }
 
 /// Resolves the authentic client IP address using peer address and trusted reverse proxy hops.
 ///
-/// Follows standard reverse-proxy security rules:
+/// Follows strict reverse-proxy security rules:
 /// 1. The direct socket peer IP is used unless it matches a specifically configured trusted proxy CIDR.
-/// 2. If the direct peer is a trusted proxy, forwarded headers are evaluated.
+/// 2. CF-Connecting-IP is ONLY evaluated if the direct peer is a specifically configured Cloudflare proxy
+///    (`CLOUDFLARE_PROXIES`), where the upstream edge is guaranteed to strip and overwrite client-supplied headers.
+///    Generic reverse proxies NEVER trust CF-Connecting-IP, preventing client-supplied headers from bypassing XFF checks.
 /// 3. In X-Forwarded-For, hops are traversed right-to-left (most recent proxy to earliest).
 ///    The traversal stops at the first untrusted IP, preventing forged X-Forwarded-For spoofing.
-/// 4. Arbitrary unauthenticated headers (e.g. fake tokens or client-forged XFF) are never trusted.
+/// 4. Arbitrary unauthenticated headers or malformed IPs fail closed and are safely ignored.
 pub fn resolve_client_ip(
     peer_ip: Option<IpAddr>,
     headers: &HeaderMap,
@@ -139,21 +252,24 @@ pub fn resolve_client_ip(
     let peer = peer_ip.unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
     // Direct peer is untrusted: ignore all forwarding headers
-    if !proxy_config.is_trusted(peer) {
+    if !proxy_config.is_trusted_any(peer) {
         return peer;
     }
 
-    // Direct peer is a trusted proxy. Check CF-Connecting-IP first if valid
-    if let Some(cf_ip_str) = headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Ok(cf_ip) = cf_ip_str.trim().parse::<IpAddr>() {
-            return cf_ip;
+    // Direct peer is a specifically verified Cloudflare edge proxy: CF-Connecting-IP is trustworthy
+    if proxy_config.is_trusted_cloudflare(peer) {
+        if let Some(cf_ip_str) = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(cf_ip) = cf_ip_str.trim().parse::<IpAddr>() {
+                return cf_ip;
+            }
         }
     }
 
-    // Parse X-Forwarded-For using trusted-hop right-to-left traversal
+    // Direct peer is a trusted generic or Cloudflare proxy: parse X-Forwarded-For
+    // using trusted-hop right-to-left traversal
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         let hops: Vec<IpAddr> = xff
             .split(',')
@@ -164,7 +280,7 @@ pub fn resolve_client_ip(
 
         if !hops.is_empty() {
             for hop in hops.iter().rev() {
-                if !proxy_config.is_trusted(*hop) {
+                if !proxy_config.is_trusted_any(*hop) {
                     return *hop;
                 }
             }
@@ -213,8 +329,8 @@ pub fn extract_client_source_identifier_from_headers(headers: &HeaderMap) -> Str
 pub struct ApiRateLimiter {
     checkout_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     aggregate_keys_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-    client_gen_limiter: Arc<GovRateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>,
-    client_val_limiter: Arc<GovRateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>,
+    client_gen_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
+    client_val_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
     demo_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     call_count: Arc<AtomicU64>,
 }
@@ -260,6 +376,35 @@ impl ApiRateLimiter {
         demo_rps: u32,
         demo_burst: u32,
     ) -> Self {
+        Self::new_with_bounded_capacity(
+            checkout_rps,
+            checkout_burst,
+            aggregate_keys_rps,
+            aggregate_keys_burst,
+            client_gen_rps,
+            client_gen_burst,
+            client_val_rps,
+            client_val_burst,
+            demo_rps,
+            demo_burst,
+            MAX_KEYED_ENTRIES,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bounded_capacity(
+        checkout_rps: u32,
+        checkout_burst: u32,
+        aggregate_keys_rps: u32,
+        aggregate_keys_burst: u32,
+        client_gen_rps: u32,
+        client_gen_burst: u32,
+        client_val_rps: u32,
+        client_val_burst: u32,
+        demo_rps: u32,
+        demo_burst: u32,
+        keyed_capacity: usize,
+    ) -> Self {
         let checkout_quota = Quota::per_second(NonZeroU32::new(checkout_rps).unwrap())
             .allow_burst(NonZeroU32::new(checkout_burst).unwrap());
         let aggregate_keys_quota = Quota::per_second(NonZeroU32::new(aggregate_keys_rps).unwrap())
@@ -271,11 +416,23 @@ impl ApiRateLimiter {
         let demo_quota = Quota::per_second(NonZeroU32::new(demo_rps).unwrap())
             .allow_burst(NonZeroU32::new(demo_burst).unwrap());
 
+        let clock = DefaultClock::default();
+        let client_gen_limiter = Arc::new(GovRateLimiter::new(
+            client_gen_quota,
+            BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
+            &clock,
+        ));
+        let client_val_limiter = Arc::new(GovRateLimiter::new(
+            client_val_quota,
+            BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
+            &clock,
+        ));
+
         Self {
             checkout_limiter: Arc::new(GovRateLimiter::direct(checkout_quota)),
             aggregate_keys_limiter: Arc::new(GovRateLimiter::direct(aggregate_keys_quota)),
-            client_gen_limiter: Arc::new(GovRateLimiter::keyed(client_gen_quota)),
-            client_val_limiter: Arc::new(GovRateLimiter::keyed(client_val_quota)),
+            client_gen_limiter,
+            client_val_limiter,
             demo_limiter: Arc::new(GovRateLimiter::direct(demo_quota)),
             call_count: Arc::new(AtomicU64::new(0)),
         }
@@ -313,31 +470,6 @@ impl ApiRateLimiter {
         }
     }
 
-    #[allow(clippy::manual_is_multiple_of)]
-    fn bound_and_sanitize_key(
-        &self,
-        limiter: &GovRateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>,
-        client_key: &str,
-    ) -> String {
-        // Periodically prune expired entries
-        if self.call_count.fetch_add(1, Ordering::Relaxed) % 256 == 0 {
-            limiter.retain_recent();
-        }
-
-        if limiter.len() > MAX_KEYED_ENTRIES {
-            limiter.retain_recent();
-            limiter.shrink_to_fit();
-        }
-
-        if limiter.len() > MAX_KEYED_ENTRIES {
-            // Memory bound protection: if active unique identities exceed limit,
-            // fall back to a shared overflow bucket to prevent memory exhaustion
-            "overflow_client".to_string()
-        } else {
-            client_key.to_string()
-        }
-    }
-
     /// Per-source rate limit check for sandbox key generation with process-local aggregate safeguard
     pub fn check_generate_sandbox(&self, client_key: &str) -> Result<(), RateLimitError> {
         if self.aggregate_keys_limiter.check().is_err() {
@@ -352,9 +484,17 @@ impl ApiRateLimiter {
             ));
         }
 
-        let bounded_key = self.bound_and_sanitize_key(&self.client_gen_limiter, client_key);
+        // Periodic pruning of expired/replenished entries
+        #[allow(clippy::manual_is_multiple_of)]
+        if self.call_count.fetch_add(1, Ordering::Relaxed) % 256 == 0 {
+            self.client_gen_limiter.retain_recent();
+        }
 
-        if self.client_gen_limiter.check_key(&bounded_key).is_err() {
+        if self
+            .client_gen_limiter
+            .check_key(&client_key.to_string())
+            .is_err()
+        {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -383,9 +523,17 @@ impl ApiRateLimiter {
             ));
         }
 
-        let bounded_key = self.bound_and_sanitize_key(&self.client_val_limiter, client_key);
+        // Periodic pruning of expired/replenished entries
+        #[allow(clippy::manual_is_multiple_of)]
+        if self.call_count.fetch_add(1, Ordering::Relaxed) % 256 == 0 {
+            self.client_val_limiter.retain_recent();
+        }
 
-        if self.client_val_limiter.check_key(&bounded_key).is_err() {
+        if self
+            .client_val_limiter
+            .check_key(&client_key.to_string())
+            .is_err()
+        {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [(axum::http::header::RETRY_AFTER, "1")],
@@ -413,6 +561,16 @@ impl ApiRateLimiter {
         } else {
             Ok(())
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn gen_len(&self) -> usize {
+        self.client_gen_limiter.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn val_len(&self) -> usize {
+        self.client_val_limiter.len()
     }
 }
 
@@ -443,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_trusted_proxy_forwarded_traversal() {
-        let proxy_config = TrustedProxyConfig::parse("10.0.0.0/8,172.16.0.0/12");
+        let proxy_config = TrustedProxyConfig::parse("10.0.0.0/8,172.16.0.0/12", "");
 
         // Case 1: Direct untrusted peer ignores XFF completely
         let mut headers = HeaderMap::new();
@@ -466,6 +624,60 @@ mod tests {
         );
         let client = resolve_client_ip(Some("10.0.0.1".parse().unwrap()), &headers, &proxy_config);
         assert_eq!(client, "203.0.113.50".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_generic_trusted_proxy_ignores_cf_connecting_ip() {
+        // A generic reverse proxy in TRUSTED_PROXIES must NOT trust CF-Connecting-IP
+        let proxy_config = TrustedProxyConfig::parse("10.0.0.0/8", "");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "1.1.1.1".parse().unwrap());
+        headers.insert("x-forwarded-for", "203.0.113.77".parse().unwrap());
+
+        let client = resolve_client_ip(Some("10.0.0.1".parse().unwrap()), &headers, &proxy_config);
+        // Must resolve from verified XFF, NOT the spoofed CF-Connecting-IP
+        assert_eq!(
+            client,
+            "203.0.113.77".parse::<IpAddr>().unwrap(),
+            "Generic proxy must ignore CF-Connecting-IP and use verified XFF"
+        );
+    }
+
+    #[test]
+    fn test_cloudflare_proxy_trusts_cf_connecting_ip() {
+        // Specifically configured Cloudflare proxy accepts CF-Connecting-IP
+        let proxy_config = TrustedProxyConfig::parse("", "173.245.48.0/20");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.88".parse().unwrap());
+        headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+
+        let client = resolve_client_ip(
+            Some("173.245.48.5".parse().unwrap()),
+            &headers,
+            &proxy_config,
+        );
+        assert_eq!(
+            client,
+            "203.0.113.88".parse::<IpAddr>().unwrap(),
+            "Specifically configured Cloudflare proxy must accept CF-Connecting-IP"
+        );
+    }
+
+    #[test]
+    fn test_boolean_trusted_proxies_shorthand_rejected() {
+        let proxy_config = TrustedProxyConfig::parse("true", "");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.1.1.1".parse().unwrap());
+
+        // Because "true" shorthand was rejected, 127.0.0.1 is not trusted and XFF is ignored
+        let client = resolve_client_ip(Some("127.0.0.1".parse().unwrap()), &headers, &proxy_config);
+        assert_eq!(
+            client,
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "TRUSTED_PROXIES=true shorthand must fail closed"
+        );
     }
 
     #[test]
@@ -502,19 +714,33 @@ mod tests {
     }
 
     #[test]
-    fn test_independent_peer_buckets_and_exhaustion() {
-        let limiter = ApiRateLimiter::new_with_all_quotas(10, 10, 100, 100, 2, 2, 10, 10, 10, 10);
-        let peer_a = "ip:198.51.100.1";
-        let peer_b = "ip:198.51.100.2";
+    fn test_bounded_keyed_state_store_strict_capacity_under_concurrency() {
+        let capacity = 5;
+        let limiter = ApiRateLimiter::new_with_bounded_capacity(
+            10, 10, 100, 100, 10, 10, 10, 10, 10, 10, capacity,
+        );
 
-        // Peer A exhausts its bucket
-        assert!(limiter.check_generate_sandbox(peer_a).is_ok());
-        assert!(limiter.check_generate_sandbox(peer_a).is_ok());
-        assert!(limiter.check_generate_sandbox(peer_a).is_err());
+        // Concurrently attempt to insert 50 distinct keys
+        let handles: Vec<_> = (0..50)
+            .map(|i| {
+                let lim = limiter.clone();
+                std::thread::spawn(move || {
+                    let key = format!("ip:198.51.100.{}", i);
+                    let _ = lim.check_generate_sandbox(&key);
+                })
+            })
+            .collect();
 
-        // Peer B is independent and unaffected
-        assert!(limiter.check_generate_sandbox(peer_b).is_ok());
-        assert!(limiter.check_generate_sandbox(peer_b).is_ok());
-        assert!(limiter.check_generate_sandbox(peer_b).is_err());
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Strict guarantee: len CANNOT exceed capacity!
+        assert!(
+            limiter.gen_len() <= capacity,
+            "Limiter entries {} exceeded strict capacity {}",
+            limiter.gen_len(),
+            capacity
+        );
     }
 }
