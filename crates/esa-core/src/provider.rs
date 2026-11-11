@@ -172,6 +172,32 @@ pub struct ProviderHealth {
     pub message: String,
 }
 
+/// Outcome of an atomic refund reservation operation in durable store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefundReservationOutcome {
+    /// Newly reserved; returns remaining refundable balance in minor units.
+    Reserved { remaining_balance: u64 },
+    /// Already reserved under this refund_id with given status and amount (idempotent).
+    AlreadyReserved { amount_minor: u64, status: String },
+    /// Already settled / processed (idempotent duplicate).
+    AlreadyProcessed { amount_minor: u64 },
+}
+
+/// Unified, authoritative response contract for payment confirmation across all gateways.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaymentConfirmationResponse {
+    pub success: bool,
+    pub payment_state: String,
+    pub transaction_id: String,
+    pub provider: String,
+    pub provider_order_id: Option<String>,
+    pub payment_reference: Option<String>,
+    pub amount_minor: u64,
+    pub currency: String,
+    pub idempotent: bool,
+    pub message: String,
+}
+
 /// Durable record of an initiated payment attempt for merchant ownership and lifecycle verification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PaymentAttemptRecord {

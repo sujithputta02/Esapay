@@ -77,6 +77,21 @@ export function submitPayUHostedForm(
  *
  * Never treats a verification failure, SDK error, or unverified response as simulated success.
  */
+function isUncertainError(err: any): boolean {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  return (
+    err.name === 'AbortError' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('network') ||
+    msg.includes('connection') ||
+    err.status === 504 ||
+    err.status === 502 ||
+    err.status === 503
+  );
+}
+
 export async function executeProviderCheckout(
   decision: CheckoutDecision,
   options: CheckoutExecutionOptions = {}
@@ -117,9 +132,10 @@ export async function executeProviderCheckout(
         if (typeof window !== 'undefined' && (window as any).Cashfree && paymentSessionId) {
           try {
             const cashfreeFactory = (window as any).Cashfree;
+            const mode = session.data?.environment === 'production' ? 'production' : 'sandbox';
             const cashfree =
               typeof cashfreeFactory === 'function'
-                ? new cashfreeFactory({ mode: 'sandbox' })
+                ? new cashfreeFactory({ mode })
                 : cashfreeFactory;
 
             if (cashfree && typeof cashfree.checkout === 'function') {
@@ -188,6 +204,14 @@ export async function executeProviderCheckout(
             };
           }
         } catch (err: any) {
+          if (isUncertainError(err)) {
+            return {
+              status: 'unknown',
+              message: `Cashfree verification outcome uncertain due to network/server timeout. Do not re-attempt payment before verifying: ${err?.message || 'Connection timeout'}`,
+              transactionId: decision.transaction_id,
+              providerOrderId: orderId,
+            };
+          }
           return {
             status: 'failed',
             message: `Cashfree verification failed: ${err?.message || 'Verification rejected'}`,
@@ -262,6 +286,14 @@ export async function executeProviderCheckout(
             };
           }
         } catch (err: any) {
+          if (isUncertainError(err)) {
+            return {
+              status: 'unknown',
+              message: `PayU verification outcome uncertain due to network/server timeout. Do not re-attempt payment before verifying: ${err?.message || 'Connection timeout'}`,
+              transactionId: decision.transaction_id,
+              providerOrderId: txnid,
+            };
+          }
           return {
             status: 'failed',
             message: `PayU verification failed: ${err?.message || 'Verification rejected'}`,
@@ -320,12 +352,22 @@ export async function executeProviderCheckout(
                       });
                     }
                   } catch (confErr: any) {
-                    resolve({
-                      status: 'failed',
-                      message: `Razorpay backend confirmation failed: ${confErr?.message || 'Rejected'}`,
-                      transactionId: decision.transaction_id,
-                      providerOrderId: orderId,
-                    });
+                    if (isUncertainError(confErr)) {
+                      resolve({
+                        status: 'unknown',
+                        message: `Razorpay confirmation outcome uncertain due to network/server timeout. Do not re-attempt payment before verifying: ${confErr?.message || 'Connection timeout'}`,
+                        transactionId: decision.transaction_id,
+                        providerOrderId: orderId,
+                        paymentReference: paymentId,
+                      });
+                    } else {
+                      resolve({
+                        status: 'failed',
+                        message: `Razorpay backend confirmation failed: ${confErr?.message || 'Rejected'}`,
+                        transactionId: decision.transaction_id,
+                        providerOrderId: orderId,
+                      });
+                    }
                   }
                 },
                 modal: {

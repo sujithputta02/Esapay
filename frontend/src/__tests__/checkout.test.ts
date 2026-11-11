@@ -147,6 +147,38 @@ describe('Frontend Checkout Execution & State Outcomes', () => {
       expect(result.status).toBe('failed');
       expect(result.message).toContain('500 Internal Gateway Error');
     });
+
+    it('returns unknown outcome when Cashfree verification times out or network drops', async () => {
+      const mockClient = {
+        confirmCashfreePayment: mock(async () => {
+          throw new Error('Cashfree upstream connection timed out after 10000ms');
+        }),
+      } as unknown as ApiClient;
+
+      const decision: CheckoutDecision = {
+        transaction_id: 'tx_cf_timeout',
+        amount: 50000,
+        currency: 'INR',
+        requested_gateway: 'cashfree',
+        routed_gateway: 'cashfree',
+        failover_triggered: false,
+        routing_reason: 'Direct route',
+        checkout_url: 'https://sandbox.cashfree.com/pay',
+        provider_order_id: 'order_cf_timeout',
+        session: {
+          mode: 'cashfree',
+          data: {
+            payment_session_id: 'session_cf_timeout',
+            order_id: 'order_cf_timeout',
+          },
+        },
+      };
+
+      const result = await executeProviderCheckout(decision, { client: mockClient });
+
+      expect(result.status).toBe('unknown');
+      expect(result.message).toContain('uncertain due to network/server timeout');
+    });
   });
 
   describe('PayU Provider Flow', () => {
@@ -259,7 +291,7 @@ describe('Frontend Checkout Execution & State Outcomes', () => {
     it('returns failed outcome and NEVER simulates success when PayU verification fails', async () => {
       const mockClient = {
         verifyPayUPayment: mock(async () => {
-          throw new Error('Hash mismatch or PayU server timeout');
+          throw new Error('Hash mismatch: PayU signature rejected');
         }),
       } as unknown as ApiClient;
 
@@ -286,6 +318,38 @@ describe('Frontend Checkout Execution & State Outcomes', () => {
 
       expect(result.status).toBe('failed');
       expect(result.message).toContain('Hash mismatch');
+    });
+
+    it('returns unknown outcome when PayU verification times out', async () => {
+      const mockClient = {
+        verifyPayUPayment: mock(async () => {
+          throw new Error('PayU server timeout during verification');
+        }),
+      } as unknown as ApiClient;
+
+      const decision: CheckoutDecision = {
+        transaction_id: 'tx_payu_timeout',
+        amount: 25000,
+        currency: 'INR',
+        requested_gateway: 'payu',
+        routed_gateway: 'payu',
+        failover_triggered: false,
+        routing_reason: 'Direct route',
+        checkout_url: 'https://test.payu.in/_payment',
+        provider_order_id: 'payu_order_timeout',
+        session: {
+          mode: 'payu',
+          data: {
+            action_url: 'https://test.payu.in/_payment',
+            txnid: 'payu_order_timeout',
+          },
+        },
+      };
+
+      const result = await executeProviderCheckout(decision, { client: mockClient, skipFormSubmit: true });
+
+      expect(result.status).toBe('unknown');
+      expect(result.message).toContain('uncertain due to network/server timeout');
     });
 
     it('throws error when DOM document is not available', () => {

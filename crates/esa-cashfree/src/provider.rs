@@ -137,6 +137,34 @@ const CASHFREE_SUPPORTED_METHODS: &[PaymentMethodClass] = &[
     PaymentMethodClass::Wallet,
 ];
 
+/// Select the authoritative attempt from Cashfree order payments list.
+/// Prioritizes successful payments, then pending payments, then latest failed/cancelled attempts.
+fn select_authoritative_cashfree_attempt(list: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    if list.is_empty() {
+        return None;
+    }
+    // 1. Prioritize SUCCESS
+    if let Some(success) = list.iter().find(|p| {
+        p.get("payment_status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("SUCCESS"))
+            .unwrap_or(false)
+    }) {
+        return Some(success);
+    }
+    // 2. Check for PENDING
+    if let Some(pending) = list.iter().find(|p| {
+        p.get("payment_status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("PENDING"))
+            .unwrap_or(false)
+    }) {
+        return Some(pending);
+    }
+    // 3. Fallback to latest attempt in list
+    list.last()
+}
+
 #[async_trait]
 impl PaymentProvider for CashfreeProvider {
     fn id(&self) -> PaymentGateway {
@@ -313,7 +341,7 @@ impl PaymentProvider for CashfreeProvider {
         match payments {
             Ok(list) => {
                 self.record_success(elapsed);
-                if let Some(payment) = list.first() {
+                if let Some(payment) = select_authoritative_cashfree_attempt(&list) {
                     let p_status_str = payment
                         .get("payment_status")
                         .and_then(|v| v.as_str())
@@ -359,10 +387,47 @@ impl PaymentProvider for CashfreeProvider {
                         raw_response: payment.clone(),
                     })
                 } else {
-                    Err(ProviderError::PaymentNotFound {
-                        provider: "cashfree".into(),
-                        payment_id: payment_id.to_string(),
-                    })
+                    // Fall back to querying the order directly when no individual payment attempts exist yet
+                    match self.client.get_order(payment_id).await {
+                        Ok(order) => {
+                            let status_str = order
+                                .get("order_status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("UNKNOWN");
+                            let status = match status_str.to_uppercase().as_str() {
+                                "PAID" => ProviderPaymentStatus::Captured,
+                                "ACTIVE" => ProviderPaymentStatus::Pending,
+                                "EXPIRED" | "TERMINATED" => ProviderPaymentStatus::Cancelled,
+                                _ => ProviderPaymentStatus::Unknown,
+                            };
+                            let amt_f64 = order
+                                .get("order_amount")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let amount_minor = (amt_f64 * 100.0).round() as u64;
+                            let currency = order
+                                .get("order_currency")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("INR")
+                                .to_string();
+
+                            Ok(PaymentStatusResult {
+                                provider_payment_id: format!("cf_order_{}", payment_id),
+                                provider_order_id: Some(payment_id.to_string()),
+                                status,
+                                amount_minor,
+                                currency,
+                                payment_method: None,
+                                error_code: None,
+                                error_message: None,
+                                raw_response: order,
+                            })
+                        }
+                        Err(_) => Err(ProviderError::PaymentNotFound {
+                            provider: "cashfree".into(),
+                            payment_id: payment_id.to_string(),
+                        }),
+                    }
                 }
             }
             Err(e) => {
@@ -643,5 +708,55 @@ mod tests {
         provider.record_failure(100);
         assert_eq!(provider.circuit_state(), CircuitBreakerState::Open);
         assert!(!provider.health().is_healthy);
+    }
+
+    #[test]
+    fn test_select_authoritative_cashfree_attempt() {
+        assert!(select_authoritative_cashfree_attempt(&[]).is_none());
+
+        let failed_attempt = serde_json::json!({
+            "cf_payment_id": "cf_001",
+            "payment_status": "FAILED",
+            "payment_amount": 100.0
+        });
+        let list1 = vec![failed_attempt.clone()];
+        assert_eq!(
+            select_authoritative_cashfree_attempt(&list1)
+                .unwrap()
+                .get("cf_payment_id")
+                .unwrap(),
+            "cf_001"
+        );
+
+        let success_attempt = serde_json::json!({
+            "cf_payment_id": "cf_002",
+            "payment_status": "SUCCESS",
+            "payment_amount": 100.0
+        });
+        let list2 = vec![failed_attempt, success_attempt.clone()];
+        assert_eq!(
+            select_authoritative_cashfree_attempt(&list2)
+                .unwrap()
+                .get("cf_payment_id")
+                .unwrap(),
+            "cf_002"
+        );
+
+        let pending_attempt = serde_json::json!({
+            "cf_payment_id": "cf_003",
+            "payment_status": "PENDING",
+            "payment_amount": 100.0
+        });
+        let list3 = vec![
+            pending_attempt.clone(),
+            serde_json::json!({"payment_status": "USER_DROPPED"}),
+        ];
+        assert_eq!(
+            select_authoritative_cashfree_attempt(&list3)
+                .unwrap()
+                .get("cf_payment_id")
+                .unwrap(),
+            "cf_003"
+        );
     }
 }

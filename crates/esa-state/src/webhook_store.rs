@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use esa_core::payment_state::{PaymentEntity, PaymentError, PaymentState, TransitionOutcome};
-use esa_core::provider::PaymentAttemptRecord;
+use esa_core::provider::{PaymentAttemptRecord, RefundReservationOutcome};
 use esa_core::PaymentEventType;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -163,6 +163,18 @@ pub enum WebhookStoreError {
     Serialization(String),
     #[error("Entity mismatch: {0}")]
     Mismatch(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
+    #[error("Payment not found: {0}")]
+    PaymentNotFound(String),
+    #[error("Invalid payment state for operation: {0}")]
+    InvalidState(String),
+    #[error("Refund amount {requested} exceeds available refundable balance {available} for payment '{payment_id}'")]
+    RefundExceedsBalance {
+        payment_id: String,
+        requested: u64,
+        available: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +251,15 @@ pub trait WebhookStore: Send + Sync {
         Ok(None)
     }
 
+    /// Retrieve an existing payment attempt scoped to a specific provider
+    async fn get_payment_attempt_for_provider(
+        &self,
+        _provider: &str,
+        id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        self.get_payment_attempt(id_or_order_id).await
+    }
+
     /// Update payment attempt state (e.g. captured, failed, refunded) and optional provider payment reference
     async fn update_payment_attempt_state(
         &self,
@@ -247,6 +268,21 @@ pub trait WebhookStore: Send + Sync {
         _payment_reference: Option<&str>,
     ) -> Result<(), WebhookStoreError> {
         Ok(())
+    }
+
+    /// Atomically reserve refund balance for a payment attempt / payment record.
+    /// Ensures serialized, non-over-refunding balance checks and idempotent duplicate handling.
+    async fn reserve_refund(
+        &self,
+        _provider: &str,
+        _payment_id: &str,
+        _refund_id: &str,
+        _amount_minor: u64,
+        _currency: &str,
+    ) -> Result<RefundReservationOutcome, WebhookStoreError> {
+        Ok(RefundReservationOutcome::Reserved {
+            remaining_balance: 0,
+        })
     }
 }
 
@@ -1567,22 +1603,53 @@ impl WebhookStore for PostgresWebhookStore {
         &self,
         attempt: &PaymentAttemptRecord,
     ) -> Result<(), WebhookStoreError> {
+        if let Some(existing) = self.get_payment_attempt(&attempt.transaction_id).await? {
+            if existing.merchant_id != attempt.merchant_id
+                || existing.provider != attempt.provider
+                || existing.amount_minor != attempt.amount_minor
+                || existing.currency != attempt.currency
+            {
+                return Err(WebhookStoreError::Conflict(format!(
+                    "Payment attempt {} immutable identity conflict: existing (merchant: {}, provider: {}, amount: {}, currency: {}) vs incoming (merchant: {}, provider: {}, amount: {}, currency: {})",
+                    attempt.transaction_id, existing.merchant_id, existing.provider, existing.amount_minor, existing.currency,
+                    attempt.merchant_id, attempt.provider, attempt.amount_minor, attempt.currency
+                )));
+            }
+            let q = r#"
+                UPDATE payment_attempts
+                SET provider_order_id = COALESCE(provider_order_id, $2),
+                    payment_reference = COALESCE(payment_reference, $3),
+                    state = $4,
+                    updated_at = NOW()
+                WHERE transaction_id = $1;
+            "#;
+            sqlx::query(q)
+                .bind(&attempt.transaction_id)
+                .bind(&attempt.provider_order_id)
+                .bind(&attempt.payment_reference)
+                .bind(&attempt.state)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+            return Ok(());
+        }
+
         let q = r#"
             INSERT INTO payment_attempts (
                 transaction_id, merchant_id, provider, provider_order_id,
                 payment_reference, amount_minor, currency, state, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (transaction_id) DO UPDATE SET
-                merchant_id = EXCLUDED.merchant_id,
-                provider = EXCLUDED.provider,
-                provider_order_id = COALESCE(EXCLUDED.provider_order_id, payment_attempts.provider_order_id),
-                payment_reference = COALESCE(EXCLUDED.payment_reference, payment_attempts.payment_reference),
-                amount_minor = EXCLUDED.amount_minor,
-                currency = EXCLUDED.currency,
+                provider_order_id = COALESCE(payment_attempts.provider_order_id, EXCLUDED.provider_order_id),
+                payment_reference = COALESCE(payment_attempts.payment_reference, EXCLUDED.payment_reference),
                 state = EXCLUDED.state,
-                updated_at = NOW();
+                updated_at = NOW()
+            WHERE payment_attempts.merchant_id = EXCLUDED.merchant_id
+              AND payment_attempts.provider = EXCLUDED.provider
+              AND payment_attempts.amount_minor = EXCLUDED.amount_minor
+              AND payment_attempts.currency = EXCLUDED.currency;
         "#;
-        sqlx::query(q)
+        let res = sqlx::query(q)
             .bind(&attempt.transaction_id)
             .bind(&attempt.merchant_id)
             .bind(&attempt.provider)
@@ -1596,6 +1663,13 @@ impl WebhookStore for PostgresWebhookStore {
             .execute(&self.pool)
             .await
             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        if res.rows_affected() == 0 {
+            return Err(WebhookStoreError::Conflict(format!(
+                "Payment attempt {} immutable identity conflict on concurrent insert",
+                attempt.transaction_id
+            )));
+        }
         Ok(())
     }
 
@@ -1611,6 +1685,44 @@ impl WebhookStore for PostgresWebhookStore {
             LIMIT 1;
         "#;
         let row_opt = sqlx::query(q)
+            .bind(id_or_order_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        if let Some(r) = row_opt {
+            let amt: i64 = r.get("amount_minor");
+            Ok(Some(PaymentAttemptRecord {
+                transaction_id: r.get("transaction_id"),
+                merchant_id: r.get("merchant_id"),
+                provider: r.get("provider"),
+                provider_order_id: r.get("provider_order_id"),
+                payment_reference: r.get("payment_reference"),
+                amount_minor: amt as u64,
+                currency: r.get("currency"),
+                state: r.get("state"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_payment_attempt_for_provider(
+        &self,
+        provider: &str,
+        id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        let q = r#"
+            SELECT transaction_id, merchant_id, provider, provider_order_id,
+                   payment_reference, amount_minor, currency, state, created_at, updated_at
+            FROM payment_attempts
+            WHERE provider = $1 AND (transaction_id = $2 OR provider_order_id = $2 OR payment_reference = $2)
+            LIMIT 1;
+        "#;
+        let row_opt = sqlx::query(q)
+            .bind(provider)
             .bind(id_or_order_id)
             .fetch_optional(&self.pool)
             .await
@@ -1656,6 +1768,164 @@ impl WebhookStore for PostgresWebhookStore {
             .await
             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    async fn reserve_refund(
+        &self,
+        provider: &str,
+        payment_id: &str,
+        refund_id: &str,
+        amount_minor: u64,
+        currency: &str,
+    ) -> Result<RefundReservationOutcome, WebhookStoreError> {
+        if amount_minor == 0 {
+            return Err(WebhookStoreError::PaymentState(
+                PaymentError::ZeroRefundAmount {
+                    payment_id: payment_id.to_string(),
+                },
+            ));
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        // 1. Lock payment record FOR UPDATE
+        let payment_row_opt = sqlx::query(
+            r#"
+            SELECT payment_id, state, amount_minor, currency, refunded_amount_minor
+            FROM payment_records
+            WHERE payment_id = $1
+            FOR UPDATE;
+            "#,
+        )
+        .bind(payment_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        let payment_row = payment_row_opt.ok_or_else(|| {
+            WebhookStoreError::PaymentNotFound(format!(
+                "No payment record found for '{}'",
+                payment_id
+            ))
+        })?;
+
+        let state_str: String = payment_row.get("state");
+        let pay_state = parse_payment_state(&state_str)?;
+        if pay_state != PaymentState::Captured && pay_state != PaymentState::PartiallyRefunded {
+            return Err(WebhookStoreError::InvalidState(format!(
+                "Cannot refund payment in state '{:?}'; payment must be Captured or PartiallyRefunded",
+                pay_state
+            )));
+        }
+
+        let pay_currency: String = payment_row.get("currency");
+        if !pay_currency.eq_ignore_ascii_case(currency) {
+            return Err(WebhookStoreError::Mismatch(format!(
+                "Currency mismatch for refund {}: payment is {} but refund requested {}",
+                refund_id, pay_currency, currency
+            )));
+        }
+
+        let total_amount: u64 = payment_row.get::<i64, _>("amount_minor") as u64;
+        let refunded_amount: u64 = payment_row.get::<i64, _>("refunded_amount_minor") as u64;
+
+        // 2. Check if this refund_id was already reserved/processed
+        let existing_refund = sqlx::query(
+            r#"
+            SELECT refund_id, amount_minor, currency, status, applied_to_balance
+            FROM payment_refunds
+            WHERE provider = $1 AND refund_id = $2
+            FOR UPDATE;
+            "#,
+        )
+        .bind(provider)
+        .bind(refund_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        if let Some(rf) = existing_refund {
+            let rf_amt: u64 = rf.get::<i64, _>("amount_minor") as u64;
+            let rf_status: String = rf.get("status");
+            if rf_status == "processed" {
+                tx.commit()
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+                return Ok(RefundReservationOutcome::AlreadyProcessed {
+                    amount_minor: rf_amt,
+                });
+            } else if rf_status == "pending" {
+                tx.commit()
+                    .await
+                    .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+                return Ok(RefundReservationOutcome::AlreadyReserved {
+                    amount_minor: rf_amt,
+                    status: rf_status,
+                });
+            } else {
+                return Err(WebhookStoreError::Conflict(format!(
+                    "Refund '{}' has already terminal status '{}'",
+                    refund_id, rf_status
+                )));
+            }
+        }
+
+        // 3. Sum outstanding pending reservations for this payment
+        let pending_sum_row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(amount_minor), 0) as pending_sum
+            FROM payment_refunds
+            WHERE provider = $1 AND payment_id = $2 AND status = 'pending' AND applied_to_balance = false;
+            "#,
+        )
+        .bind(provider)
+        .bind(payment_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        let pending_sum: u64 = pending_sum_row.get::<i64, _>("pending_sum") as u64;
+        let available = total_amount
+            .saturating_sub(refunded_amount)
+            .saturating_sub(pending_sum);
+
+        if amount_minor > available {
+            return Err(WebhookStoreError::RefundExceedsBalance {
+                payment_id: payment_id.to_string(),
+                requested: amount_minor,
+                available,
+            });
+        }
+
+        // 4. Insert pending reservation into payment_refunds
+        sqlx::query(
+            r#"
+            INSERT INTO payment_refunds (
+                provider, refund_id, payment_id, amount_minor, currency, status, applied_to_balance, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, 'pending', false, NOW(), NOW());
+            "#,
+        )
+        .bind(provider)
+        .bind(refund_id)
+        .bind(payment_id)
+        .bind(amount_minor as i64)
+        .bind(currency)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        let remaining = available.saturating_sub(amount_minor);
+        Ok(RefundReservationOutcome::Reserved {
+            remaining_balance: remaining,
+        })
     }
 }
 
@@ -2415,12 +2685,159 @@ impl WebhookStore for InMemoryWebhookStore {
         attempt: &PaymentAttemptRecord,
     ) -> Result<(), WebhookStoreError> {
         let mut guard = self.attempts.lock();
-        guard.insert(attempt.transaction_id.clone(), attempt.clone());
+        if let Some(existing) = guard.get(&attempt.transaction_id) {
+            if existing.merchant_id != attempt.merchant_id
+                || existing.provider != attempt.provider
+                || existing.amount_minor != attempt.amount_minor
+                || existing.currency != attempt.currency
+            {
+                return Err(WebhookStoreError::Conflict(format!(
+                    "Payment attempt {} immutable identity conflict: existing (merchant: {}, provider: {}, amount: {}, currency: {}) vs incoming (merchant: {}, provider: {}, amount: {}, currency: {})",
+                    attempt.transaction_id, existing.merchant_id, existing.provider, existing.amount_minor, existing.currency,
+                    attempt.merchant_id, attempt.provider, attempt.amount_minor, attempt.currency
+                )));
+            }
+            let mut updated = existing.clone();
+            if updated.provider_order_id.is_none() {
+                updated.provider_order_id = attempt.provider_order_id.clone();
+            }
+            if updated.payment_reference.is_none() {
+                updated.payment_reference = attempt.payment_reference.clone();
+            }
+            updated.state = attempt.state.clone();
+            updated.updated_at = Utc::now();
+            guard.insert(attempt.transaction_id.clone(), updated);
+        } else {
+            guard.insert(attempt.transaction_id.clone(), attempt.clone());
+        }
         if let Some(order_id) = &attempt.provider_order_id {
             let mut idx_guard = self.order_index.lock();
             idx_guard.insert(order_id.clone(), attempt.transaction_id.clone());
         }
         Ok(())
+    }
+
+    async fn get_payment_attempt_for_provider(
+        &self,
+        provider: &str,
+        id_or_order_id: &str,
+    ) -> Result<Option<PaymentAttemptRecord>, WebhookStoreError> {
+        let guard = self.attempts.lock();
+        for attempt in guard.values() {
+            if attempt.provider == provider
+                && (attempt.transaction_id == id_or_order_id
+                    || attempt.provider_order_id.as_deref() == Some(id_or_order_id)
+                    || attempt.payment_reference.as_deref() == Some(id_or_order_id))
+            {
+                return Ok(Some(attempt.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn reserve_refund(
+        &self,
+        provider: &str,
+        payment_id: &str,
+        refund_id: &str,
+        amount_minor: u64,
+        currency: &str,
+    ) -> Result<RefundReservationOutcome, WebhookStoreError> {
+        if amount_minor == 0 {
+            return Err(WebhookStoreError::PaymentState(
+                PaymentError::ZeroRefundAmount {
+                    payment_id: payment_id.to_string(),
+                },
+            ));
+        }
+
+        let payments_guard = self.payments.lock();
+        let mut refunds_guard = self.refunds.lock();
+
+        let payment = payments_guard.get(payment_id).ok_or_else(|| {
+            WebhookStoreError::PaymentNotFound(format!(
+                "No payment record found for '{}'",
+                payment_id
+            ))
+        })?;
+
+        if payment.state != PaymentState::Captured
+            && payment.state != PaymentState::PartiallyRefunded
+        {
+            return Err(WebhookStoreError::InvalidState(format!(
+                "Cannot refund payment in state '{:?}'; payment must be Captured or PartiallyRefunded",
+                payment.state
+            )));
+        }
+
+        if !payment.currency.eq_ignore_ascii_case(currency) {
+            return Err(WebhookStoreError::Mismatch(format!(
+                "Currency mismatch for refund {}: payment is {} but refund requested {}",
+                refund_id, payment.currency, currency
+            )));
+        }
+
+        let refund_key = (provider.to_string(), refund_id.to_string());
+        if let Some(existing) = refunds_guard.get(&refund_key) {
+            if existing.status == "processed" {
+                return Ok(RefundReservationOutcome::AlreadyProcessed {
+                    amount_minor: existing.amount_minor,
+                });
+            } else if existing.status == "pending" {
+                return Ok(RefundReservationOutcome::AlreadyReserved {
+                    amount_minor: existing.amount_minor,
+                    status: existing.status.clone(),
+                });
+            } else {
+                return Err(WebhookStoreError::Conflict(format!(
+                    "Refund '{}' has already terminal status '{}'",
+                    refund_id, existing.status
+                )));
+            }
+        }
+
+        // Sum outstanding pending reservations for this payment
+        let pending_sum: u64 = refunds_guard
+            .values()
+            .filter(|r| {
+                r.provider == provider
+                    && r.payment_id == payment_id
+                    && r.status == "pending"
+                    && !r.applied_to_balance
+            })
+            .map(|r| r.amount_minor)
+            .sum();
+
+        let available = payment
+            .amount_minor
+            .saturating_sub(payment.refunded_amount_minor)
+            .saturating_sub(pending_sum);
+
+        if amount_minor > available {
+            return Err(WebhookStoreError::RefundExceedsBalance {
+                payment_id: payment_id.to_string(),
+                requested: amount_minor,
+                available,
+            });
+        }
+
+        refunds_guard.insert(
+            refund_key,
+            InMemoryRefundEntry {
+                provider: provider.to_string(),
+                refund_id: refund_id.to_string(),
+                payment_id: payment_id.to_string(),
+                amount_minor,
+                currency: currency.to_string(),
+                status: "pending".to_string(),
+                applied_to_balance: false,
+            },
+        );
+
+        let remaining = available.saturating_sub(amount_minor);
+        Ok(RefundReservationOutcome::Reserved {
+            remaining_balance: remaining,
+        })
     }
 
     async fn get_payment_attempt(
@@ -2522,6 +2939,194 @@ mod tests {
             .unwrap();
         assert_eq!(updated.state, "captured");
         assert_eq!(updated.payment_reference.as_deref(), Some("cf_pay_789"));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_payment_attempt_immutability_conflict() {
+        let store = InMemoryWebhookStore::new();
+        let attempt1 = PaymentAttemptRecord {
+            transaction_id: "tx_immutable_1".to_string(),
+            merchant_id: "merchant_alpha".to_string(),
+            provider: "cashfree".to_string(),
+            provider_order_id: Some("order_1".to_string()),
+            payment_reference: None,
+            amount_minor: 50000,
+            currency: "INR".to_string(),
+            state: "created".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.record_payment_attempt(&attempt1).await.unwrap();
+
+        // 1. Attempt to change merchant_id on existing transaction_id -> Conflict
+        let mut tampered_merchant = attempt1.clone();
+        tampered_merchant.merchant_id = "merchant_rogue".to_string();
+        let res_merchant = store.record_payment_attempt(&tampered_merchant).await;
+        assert!(matches!(res_merchant, Err(WebhookStoreError::Conflict(_))));
+
+        // 2. Attempt to change amount on existing transaction_id -> Conflict
+        let mut tampered_amount = attempt1.clone();
+        tampered_amount.amount_minor = 99999;
+        let res_amount = store.record_payment_attempt(&tampered_amount).await;
+        assert!(matches!(res_amount, Err(WebhookStoreError::Conflict(_))));
+
+        // 3. Attempt to change currency on existing transaction_id -> Conflict
+        let mut tampered_curr = attempt1.clone();
+        tampered_curr.currency = "USD".to_string();
+        let res_curr = store.record_payment_attempt(&tampered_curr).await;
+        assert!(matches!(res_curr, Err(WebhookStoreError::Conflict(_))));
+
+        // 4. Legitimate update (updating state and order_id/payment_ref) -> Ok
+        let mut legitimate = attempt1.clone();
+        legitimate.state = "captured".to_string();
+        legitimate.payment_reference = Some("cf_pay_imm_1".to_string());
+        assert!(store.record_payment_attempt(&legitimate).await.is_ok());
+
+        // 5. Provider-scoped lookup
+        let found = store
+            .get_payment_attempt_for_provider("cashfree", "tx_immutable_1")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().state, "captured");
+
+        let not_found_wrong_prov = store
+            .get_payment_attempt_for_provider("payu", "tx_immutable_1")
+            .await
+            .unwrap();
+        assert!(not_found_wrong_prov.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_atomic_refund_reservation_and_balance_enforcement() {
+        let store = InMemoryWebhookStore::new();
+        let payload = serde_json::json!({"test": true});
+
+        // 1. Trying to reserve refund for non-existent payment -> PaymentNotFound
+        let res_nonexistent = store
+            .reserve_refund("cashfree", "pay_nonexistent", "rf_0", 1000, "INR")
+            .await;
+        assert!(matches!(
+            res_nonexistent,
+            Err(WebhookStoreError::PaymentNotFound(_))
+        ));
+
+        // 2. Capture a payment of 10000 paise (₹100)
+        let capture_params = WebhookEventParams {
+            provider: "cashfree",
+            provider_event_id: "evt_cap_atomic",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_atomic_1",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        store.process_webhook_event(&capture_params).await.unwrap();
+
+        // 3. Trying to reserve 0 paise -> ZeroRefundAmount error
+        let res_zero = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_zero", 0, "INR")
+            .await;
+        assert!(matches!(
+            res_zero,
+            Err(WebhookStoreError::PaymentState(
+                PaymentError::ZeroRefundAmount { .. }
+            ))
+        ));
+
+        // 4. Reserve 6000 paise -> returns Reserved { remaining_balance: 4000 }
+        let res1 = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_1", 6000, "INR")
+            .await
+            .unwrap();
+        assert_eq!(
+            res1,
+            RefundReservationOutcome::Reserved {
+                remaining_balance: 4000
+            }
+        );
+
+        // 5. Idempotent repeat reservation of rf_atomic_1 -> returns AlreadyReserved
+        let res_repeat = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_1", 6000, "INR")
+            .await
+            .unwrap();
+        assert_eq!(
+            res_repeat,
+            RefundReservationOutcome::AlreadyReserved {
+                amount_minor: 6000,
+                status: "pending".to_string()
+            }
+        );
+
+        // 6. Simultaneous/second request for 5000 paise exceeds remaining 4000 balance -> fails closed!
+        let res_excess = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_2", 5000, "INR")
+            .await;
+        assert!(matches!(
+            res_excess,
+            Err(WebhookStoreError::RefundExceedsBalance {
+                requested: 5000,
+                available: 4000,
+                ..
+            })
+        ));
+
+        // 7. Second request for exact remaining 4000 paise -> succeeds with 0 remaining balance
+        let res2 = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_2", 4000, "INR")
+            .await
+            .unwrap();
+        assert_eq!(
+            res2,
+            RefundReservationOutcome::Reserved {
+                remaining_balance: 0
+            }
+        );
+
+        // 8. Third request for even 1 paise -> fails closed
+        let res3 = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_3", 1, "INR")
+            .await;
+        assert!(matches!(
+            res3,
+            Err(WebhookStoreError::RefundExceedsBalance {
+                requested: 1,
+                available: 0,
+                ..
+            })
+        ));
+
+        // 9. Process rf_atomic_1 via webhook
+        let refund_processed_params = WebhookEventParams {
+            provider: "cashfree",
+            provider_event_id: "evt_ref_atomic_1_proc",
+            event_type: PaymentEventType::RefundProcessed,
+            payment_id: "pay_atomic_1",
+            amount_minor: 10000,
+            currency: "INR",
+            refund_id: Some("rf_atomic_1"),
+            refund_amount_minor: Some(6000),
+            refund_status: Some("processed"),
+            payload: &payload,
+        };
+        store
+            .process_webhook_event(&refund_processed_params)
+            .await
+            .unwrap();
+
+        // 10. Reserving rf_atomic_1 after it has been processed returns AlreadyProcessed
+        let res_already_proc = store
+            .reserve_refund("cashfree", "pay_atomic_1", "rf_atomic_1", 6000, "INR")
+            .await
+            .unwrap();
+        assert_eq!(
+            res_already_proc,
+            RefundReservationOutcome::AlreadyProcessed { amount_minor: 6000 }
+        );
     }
 
     #[tokio::test]

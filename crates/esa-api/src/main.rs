@@ -1844,6 +1844,57 @@ async fn razorpay_webhook(
             )
                 .into_response()
         }
+        Err(WebhookStoreError::Conflict(err)) => {
+            warn!("Webhook conflict rejected: {}", err);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "conflict",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::PaymentNotFound(err)) => {
+            warn!("Webhook payment not found: {}", err);
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "payment_not_found",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::InvalidState(err)) => {
+            warn!("Webhook invalid state: {}", err);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "invalid_payment_state",
+                    "message": err
+                })),
+            )
+                .into_response()
+        }
+        Err(WebhookStoreError::RefundExceedsBalance {
+            payment_id,
+            requested,
+            available,
+        }) => {
+            warn!(
+                "Webhook refund exceeds balance: payment_id={}, requested={}, available={}",
+                payment_id, requested, available
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "refund_exceeds_balance",
+                    "message": format!("Refund amount {} exceeds available balance {} for payment {}", requested, available, payment_id)
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1961,24 +2012,34 @@ async fn razorpay_create_order(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let order_id = order.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    if order_id.is_empty() {
+        return Err(AppError::Internal(
+            "Razorpay order creation returned an empty order ID".into(),
+        ));
+    }
 
-    if !order_id.is_empty() {
-        let attempt = esa_core::provider::PaymentAttemptRecord {
-            transaction_id: format!("tx_{}", order_id),
-            merchant_id: caller.merchant_id.clone(),
-            provider: "razorpay".to_string(),
-            provider_order_id: Some(order_id.to_string()),
-            payment_reference: None,
-            amount_minor: req.amount_cents,
-            currency: "INR".to_string(),
-            state: "created".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let _ = state.webhook_store.record_payment_attempt(&attempt).await;
-        if let Ok(mut map) = state.order_merchants.write() {
-            map.insert(order_id.to_string(), caller.merchant_id.clone());
-        }
+    let attempt = esa_core::provider::PaymentAttemptRecord {
+        transaction_id: format!("tx_{}", order_id),
+        merchant_id: caller.merchant_id.clone(),
+        provider: "razorpay".to_string(),
+        provider_order_id: Some(order_id.to_string()),
+        payment_reference: None,
+        amount_minor: req.amount_cents,
+        currency: "INR".to_string(),
+        state: "created".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .webhook_store
+        .record_payment_attempt(&attempt)
+        .await
+        .map_err(|e| {
+            error!("Failed to persist Razorpay payment attempt: {}", e);
+            AppError::Internal("Failed to persist payment attempt record in durable store".into())
+        })?;
+    if let Ok(mut map) = state.order_merchants.write() {
+        map.insert(order_id.to_string(), caller.merchant_id.clone());
     }
 
     let returned_key_id = if caller.environment == "sandbox" {
@@ -2096,7 +2157,7 @@ async fn razorpay_confirm_payment(
     // 4. Verify against durable server-owned payment attempt record.
     let attempt = state
         .webhook_store
-        .get_payment_attempt(order_id)
+        .get_payment_attempt_for_provider("razorpay", order_id)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
         .ok_or_else(|| {
@@ -2105,6 +2166,13 @@ async fn razorpay_confirm_payment(
                 order_id
             ))
         })?;
+
+    if attempt.provider != "razorpay" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match razorpay",
+            attempt.provider
+        )));
+    }
 
     if attempt.merchant_id != authoritative_owner {
         return Err(AppError::Forbidden(
@@ -2129,6 +2197,19 @@ async fn razorpay_confirm_payment(
         ));
     }
 
+    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let currency = payment
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INR");
+
+    if amount_minor != attempt.amount_minor || !currency.eq_ignore_ascii_case(&attempt.currency) {
+        return Err(AppError::Conflict(format!(
+            "Payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+            amount_minor, currency, attempt.amount_minor, attempt.currency
+        )));
+    }
+
     // 6. Check existing durable payment record in webhook_store.
     // If the payment is already Captured/Refunded, return immediately (idempotent no-op)
     // without re-applying side effects or re-inflating workload metrics!
@@ -2147,11 +2228,18 @@ async fn razorpay_confirm_payment(
                 "Payment already confirmed/captured; returning idempotent response"
             );
             return Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "already_confirmed",
                 "source": "razorpay_confirm",
                 "event_id": format!("confirm_{}", req.payment_id),
                 "payment_id": req.payment_id,
-                "payment_state": existing.state,
+                "payment_reference": req.payment_id,
+                "payment_state": format!("{:?}", existing.state).to_lowercase(),
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
                 "idempotent": true,
                 "message": "Payment has already been confirmed and processed",
             })));
@@ -2162,11 +2250,6 @@ async fn razorpay_confirm_payment(
 
     // 7. Record and transition transactionally into durable webhook_store
     let confirm_event_id = format!("confirm_{}", req.payment_id);
-    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
-    let currency = payment
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("INR");
 
     let params = esa_state::WebhookEventParams {
         provider: "razorpay",
@@ -2183,8 +2266,7 @@ async fn razorpay_confirm_payment(
 
     let store_result = state.webhook_store.process_webhook_event(&params).await;
     match store_result {
-        Ok(esa_state::WebhookProcessingResult::Applied { .. })
-        | Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
             let result = payment::apply_payment_event(&state.state_fabric, &event);
             publish_payment_side_effects(&state, &result);
             let _ = state
@@ -2193,22 +2275,56 @@ async fn razorpay_confirm_payment(
                 .await;
 
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "accepted",
                 "source": "razorpay_confirm",
-                "event_id": result.event_id,
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
                 "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "idempotent": false,
+                "message": "Payment authoritatively confirmed and captured",
+                "event_id": result.event_id,
                 "workload_updated": result.workload_updated,
                 "workload_id": result.workload_id,
             })))
         }
         Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "already_confirmed",
                 "source": "razorpay_confirm",
-                "event_id": confirm_event_id,
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
                 "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
                 "idempotent": true,
                 "message": "Payment has already been confirmed and processed",
+                "event_id": confirm_event_id,
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({
+                "success": false,
+                "status": "metadata_recorded",
+                "payment_state": "metadata_recorded",
+                "transaction_id": attempt.transaction_id,
+                "provider": "razorpay",
+                "provider_order_id": order_id,
+                "payment_reference": req.payment_id,
+                "payment_id": req.payment_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "idempotent": false,
+                "message": "Metadata recorded without state transition",
             })))
         }
         Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => Err(AppError::Conflict(
@@ -2424,7 +2540,7 @@ async fn cashfree_confirm_payment(
 
     let attempt = state
         .webhook_store
-        .get_payment_attempt(&req.order_id)
+        .get_payment_attempt_for_provider("cashfree", &req.order_id)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
         .ok_or_else(|| {
@@ -2433,6 +2549,13 @@ async fn cashfree_confirm_payment(
                 req.order_id
             ))
         })?;
+
+    if attempt.provider != "cashfree" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match cashfree",
+            attempt.provider
+        )));
+    }
 
     if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
@@ -2454,6 +2577,47 @@ async fn cashfree_confirm_payment(
         )));
     }
 
+    if payment_status.amount_minor != attempt.amount_minor
+        || !payment_status
+            .currency
+            .eq_ignore_ascii_case(&attempt.currency)
+    {
+        return Err(AppError::Conflict(format!(
+            "Cashfree payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+            payment_status.amount_minor, payment_status.currency, attempt.amount_minor, attempt.currency
+        )));
+    }
+
+    // Check if existing durable payment record is already Captured/Refunded
+    if let Ok(Some(existing)) = state
+        .webhook_store
+        .get_payment_record(&payment_status.provider_payment_id)
+        .await
+    {
+        if existing.state == PaymentState::Captured
+            || existing.state == PaymentState::PartiallyRefunded
+            || existing.state == PaymentState::Refunded
+        {
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "status": "already_confirmed",
+                "source": "cashfree_confirm",
+                "payment_state": format!("{:?}", existing.state).to_lowercase(),
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": true,
+                "message": "Payment has already been confirmed and processed",
+            })));
+        }
+    }
+
     let confirm_event_id = format!("cf_confirm_{}", req.order_id);
     let params = esa_state::WebhookEventParams {
         provider: "cashfree",
@@ -2470,8 +2634,7 @@ async fn cashfree_confirm_payment(
 
     let store_result = state.webhook_store.process_webhook_event(&params).await;
     match store_result {
-        Ok(esa_state::WebhookProcessingResult::Applied { .. })
-        | Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
             let event = PaymentEvent {
                 event_id: confirm_event_id.clone(),
                 event_type: PaymentEventType::PaymentCaptured,
@@ -2497,22 +2660,58 @@ async fn cashfree_confirm_payment(
                 .await;
 
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "accepted",
                 "source": "cashfree_confirm",
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
                 "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
                 "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
                 "amount_minor": payment_status.amount_minor,
                 "currency": payment_status.currency,
+                "idempotent": false,
+                "message": "Payment authoritatively captured and verified with Cashfree",
             })))
         }
         Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
             Ok(Json(serde_json::json!({
+                "success": true,
                 "status": "already_confirmed",
                 "source": "cashfree_confirm",
+                "payment_state": "captured",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
                 "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
                 "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
                 "idempotent": true,
                 "message": "Payment has already been confirmed and processed",
+            })))
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            Ok(Json(serde_json::json!({
+                "success": false,
+                "status": "metadata_recorded",
+                "payment_state": "metadata_recorded",
+                "transaction_id": attempt.transaction_id,
+                "provider": "cashfree",
+                "provider_order_id": req.order_id,
+                "order_id": req.order_id,
+                "payment_reference": payment_status.provider_payment_id,
+                "payment_id": payment_status.provider_payment_id,
+                "cf_payment_id": payment_status.provider_payment_id,
+                "amount_minor": payment_status.amount_minor,
+                "currency": payment_status.currency,
+                "idempotent": false,
+                "message": "Metadata recorded without payment state transition",
             })))
         }
         Err(err) => Err(AppError::Internal(format!(
@@ -2520,9 +2719,20 @@ async fn cashfree_confirm_payment(
             err
         ))),
         Ok(_) => Ok(Json(serde_json::json!({
+            "success": true,
             "status": "accepted",
+            "payment_state": "captured",
+            "transaction_id": attempt.transaction_id,
+            "provider": "cashfree",
+            "provider_order_id": req.order_id,
             "order_id": req.order_id,
+            "payment_reference": payment_status.provider_payment_id,
             "payment_id": payment_status.provider_payment_id,
+            "cf_payment_id": payment_status.provider_payment_id,
+            "amount_minor": payment_status.amount_minor,
+            "currency": payment_status.currency,
+            "idempotent": false,
+            "message": "Payment authoritatively confirmed",
         }))),
     }
 }
@@ -2596,7 +2806,7 @@ async fn cashfree_create_refund(
 
     let attempt = state
         .webhook_store
-        .get_payment_attempt(&req.order_id)
+        .get_payment_attempt_for_provider("cashfree", &req.order_id)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
         .ok_or_else(|| {
@@ -2605,6 +2815,13 @@ async fn cashfree_create_refund(
                 req.order_id
             ))
         })?;
+
+    if attempt.provider != "cashfree" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match cashfree",
+            attempt.provider
+        )));
+    }
 
     if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
@@ -2628,29 +2845,48 @@ async fn cashfree_create_refund(
         )));
     }
 
-    // 3. Validate captured state & refundable balance if recorded in durable payment_records
     let payment_key = attempt
         .payment_reference
         .as_deref()
         .unwrap_or(&req.order_id);
-    if let Ok(Some(payment)) = state.webhook_store.get_payment_record(payment_key).await {
-        if payment.state != PaymentState::Captured
-            && payment.state != PaymentState::PartiallyRefunded
-        {
-            return Err(AppError::BadRequest(format!(
-                "Cannot refund payment in state '{:?}'; payment must be Captured or PartiallyRefunded",
-                payment.state
-            )));
-        }
-        let refundable = payment
-            .amount_minor
-            .saturating_sub(payment.refunded_amount_minor);
-        if req.amount_minor == 0 || req.amount_minor > refundable {
-            return Err(AppError::BadRequest(format!(
-                "Refund amount {} exceeds refundable balance of {} paise",
-                req.amount_minor, refundable
-            )));
-        }
+
+    // 3. Atomically reserve refund balance in durable store before calling upstream
+    let reservation = state
+        .webhook_store
+        .reserve_refund(
+            "cashfree",
+            payment_key,
+            &req.refund_id,
+            req.amount_minor,
+            "INR",
+        )
+        .await
+        .map_err(|e| match e {
+            esa_state::WebhookStoreError::RefundExceedsBalance { available, .. } => {
+                AppError::BadRequest(format!(
+                    "Refund amount {} exceeds refundable balance of {} paise",
+                    req.amount_minor, available
+                ))
+            }
+            esa_state::WebhookStoreError::PaymentNotFound(_) => AppError::BadRequest(format!(
+                "Payment record not found for '{}'; payment must be Captured or PartiallyRefunded",
+                payment_key
+            )),
+            esa_state::WebhookStoreError::InvalidState(s) => AppError::BadRequest(s),
+            esa_state::WebhookStoreError::Conflict(s) => AppError::Conflict(s),
+            other => AppError::Internal(format!("Failed to reserve refund balance: {}", other)),
+        })?;
+
+    if let esa_core::provider::RefundReservationOutcome::AlreadyProcessed { amount_minor } =
+        reservation
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "PROCESSED",
+            "refund_id": req.refund_id,
+            "amount_minor": amount_minor,
+            "idempotent": true,
+            "message": "Refund has already been processed",
+        })));
     }
 
     let provider = state
@@ -2668,16 +2904,49 @@ async fn cashfree_create_refund(
         merchant_id: caller.merchant_id,
     };
 
-    let refund = provider
-        .create_refund(&params)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let refund = match provider.create_refund(&params).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let is_timeout = matches!(e, esa_core::provider::ProviderError::Timeout { .. })
+                || err_str.to_lowercase().contains("timeout")
+                || err_str.to_lowercase().contains("timed out");
 
-    let event_type = match refund.status.to_uppercase().as_str() {
-        "SUCCESS" | "PROCESSED" => PaymentEventType::RefundProcessed,
-        "PENDING" | "SUBMITTED" | "PROCESSING" => PaymentEventType::RefundCreated,
-        "FAILED" | "REJECTED" => PaymentEventType::RefundFailed,
-        _ => PaymentEventType::RefundCreated,
+            if is_timeout {
+                return Err(AppError::Internal(format!(
+                    "Upstream Cashfree request timed out: {}. Refund reservation remains pending until reconciled.",
+                    e
+                )));
+            } else {
+                let refund_event_id = format!("cf_ref_fail_{}", req.refund_id);
+                let webhook_params = esa_state::WebhookEventParams {
+                    provider: "cashfree",
+                    provider_event_id: &refund_event_id,
+                    event_type: PaymentEventType::RefundFailed,
+                    payment_id: payment_key,
+                    amount_minor: req.amount_minor,
+                    currency: "INR",
+                    refund_id: Some(&req.refund_id),
+                    refund_amount_minor: Some(req.amount_minor),
+                    refund_status: Some("failed"),
+                    payload: &serde_json::json!({ "error": err_str }),
+                };
+                let _ = state
+                    .webhook_store
+                    .process_webhook_event(&webhook_params)
+                    .await;
+                return Err(AppError::Internal(format!(
+                    "Cashfree refund rejected: {}",
+                    e
+                )));
+            }
+        }
+    };
+
+    let (event_type, canonical_status) = match refund.status.to_uppercase().as_str() {
+        "SUCCESS" | "PROCESSED" => (PaymentEventType::RefundProcessed, "processed"),
+        "FAILED" | "REJECTED" => (PaymentEventType::RefundFailed, "failed"),
+        _ => (PaymentEventType::RefundCreated, "pending"),
     };
 
     let refund_event_id = format!("cf_ref_{}", req.refund_id);
@@ -2690,7 +2959,7 @@ async fn cashfree_create_refund(
         currency: "INR",
         refund_id: Some(&req.refund_id),
         refund_amount_minor: Some(req.amount_minor),
-        refund_status: Some(&refund.status),
+        refund_status: Some(canonical_status),
         payload: &refund.raw_response,
     };
     state
@@ -2875,7 +3144,11 @@ async fn payu_callback_handler(
         .unwrap_or(&parsed.provider_payment_id);
 
     // Verify attempt ownership record exists in durable store
-    let _attempt = match state.webhook_store.get_payment_attempt(txnid).await {
+    let attempt = match state
+        .webhook_store
+        .get_payment_attempt_for_provider("payu", txnid)
+        .await
+    {
         Ok(Some(a)) => a,
         Ok(None) => {
             warn!(
@@ -2898,6 +3171,16 @@ async fn payu_callback_handler(
             ));
         }
     };
+
+    if attempt.provider != "payu" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "provider_mismatch",
+                "message": format!("Attempt provider '{}' does not match payu", attempt.provider)
+            })),
+        ));
+    }
 
     // Mandatory authoritative check via PayU Verify Payment API before confirming payment
     let verify_res = match provider.get_payment_status(txnid).await {
@@ -2924,6 +3207,21 @@ async fn payu_callback_handler(
         ));
     }
 
+    if verify_res.amount_minor != attempt.amount_minor
+        || !verify_res.currency.eq_ignore_ascii_case(&attempt.currency)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "amount_currency_mismatch",
+                "message": format!(
+                    "PayU upstream amount/currency ({} {}) does not match attempt ({} {})",
+                    verify_res.amount_minor, verify_res.currency, attempt.amount_minor, attempt.currency
+                )
+            })),
+        ));
+    }
+
     let params = esa_state::WebhookEventParams {
         provider: "payu",
         provider_event_id: &parsed.provider_event_id,
@@ -2938,8 +3236,7 @@ async fn payu_callback_handler(
     };
 
     match state.webhook_store.process_webhook_event(&params).await {
-        Ok(esa_state::WebhookProcessingResult::Applied { .. })
-        | Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
             let payment_event = PaymentEvent {
                 event_id: parsed.provider_event_id.clone(),
                 event_type: PaymentEventType::PaymentCaptured,
@@ -2969,6 +3266,9 @@ async fn payu_callback_handler(
                 "PayU callback already processed (duplicate delivery): {}",
                 parsed.provider_event_id
             );
+        }
+        Ok(esa_state::WebhookProcessingResult::MetadataRecorded { .. }) => {
+            // Metadata only; do not emit state side-effects
         }
         Ok(esa_state::WebhookProcessingResult::InFlight { .. }) => {
             return Err((
@@ -3023,7 +3323,7 @@ async fn payu_verify_payment(
 
     let attempt = state
         .webhook_store
-        .get_payment_attempt(&req.txnid)
+        .get_payment_attempt_for_provider("payu", &req.txnid)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
         .ok_or_else(|| {
@@ -3032,6 +3332,13 @@ async fn payu_verify_payment(
                 req.txnid
             ))
         })?;
+
+    if attempt.provider != "payu" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match payu",
+            attempt.provider
+        )));
+    }
 
     if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
@@ -3050,6 +3357,15 @@ async fn payu_verify_payment(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     if status.status == esa_core::provider::ProviderPaymentStatus::Captured {
+        if status.amount_minor != attempt.amount_minor
+            || !status.currency.eq_ignore_ascii_case(&attempt.currency)
+        {
+            return Err(AppError::Conflict(format!(
+                "PayU payment amount/currency mismatch: upstream has {} {} but recorded attempt has {} {}",
+                status.amount_minor, status.currency, attempt.amount_minor, attempt.currency
+            )));
+        }
+
         let evt_id = format!("payu_ver_{}", req.txnid);
         let params = esa_state::WebhookEventParams {
             provider: "payu",
@@ -3078,9 +3394,39 @@ async fn payu_verify_payment(
             .webhook_store
             .update_payment_attempt_state(&req.txnid, "captured", Some(&status.provider_payment_id))
             .await;
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "status": "success",
+            "payment_state": "captured",
+            "transaction_id": attempt.transaction_id,
+            "provider": "payu",
+            "provider_order_id": req.txnid,
+            "txnid": req.txnid,
+            "payment_reference": status.provider_payment_id,
+            "mihpayid": status.provider_payment_id,
+            "amount_minor": status.amount_minor,
+            "currency": status.currency,
+            "idempotent": false,
+            "message": "Payment verified and authoritatively captured with PayU",
+        })));
     }
 
-    Ok(Json(serde_json::to_value(&status).unwrap_or_default()))
+    Ok(Json(serde_json::json!({
+        "success": false,
+        "status": format!("{:?}", status.status).to_lowercase(),
+        "payment_state": format!("{:?}", status.status).to_lowercase(),
+        "transaction_id": attempt.transaction_id,
+        "provider": "payu",
+        "provider_order_id": req.txnid,
+        "txnid": req.txnid,
+        "payment_reference": status.provider_payment_id,
+        "mihpayid": status.provider_payment_id,
+        "amount_minor": status.amount_minor,
+        "currency": status.currency,
+        "idempotent": false,
+        "message": format!("PayU payment in state: {:?}", status.status),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -3112,7 +3458,7 @@ async fn payu_create_refund(
 
     let attempt = state
         .webhook_store
-        .get_payment_attempt(&req.mihpayid)
+        .get_payment_attempt_for_provider("payu", &req.mihpayid)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to retrieve payment attempt: {}", e)))?
         .ok_or_else(|| {
@@ -3121,6 +3467,13 @@ async fn payu_create_refund(
                 req.mihpayid
             ))
         })?;
+
+    if attempt.provider != "payu" {
+        return Err(AppError::Forbidden(format!(
+            "Payment attempt provider '{}' does not match payu",
+            attempt.provider
+        )));
+    }
 
     if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
         return Err(AppError::Forbidden(
@@ -3144,29 +3497,42 @@ async fn payu_create_refund(
         )));
     }
 
-    // 3. Validate captured state & refundable balance if recorded in durable payment_records
     let payment_key = attempt
         .payment_reference
         .as_deref()
         .unwrap_or(&req.mihpayid);
-    if let Ok(Some(payment)) = state.webhook_store.get_payment_record(payment_key).await {
-        if payment.state != PaymentState::Captured
-            && payment.state != PaymentState::PartiallyRefunded
-        {
-            return Err(AppError::BadRequest(format!(
-                "Cannot refund payment in state '{:?}'; payment must be Captured or PartiallyRefunded",
-                payment.state
-            )));
-        }
-        let refundable = payment
-            .amount_minor
-            .saturating_sub(payment.refunded_amount_minor);
-        if req.amount_minor == 0 || req.amount_minor > refundable {
-            return Err(AppError::BadRequest(format!(
-                "Refund amount {} exceeds refundable balance of {} paise",
-                req.amount_minor, refundable
-            )));
-        }
+
+    // 3. Atomically reserve refund balance in durable store before calling upstream
+    let reservation = state
+        .webhook_store
+        .reserve_refund("payu", payment_key, &req.refund_id, req.amount_minor, "INR")
+        .await
+        .map_err(|e| match e {
+            esa_state::WebhookStoreError::RefundExceedsBalance { available, .. } => {
+                AppError::BadRequest(format!(
+                    "Refund amount {} exceeds refundable balance of {} paise",
+                    req.amount_minor, available
+                ))
+            }
+            esa_state::WebhookStoreError::PaymentNotFound(_) => AppError::BadRequest(format!(
+                "Payment record not found for '{}'; payment must be Captured or PartiallyRefunded",
+                payment_key
+            )),
+            esa_state::WebhookStoreError::InvalidState(s) => AppError::BadRequest(s),
+            esa_state::WebhookStoreError::Conflict(s) => AppError::Conflict(s),
+            other => AppError::Internal(format!("Failed to reserve refund balance: {}", other)),
+        })?;
+
+    if let esa_core::provider::RefundReservationOutcome::AlreadyProcessed { amount_minor } =
+        reservation
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "PROCESSED",
+            "refund_id": req.refund_id,
+            "amount_minor": amount_minor,
+            "idempotent": true,
+            "message": "Refund has already been processed",
+        })));
     }
 
     let provider = state
@@ -3184,16 +3550,46 @@ async fn payu_create_refund(
         merchant_id: caller.merchant_id,
     };
 
-    let refund = provider
-        .create_refund(&params)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let refund = match provider.create_refund(&params).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let is_timeout = matches!(e, esa_core::provider::ProviderError::Timeout { .. })
+                || err_str.to_lowercase().contains("timeout")
+                || err_str.to_lowercase().contains("timed out");
 
-    let event_type = match refund.status.to_uppercase().as_str() {
-        "SUCCESS" | "PROCESSED" | "1" => PaymentEventType::RefundProcessed,
-        "PENDING" | "SUBMITTED" | "PROCESSING" | "QUEUED" => PaymentEventType::RefundCreated,
-        "FAILED" | "REJECTED" | "FAILURE" => PaymentEventType::RefundFailed,
-        _ => PaymentEventType::RefundCreated,
+            if is_timeout {
+                return Err(AppError::Internal(format!(
+                    "Upstream PayU request timed out: {}. Refund reservation remains pending until reconciled.",
+                    e
+                )));
+            } else {
+                let refund_event_id = format!("payu_ref_fail_{}", req.refund_id);
+                let webhook_params = esa_state::WebhookEventParams {
+                    provider: "payu",
+                    provider_event_id: &refund_event_id,
+                    event_type: PaymentEventType::RefundFailed,
+                    payment_id: payment_key,
+                    amount_minor: req.amount_minor,
+                    currency: "INR",
+                    refund_id: Some(&req.refund_id),
+                    refund_amount_minor: Some(req.amount_minor),
+                    refund_status: Some("failed"),
+                    payload: &serde_json::json!({ "error": err_str }),
+                };
+                let _ = state
+                    .webhook_store
+                    .process_webhook_event(&webhook_params)
+                    .await;
+                return Err(AppError::Internal(format!("PayU refund rejected: {}", e)));
+            }
+        }
+    };
+
+    let (event_type, canonical_status) = match refund.status.to_uppercase().as_str() {
+        "SUCCESS" | "PROCESSED" | "1" => (PaymentEventType::RefundProcessed, "processed"),
+        "FAILED" | "REJECTED" | "FAILURE" => (PaymentEventType::RefundFailed, "failed"),
+        _ => (PaymentEventType::RefundCreated, "pending"),
     };
 
     let refund_event_id = format!("payu_ref_{}", req.refund_id);
@@ -3206,7 +3602,7 @@ async fn payu_create_refund(
         currency: "INR",
         refund_id: Some(&req.refund_id),
         refund_amount_minor: Some(req.amount_minor),
-        refund_status: Some(&refund.status),
+        refund_status: Some(canonical_status),
         payload: &refund.raw_response,
     };
     state
@@ -5635,49 +6031,6 @@ async fn universal_checkout(
         }
         map.insert(tx_id.clone(), caller.merchant_id.clone());
     }
-
-    // In demo/sandbox mode, ingest a simulated telemetry event into StateFabric so demonstration dashboards animate.
-    let payment_event = PaymentEvent {
-        event_id: tx_id.clone(),
-        event_type: PaymentEventType::PaymentAuthorized,
-        timestamp: chrono::Utc::now(),
-        region: match routed {
-            PaymentGateway::Razorpay
-            | PaymentGateway::PhonePe
-            | PaymentGateway::Cashfree
-            | PaymentGateway::PayU => Region::IndiaSouth,
-            PaymentGateway::Paytm => Region::IndiaNorth,
-            _ => Region::IndiaWest,
-        },
-        payment_method_class: match method_str.as_str() {
-            "card" | "credit" | "debit" => PaymentMethodClass::Card,
-            "netbanking" | "nb" => PaymentMethodClass::NetBanking,
-            "wallet" => PaymentMethodClass::Wallet,
-            "upi" => PaymentMethodClass::Upi,
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "unsupported_provider_currency_method",
-                        "message": format!(
-                            "Gateway '{}' does not support currency '{}' with payment method '{}'",
-                            routed.as_str(),
-                            req.currency,
-                            method_str
-                        )
-                    })),
-                ));
-            }
-        },
-        pseudonymous_reference: format!("PSEUDO-{}", uuid::Uuid::new_v4()),
-        amount_cents: Some(resolved_amount.amount_minor),
-        amount_minor: Some(resolved_amount.amount_minor),
-        currency: resolved_amount.currency.clone(),
-        processing_latency_ms: Some(if failover { 145.0 } else { 85.0 }),
-        success: true,
-    };
-    let apply_res = payment::apply_payment_event(&state.state_fabric, &payment_event);
-    publish_payment_side_effects(&state, &apply_res);
 
     Ok(Json(GatewayRouteDecision {
         transaction_id: tx_id,
