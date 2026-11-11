@@ -287,6 +287,47 @@ describe('Frontend Checkout Execution & State Outcomes', () => {
       expect(result.status).toBe('failed');
       expect(result.message).toContain('Hash mismatch');
     });
+
+    it('throws error when DOM document is not available', () => {
+      expect(() =>
+        submitPayUHostedForm('https://test.payu.in/_payment', { key: '123' })
+      ).toThrow('DOM document not available');
+    });
+
+    it('creates and submits an HTML form with hidden fields when document is present', () => {
+      const submitMock = mock(() => {});
+      const appendMock = mock(() => {});
+      const formMock = {
+        method: '',
+        action: '',
+        target: '',
+        style: {} as any,
+        appendChild: appendMock,
+        submit: submitMock,
+      };
+
+      (globalThis as any).document = {
+        createElement: mock((tag: string) => {
+          if (tag === 'form') return formMock;
+          return { type: '', name: '', value: '' };
+        }),
+        body: {
+          appendChild: mock(() => {}),
+        },
+      };
+
+      const form = submitPayUHostedForm('https://test.payu.in/_payment', {
+        key: 'test_key',
+        txnid: 'tx_123',
+        amount: '100.00',
+      });
+
+      expect(form.method).toBe('POST');
+      expect(form.action).toBe('https://test.payu.in/_payment');
+      expect(submitMock).toHaveBeenCalled();
+
+      delete (globalThis as any).document;
+    });
   });
 
   describe('Razorpay Provider Flow', () => {
@@ -399,3 +440,4 @@ describe('Frontend Checkout Execution & State Outcomes', () => {
     });
   });
 });
+
