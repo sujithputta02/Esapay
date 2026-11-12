@@ -1470,7 +1470,7 @@ mod tests {
             ))],
         ));
         let agent = PaymentIntelligenceAgent::new(provider, MemoryRetriever::new(store.clone()));
-        let ctx = make_context("authorized", Some(PaymentState::Authorized), true);
+        let ctx = make_context("captured", Some(PaymentState::Captured), true);
 
         let report = agent.investigate(&ctx, None).await.unwrap();
         let eval_id = report
@@ -1527,10 +1527,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            updated_eval.verified_outcome_state,
-            Some(CanonicalPaymentState::Captured)
-        );
+        assert_eq!(updated_eval.accuracy, OutcomeAccuracy::Correct);
         assert!(promoted.is_some());
 
         let after = store

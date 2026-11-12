@@ -386,10 +386,9 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             ));
         }
 
-        let will_promote = matches!(
-            accuracy,
-            OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
-        );
+        // Only OutcomeAccuracy::Correct may create a verified episodic memory;
+        // PartiallyCorrect and Incorrect remain evaluations without episodic promotion.
+        let will_promote = accuracy == OutcomeAccuracy::Correct;
 
         let mut tx = self.pool.begin().await.map_err(|e| {
             InferenceError::new(
@@ -928,7 +927,8 @@ mod tests {
             OutcomeAccuracy::Pending
         );
 
-        let (ev1, mem1) = crate::memory::verify_outcome_from_webhook_store(
+        // PartiallyCorrect (AUTHORIZATION_NOT_CAPTURED -> Captured) updates evaluation in Postgres without promoting episodic memory
+        let (ev_part, mem_part) = crate::memory::verify_outcome_from_webhook_store(
             &wh_store,
             &store,
             &scope_a,
@@ -936,6 +936,34 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(ev_part.accuracy, OutcomeAccuracy::PartiallyCorrect);
+        assert!(ev_part.promoted_memory_id.is_none());
+        assert!(mem_part.is_none());
+
+        // Correct (HEALTHY_COMPLETED -> Captured) promotes exactly once in Postgres and is idempotent
+        let eval_corr = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_corr_{}", &suffix[..8]),
+            m_a.clone(),
+            pay_ref.clone(),
+            "razorpay".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        );
+        let eval_corr_id = eval_corr.evaluation_id.clone();
+        store.record_evaluation(eval_corr).await.unwrap();
+
+        let (ev1, mem1) = crate::memory::verify_outcome_from_webhook_store(
+            &wh_store,
+            &store,
+            &scope_a,
+            &eval_corr_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ev1.accuracy, OutcomeAccuracy::Correct);
         let promoted_id = ev1.promoted_memory_id.clone().unwrap();
         assert_eq!(mem1.unwrap().memory_id, promoted_id);
 
@@ -943,7 +971,7 @@ mod tests {
             &wh_store,
             &store,
             &scope_a,
-            &eval_unique_id,
+            &eval_corr_id,
         )
         .await
         .unwrap();
@@ -952,6 +980,34 @@ mod tests {
             Some(promoted_id.as_str())
         );
         assert_eq!(mem2.unwrap().memory_id, promoted_id);
+
+        // Empty webhook inbox cannot verify WEBHOOK_DELAYED_OR_MISSING in Postgres
+        let eval_empty_wh = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_ewh_{}", &suffix[..8]),
+            m_a.clone(),
+            pay_ref.clone(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec![format!("attempt:{}", tx_id)]);
+        let eval_ewh_id = eval_empty_wh.evaluation_id.clone();
+        store.record_evaluation(eval_empty_wh).await.unwrap();
+        assert_eq!(
+            crate::memory::verify_outcome_from_webhook_store(
+                &wh_store,
+                &store,
+                &scope_a,
+                &eval_ewh_id,
+            )
+            .await
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
 
         // 5. Expired evaluation verification rejection & physical purge
         let mut exp_eval = OutcomeEvaluationRecord::new_pending(

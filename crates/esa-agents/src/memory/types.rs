@@ -377,6 +377,7 @@ pub struct AuthoritativeOutcomeProof {
 }
 
 impl AuthoritativeOutcomeProof {
+    #[allow(dead_code)]
     pub(super) fn from_authoritative_records(
         scope: &ExecutionScope,
         eval: &OutcomeEvaluationRecord,
@@ -436,15 +437,11 @@ impl AuthoritativeOutcomeProof {
         }
 
         // Compute deterministic evidence facts from authoritative records
-        let mut seen_event_ids = HashSet::new();
-        let mut dup_event_ids = HashSet::new();
         let mut delayed_event_ids = HashSet::new();
         let mut provider_timeout_event_ids = HashSet::new();
+        let mut provider_failed_event_ids = HashSet::new();
 
         for ev in inbox_events {
-            if !seen_event_ids.insert(ev.provider_event_id.clone()) {
-                dup_event_ids.insert(ev.provider_event_id.clone());
-            }
             if ev
                 .received_at
                 .signed_duration_since(attempt.created_at)
@@ -470,6 +467,11 @@ impl AuthoritativeOutcomeProof {
                 || payload_str.contains("gateway_timeout");
             if is_provider_timeout_or_outage {
                 provider_timeout_event_ids.insert(ev.provider_event_id.clone());
+            }
+            let is_provider_failure_event = (et.contains("failed") || et.contains("failure"))
+                && ev.status != esa_state::WebhookStatus::Failed;
+            if is_provider_failure_event {
+                provider_failed_event_ids.insert(ev.provider_event_id.clone());
             }
         }
 
@@ -519,25 +521,19 @@ impl AuthoritativeOutcomeProof {
         let rc = eval.recommended_root_cause.as_str();
         let accuracy = match rc {
             "DUPLICATE_WEBHOOK_SUPPRESSED" => {
-                if !has_cited_match("webhook:", &dup_event_ids) {
-                    return Err(InferenceError::new(
-                        InferenceErrorCategory::InvalidResponse,
-                        "DUPLICATE_WEBHOOK_SUPPRESSED could not be verified against duplicate webhook records; keeping evaluation pending",
-                    ));
-                }
-                OutcomeAccuracy::Correct
+                // webhook_inbox enforces UNIQUE(provider, provider_event_id) for idempotency and
+                // does not persist a durable duplicate-delivery log; keep unsupported until one exists.
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::InvalidResponse,
+                    "DUPLICATE_WEBHOOK_SUPPRESSED cannot be independently promoted without durable duplicate-delivery evidence; keeping evaluation pending",
+                ));
             }
             "WEBHOOK_DELAYED_OR_MISSING" => {
                 let delayed_ok = has_cited_match("webhook:", &delayed_event_ids);
-                let missing_ok = inbox_events.is_empty()
-                    && (cited.is_empty()
-                        || cited
-                            .iter()
-                            .any(|r| r.starts_with("attempt:") || r.starts_with("state:")));
-                if !delayed_ok && !missing_ok {
+                if !delayed_ok {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
-                        "WEBHOOK_DELAYED_OR_MISSING could not be verified against webhook timeline; keeping evaluation pending",
+                        "WEBHOOK_DELAYED_OR_MISSING requires independently verified delayed-event evidence; empty webhook_inbox alone is insufficient, keeping evaluation pending",
                     ));
                 }
                 OutcomeAccuracy::Correct
@@ -574,10 +570,36 @@ impl AuthoritativeOutcomeProof {
             }
             "PROVIDER_STATE_DISCREPANCY" => {
                 let attempt_canon = CanonicalPaymentState::from_attempt_state(&attempt.state);
-                if payment_entity.is_none() || attempt_canon == authoritative_state {
+                if payment_entity.is_none()
+                    || attempt_canon == CanonicalPaymentState::Unknown
+                    || attempt_canon == authoritative_state
+                {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
                         "PROVIDER_STATE_DISCREPANCY has no conflicting authoritative vs attempt state; keeping evaluation pending",
+                    ));
+                }
+                let expected_state_ref = format!("state:{}", authoritative_state.as_str());
+                let expected_payment_ref = format!("payment:{}", eval.payment_reference);
+                let expected_attempt_ref = format!("attempt_state:{}", attempt.state.trim());
+                let expected_attempt_canon_ref =
+                    format!("attempt_state:{}", attempt_canon.as_str());
+
+                let cites_auth = cited
+                    .iter()
+                    .any(|r| r == &expected_state_ref || r == &expected_payment_ref);
+                let cites_conflict = cited.iter().any(|r| {
+                    r == &expected_attempt_ref
+                        || r == &expected_attempt_canon_ref
+                        || r.strip_prefix("provider_observed:").is_some_and(|obs| {
+                            let c = CanonicalPaymentState::from_attempt_state(obs);
+                            c != CanonicalPaymentState::Unknown && c != authoritative_state
+                        })
+                });
+                if !cites_auth || !cites_conflict {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "PROVIDER_STATE_DISCREPANCY evidence refs do not match the actual conflicting authoritative and attempt/observed states; keeping evaluation pending",
                     ));
                 }
                 OutcomeAccuracy::Correct
@@ -599,7 +621,15 @@ impl AuthoritativeOutcomeProof {
                 }
             },
             "PAYMENT_FAILED_AT_PROVIDER" => match authoritative_state {
-                CanonicalPaymentState::Failed => OutcomeAccuracy::Correct,
+                CanonicalPaymentState::Failed => {
+                    if !has_cited_match("webhook:", &provider_failed_event_ids) {
+                        return Err(InferenceError::new(
+                            InferenceErrorCategory::InvalidResponse,
+                            "PAYMENT_FAILED_AT_PROVIDER lacks matching durable provider-originated failure event evidence; keeping evaluation pending",
+                        ));
+                    }
+                    OutcomeAccuracy::Correct
+                }
                 CanonicalPaymentState::Captured
                 | CanonicalPaymentState::PartiallyRefunded
                 | CanonicalPaymentState::Refunded => OutcomeAccuracy::Incorrect,

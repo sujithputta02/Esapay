@@ -54,9 +54,10 @@ pub trait PaymentMemoryStore: Send + Sync {
     ) -> Result<usize, InferenceError>;
 }
 
-/// Trusted verification boundary: fetches authoritative payment records from `WebhookStore`,
-/// verifies merchant ownership and terminal outcome, and promotes only if supported by records.
-pub async fn verify_outcome_from_webhook_store(
+/// Trusted crate-internal verification boundary: fetches authoritative payment, webhook, and refund
+/// records from `WebhookStore`, verifies merchant ownership and diagnosis, and promotes only if `Correct`.
+#[allow(dead_code)]
+pub(crate) async fn verify_outcome_from_webhook_store(
     webhook_store: &dyn WebhookStore,
     memory_store: &dyn PaymentMemoryStore,
     scope: &ExecutionScope,
@@ -397,10 +398,9 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
             ));
         }
 
-        let will_promote = matches!(
-            accuracy,
-            OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
-        );
+        // Only OutcomeAccuracy::Correct may create a verified episodic memory;
+        // PartiallyCorrect and Incorrect remain evaluations without episodic promotion.
+        let will_promote = accuracy == OutcomeAccuracy::Correct;
         let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
             let record = MemoryRecord {
@@ -866,10 +866,42 @@ mod tests {
             updated_at: now,
         };
 
-        // First verification via authoritative records succeeds and promotes 1 episodic memory
-        let proof1 = AuthoritativeOutcomeProof::from_authoritative_records(
+        // PartiallyCorrect (AUTHORIZATION_NOT_CAPTURED -> Captured) updates evaluation but creates NO episodic memory
+        let proof_partial = AuthoritativeOutcomeProof::from_authoritative_records(
             &scope_for("merchant_a"),
             &eval,
+            &captured_attempt,
+            Some(&captured_entity),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let (ev_part, mem_part) = store
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof_partial)
+            .await
+            .unwrap();
+        assert_eq!(ev_part.accuracy, OutcomeAccuracy::PartiallyCorrect);
+        assert!(ev_part.promoted_memory_id.is_none());
+        assert!(mem_part.is_none());
+
+        // Correct evaluation (HEALTHY_COMPLETED -> Captured) promotes exactly 1 episodic memory
+        let eval_correct = OutcomeEvaluationRecord::new_pending(
+            "inv_corr".to_string(),
+            "merchant_a".to_string(),
+            "pay_1".to_string(),
+            "razorpay".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Captured,
+        );
+        let eval_corr_id = eval_correct.evaluation_id.clone();
+        store.record_evaluation(eval_correct.clone()).await.unwrap();
+
+        let proof1 = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_correct,
             &captured_attempt,
             Some(&captured_entity),
             &[],
@@ -880,6 +912,7 @@ mod tests {
             .verify_and_promote_outcome(&scope_for("merchant_a"), proof1.clone())
             .await
             .unwrap();
+        assert_eq!(ev1.accuracy, OutcomeAccuracy::Correct);
         assert!(mem1.is_some());
         assert!(ev1.promoted_memory_id.is_some());
 
@@ -912,7 +945,7 @@ mod tests {
         };
         let proof_conflict = AuthoritativeOutcomeProof::from_authoritative_records(
             &scope_for("merchant_a"),
-            &eval,
+            &eval_correct,
             &captured_attempt,
             Some(&failed_entity),
             &[],
@@ -927,6 +960,7 @@ mod tests {
             err_conflict.category,
             InferenceErrorCategory::InvalidResponse
         );
+        let _ = eval_corr_id;
     }
 
     #[tokio::test]
@@ -1166,5 +1200,219 @@ mod tests {
         .unwrap();
         assert_eq!(verified.accuracy, OutcomeAccuracy::Correct);
         assert!(promoted.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_strict_diagnosis_verification_edges_and_incorrect_no_promotion() {
+        use esa_core::events::PaymentEventType;
+        use esa_core::payment_state::{PaymentEntity, PaymentState};
+        use esa_state::{InMemoryWebhookStore, WebhookEventParams};
+
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let wh_store = InMemoryWebhookStore::new();
+        let now = Utc::now();
+
+        // 1. Empty webhook inbox alone cannot verify WEBHOOK_DELAYED_OR_MISSING
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_empty_wh".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: None,
+                payment_reference: Some("pay_empty_wh".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now - chrono::Duration::minutes(10),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let eval_empty_wh = OutcomeEvaluationRecord::new_pending(
+            "inv_empty_wh".to_string(),
+            "merchant_a".to_string(),
+            "pay_empty_wh".to_string(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["attempt:tx_empty_wh".to_string()]);
+        let eval_empty_id = eval_empty_wh.evaluation_id.clone();
+        mem_store.record_evaluation(eval_empty_wh).await.unwrap();
+        let err_empty = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_empty_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_empty.category, InferenceErrorCategory::InvalidResponse);
+
+        // 2. Failed payment WITHOUT provider-originated failure event keeps PAYMENT_FAILED_AT_PROVIDER Pending
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_fail_no_ev".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: None,
+                payment_reference: Some("pay_fail_no_ev".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "failed".to_string(),
+                created_at: now - chrono::Duration::minutes(5),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let eval_fail_no_ev = OutcomeEvaluationRecord::new_pending(
+            "inv_fail_no_ev".to_string(),
+            "merchant_a".to_string(),
+            "pay_fail_no_ev".to_string(),
+            "razorpay".to_string(),
+            "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["state:failed".to_string()]);
+        let eval_fail_no_ev_id = eval_fail_no_ev.evaluation_id.clone();
+        mem_store.record_evaluation(eval_fail_no_ev).await.unwrap();
+        let err_no_ev = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_fail_no_ev_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_no_ev.category, InferenceErrorCategory::InvalidResponse);
+
+        // 3. Failed payment WITH durable provider payment.failed event promotes PAYMENT_FAILED_AT_PROVIDER
+        let fail_payload = serde_json::json!({"event": "payment.failed"});
+        wh_store
+            .process_webhook_event(&WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_prov_fail_1",
+                event_type: PaymentEventType::PaymentFailed,
+                payment_id: "pay_fail_no_ev",
+                amount_minor: 10000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &fail_payload,
+            })
+            .await
+            .unwrap();
+        let eval_fail_with_ev = OutcomeEvaluationRecord::new_pending(
+            "inv_fail_with_ev".to_string(),
+            "merchant_a".to_string(),
+            "pay_fail_no_ev".to_string(),
+            "razorpay".to_string(),
+            "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["webhook:evt_prov_fail_1".to_string()]);
+        let eval_fail_with_ev_id = eval_fail_with_ev.evaluation_id.clone();
+        mem_store
+            .record_evaluation(eval_fail_with_ev)
+            .await
+            .unwrap();
+        let (ev_fail_ok, mem_fail_ok) = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_fail_with_ev_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ev_fail_ok.accuracy, OutcomeAccuracy::Correct);
+        assert!(mem_fail_ok.is_some());
+
+        // 4. Incorrect evaluation (HEALTHY_COMPLETED when payment Failed) creates NO episodic memory
+        let eval_incorrect = OutcomeEvaluationRecord::new_pending(
+            "inv_incorrect".to_string(),
+            "merchant_a".to_string(),
+            "pay_fail_no_ev".to_string(),
+            "razorpay".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        );
+        let eval_inc_id = eval_incorrect.evaluation_id.clone();
+        mem_store.record_evaluation(eval_incorrect).await.unwrap();
+        let (ev_inc, mem_inc) = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_inc_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ev_inc.accuracy, OutcomeAccuracy::Incorrect);
+        assert!(mem_inc.is_none());
+
+        // 5. PROVIDER_STATE_DISCREPANCY rejects non-matching/non-conflicting evidence refs
+        let attempt_disc = PaymentAttemptRecord {
+            transaction_id: "tx_disc".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_disc".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "authorized".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entity_disc = PaymentEntity {
+            payment_id: "pay_disc".to_string(),
+            state: PaymentState::Captured,
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec![],
+            refunds: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let bad_disc_eval = OutcomeEvaluationRecord::new_pending(
+            "inv_bad_disc".to_string(),
+            "merchant_a".to_string(),
+            "pay_disc".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_STATE_DISCREPANCY".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec![
+            "state:captured".to_string(),
+            "attempt_state:captured".to_string(), // non-conflicting!
+        ]);
+        let err_bad_disc = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &bad_disc_eval,
+            &attempt_disc,
+            Some(&entity_disc),
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_bad_disc.category,
+            InferenceErrorCategory::InvalidResponse
+        );
     }
 }
