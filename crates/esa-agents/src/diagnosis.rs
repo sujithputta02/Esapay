@@ -46,6 +46,12 @@ impl DiagnosisAgent {
         conditions: &[Condition],
         scope: ExecutionScope,
     ) -> EsaResult<Diagnosis> {
+        scope
+            .normalized_merchant_id()
+            .map_err(|e| esa_core::EsaError::PolicyViolation {
+                reason: e.to_string(),
+            })?;
+
         if conditions.is_empty() {
             return Ok(Diagnosis {
                 hypothesis: "No conditions detected".to_string(),
@@ -141,12 +147,13 @@ impl DiagnosisAgent {
     ) -> Diagnosis {
         let diag = self.rule_based_diagnosis(conditions);
         let summary = serde_json::to_string(&diag).unwrap_or_default();
+        let merchant_id = scope.normalized_merchant_id().ok().flatten();
         self.provider.cost_tracker().record_provider_inference(
             ProviderKind::DeterministicFallback.as_str(),
             scope.as_str(),
             "deterministic_rules_v1",
             "diagnosis",
-            scope.merchant_id(),
+            merchant_id,
             prompt,
             &summary,
             0,

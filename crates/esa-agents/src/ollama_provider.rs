@@ -34,6 +34,9 @@ impl InferenceProvider for OllamaProvider {
     }
 
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse, InferenceError> {
+        let merchant_id = request.scope.normalized_merchant_id()?;
+        let _ = request.scope.cache_key_prefix()?;
+
         let prompt_chars = request.prompt.chars().count();
         if prompt_chars > request.limits.max_prompt_chars {
             return Err(InferenceError::new(
@@ -46,7 +49,6 @@ impl InferenceProvider for OllamaProvider {
         }
 
         let start = Instant::now();
-        let merchant_id = request.scope.merchant_id();
         let res = self
             .client
             .generate_with_context(&request.agent_id, merchant_id, request.prompt.clone())

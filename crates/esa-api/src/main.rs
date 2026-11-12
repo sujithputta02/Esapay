@@ -599,10 +599,9 @@ async fn main() -> anyhow::Result<()> {
     let broadcaster = Arc::new(TelemetryBroadcaster::new());
 
     // Initialize AI inference provider (Ollama by default, or Hugging Face ZeroGPU when configured)
-    let ai_config = esa_agents::AiProviderConfig::from_env();
     let ai_cost_tracker = Arc::new(esa_agents::AICostTracker::new());
     let inference_provider =
-        esa_agents::build_inference_provider(&ai_config, Arc::clone(&ai_cost_tracker), false);
+        esa_agents::build_inference_provider_from_env(Arc::clone(&ai_cost_tracker), false);
 
     let agent_status = Arc::new(std::sync::RwLock::new(AgentStatusState::default()));
 
@@ -14811,8 +14810,8 @@ mod integration_tests {
         let tracker = state.inference_provider.cost_tracker();
         let hf_cfg = esa_agents::AiProviderConfig {
             provider: esa_agents::ProviderKind::HfZerogpu,
-            hf_url: Some("http://127.0.0.1:59998".to_string()),
-            hf_token: None, // Intentionally unconfigured/unavailable
+            hf_url: Some("https://sujithputta-esa-ai-brain.hf.space".to_string()),
+            hf_token: Some("hf_dummy_unit_test_token_12345".to_string()),
             ..Default::default()
         };
         state.inference_provider =

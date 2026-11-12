@@ -6,6 +6,10 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Authoritative Hugging Face model identity pinned for Phase 2 / 2.1.
+pub const HF_AUTHORITATIVE_MODEL_ID: &str = "Qwen/Qwen2.5-0.5B-Instruct";
+pub const HF_AUTHORITATIVE_MODEL_REVISION: &str = "7ae557604adf67be50417f59c2c2f167def9a775";
+
 /// Identifies which inference provider handled or attempted a request.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -46,24 +50,38 @@ impl ExecutionScope {
         }
     }
 
-    pub fn merchant_id(&self) -> Option<&str> {
+    /// Validates the scope and returns the normalized merchant ID (`None` for `System`).
+    /// Never converts an invalid `MerchantScoped` into `System`.
+    pub fn normalized_merchant_id(&self) -> Result<Option<&str>, InferenceError> {
         match self {
-            ExecutionScope::System => None,
+            ExecutionScope::System => Ok(None),
             ExecutionScope::MerchantScoped { merchant_id } => {
-                let clean = merchant_id.trim();
-                if clean.is_empty() {
-                    None
-                } else {
-                    Some(clean)
+                let trimmed = merchant_id.trim();
+                if trimmed.is_empty() {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidScope,
+                        "MerchantScoped execution scope requires a non-empty merchant_id",
+                    ));
                 }
+                if trimmed
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == ':')
+                {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidScope,
+                        "MerchantScoped merchant_id contains invalid whitespace, control, or delimiter characters",
+                    ));
+                }
+                Ok(Some(trimmed))
             }
         }
     }
 
-    pub fn cache_key_prefix(&self) -> String {
-        match self.merchant_id() {
-            Some(mid) => format!("merchant:{}", mid),
-            None => "system:__global__".to_string(),
+    /// Returns a strictly isolated cache key prefix. Fails closed on invalid `MerchantScoped`.
+    pub fn cache_key_prefix(&self) -> Result<String, InferenceError> {
+        match self.normalized_merchant_id()? {
+            Some(mid) => Ok(format!("merchant:{}", mid)),
+            None => Ok("system:__global__".to_string()),
         }
     }
 }
@@ -156,6 +174,7 @@ pub enum InferenceErrorCategory {
     CircuitOpen,
     BadGateway,
     InvalidResponse,
+    InvalidScope,
     PromptTooLarge,
     Cancelled,
     Misconfigured,
@@ -176,6 +195,7 @@ impl InferenceErrorCategory {
             InferenceErrorCategory::CircuitOpen => "circuit_open",
             InferenceErrorCategory::BadGateway => "bad_gateway",
             InferenceErrorCategory::InvalidResponse => "invalid_response",
+            InferenceErrorCategory::InvalidScope => "invalid_scope",
             InferenceErrorCategory::PromptTooLarge => "prompt_too_large",
             InferenceErrorCategory::Cancelled => "cancelled",
             InferenceErrorCategory::Misconfigured => "misconfigured",
@@ -219,13 +239,13 @@ impl fmt::Display for InferenceError {
 impl std::error::Error for InferenceError {}
 
 /// Startup configuration selecting and bounding the active AI inference provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AiProviderConfig {
     pub provider: ProviderKind,
     pub ollama_url: String,
     pub ollama_model: String,
     pub hf_url: Option<String>,
-    /// Token is intentionally omitted from Debug output below.
+    /// Token is intentionally redacted in `Debug` output.
     pub hf_token: Option<String>,
     pub hf_model_id: String,
     pub hf_connect_timeout_secs: u64,
@@ -237,6 +257,36 @@ pub struct AiProviderConfig {
     pub hf_circuit_breaker_cooldown_secs: u64,
 }
 
+impl fmt::Debug for AiProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiProviderConfig")
+            .field("provider", &self.provider)
+            .field("ollama_url", &self.ollama_url)
+            .field("ollama_model", &self.ollama_model)
+            .field("hf_url", &self.hf_url)
+            .field(
+                "hf_token",
+                &self
+                    .hf_token
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("hf_model_id", &self.hf_model_id)
+            .field("hf_connect_timeout_secs", &self.hf_connect_timeout_secs)
+            .field("hf_submit_timeout_secs", &self.hf_submit_timeout_secs)
+            .field("hf_total_timeout_secs", &self.hf_total_timeout_secs)
+            .field("hf_max_concurrency", &self.hf_max_concurrency)
+            .field("hf_max_prompt_chars", &self.hf_max_prompt_chars)
+            .field("hf_max_output_bytes", &self.hf_max_output_bytes)
+            .field(
+                "hf_circuit_breaker_cooldown_secs",
+                &self.hf_circuit_breaker_cooldown_secs,
+            )
+            .finish()
+    }
+}
+
 impl Default for AiProviderConfig {
     fn default() -> Self {
         Self {
@@ -245,7 +295,7 @@ impl Default for AiProviderConfig {
             ollama_model: "qwen2.5:0.5b".to_string(),
             hf_url: None,
             hf_token: None,
-            hf_model_id: "Qwen/Qwen2.5-0.5B-Instruct".to_string(),
+            hf_model_id: HF_AUTHORITATIVE_MODEL_ID.to_string(),
             hf_connect_timeout_secs: 5,
             hf_submit_timeout_secs: 10,
             hf_total_timeout_secs: 45,
@@ -258,14 +308,29 @@ impl Default for AiProviderConfig {
 }
 
 impl AiProviderConfig {
-    pub fn from_env() -> Self {
+    /// Strict environment configuration loader.
+    /// - Absent or empty `ESA_AI_PROVIDER` defaults to `ollama`.
+    /// - Only `"ollama"` and `"hf_zerogpu"` are accepted; any other value returns an explicit error.
+    /// - Validates Hugging Face URL, token, and authoritative model identity when `hf_zerogpu` is selected.
+    pub fn try_from_env() -> Result<Self, InferenceError> {
         let mut cfg = Self::default();
         if let Ok(p) = std::env::var("ESA_AI_PROVIDER") {
             let clean = p.trim().to_ascii_lowercase();
-            cfg.provider = match clean.as_str() {
-                "hf_zerogpu" | "huggingface" | "hf" => ProviderKind::HfZerogpu,
-                _ => ProviderKind::Ollama,
-            };
+            if !clean.is_empty() {
+                cfg.provider = match clean.as_str() {
+                    "ollama" => ProviderKind::Ollama,
+                    "hf_zerogpu" => ProviderKind::HfZerogpu,
+                    other => {
+                        return Err(InferenceError::new(
+                            InferenceErrorCategory::Misconfigured,
+                            format!(
+                                "Unsupported ESA_AI_PROVIDER '{}' (supported: ollama, hf_zerogpu)",
+                                other
+                            ),
+                        ));
+                    }
+                };
+            }
         }
         if let Ok(url) = std::env::var("OLLAMA_URL") {
             if !url.trim().is_empty() {
@@ -286,8 +351,18 @@ impl AiProviderConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         if let Ok(m) = std::env::var("HF_AI_MODEL_ID") {
-            if !m.trim().is_empty() {
-                cfg.hf_model_id = m.trim().to_string();
+            let clean = m.trim();
+            if !clean.is_empty() {
+                if clean != HF_AUTHORITATIVE_MODEL_ID {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::Misconfigured,
+                        format!(
+                            "HF_AI_MODEL_ID '{}' does not match authoritative Space model '{}'",
+                            clean, HF_AUTHORITATIVE_MODEL_ID
+                        ),
+                    ));
+                }
+                cfg.hf_model_id = clean.to_string();
             }
         }
         cfg.hf_connect_timeout_secs = env_u64("HF_AI_CONNECT_TIMEOUT_SECS", 5, 1, 60);
@@ -298,8 +373,131 @@ impl AiProviderConfig {
         cfg.hf_max_output_bytes = env_usize("HF_AI_MAX_OUTPUT_BYTES", 16 * 1024, 512, 262_144);
         cfg.hf_circuit_breaker_cooldown_secs =
             env_u64("HF_AI_CIRCUIT_BREAKER_COOLDOWN_SECS", 30, 5, 600);
-        cfg
+
+        cfg.validate(false)?;
+        Ok(cfg)
     }
+
+    pub fn validate(&self, allow_insecure_loopback: bool) -> Result<(), InferenceError> {
+        if self.provider == ProviderKind::HfZerogpu {
+            let raw_url = self.hf_url.as_deref().ok_or_else(|| {
+                InferenceError::new(
+                    InferenceErrorCategory::Misconfigured,
+                    "HF_AI_BRAIN_URL is required when ESA_AI_PROVIDER=hf_zerogpu",
+                )
+            })?;
+            validate_hf_base_url(raw_url, allow_insecure_loopback)?;
+
+            if self.hf_token.as_deref().is_none_or(|t| t.trim().is_empty()) {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Misconfigured,
+                    "HF_AI_BRAIN_TOKEN is required when ESA_AI_PROVIDER=hf_zerogpu",
+                ));
+            }
+            if self.hf_model_id != HF_AUTHORITATIVE_MODEL_ID {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Misconfigured,
+                    format!(
+                        "Configured Hugging Face model '{}' must match authoritative Space model '{}'",
+                        self.hf_model_id, HF_AUTHORITATIVE_MODEL_ID
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Validates a Hugging Face Space base URL.
+/// - Requires `https://` for non-test remote endpoints (`http://127.0.0.1` / `http://localhost` allowed only in tests).
+/// - Rejects embedded credentials (`user@host`), query strings (`?`), fragments (`#`), and whitespace/control chars.
+pub fn validate_hf_base_url(
+    raw: &str,
+    allow_insecure_loopback_for_tests: bool,
+) -> Result<String, InferenceError> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL cannot be empty",
+        ));
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL contains invalid whitespace or control characters",
+        ));
+    }
+    if trimmed.contains('?') || trimmed.contains('#') {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL must not contain query parameters or fragments",
+        ));
+    }
+
+    let (is_https, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL must use https:// scheme",
+        ));
+    };
+
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL is missing a host",
+        ));
+    }
+    if authority.contains('@') {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL must not contain embedded credentials",
+        ));
+    }
+
+    let (host, port_opt) = if let Some((h, p)) = authority.rsplit_once(':') {
+        if h.contains(':') {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Misconfigured,
+                "HF_AI_BRAIN_URL has malformed host/port",
+            ));
+        }
+        let _port: u16 = p.parse().map_err(|_| {
+            InferenceError::new(
+                InferenceErrorCategory::Misconfigured,
+                "HF_AI_BRAIN_URL has invalid port number",
+            )
+        })?;
+        (h, Some(p))
+    } else {
+        (authority, None)
+    };
+
+    if host.is_empty() {
+        return Err(InferenceError::new(
+            InferenceErrorCategory::Misconfigured,
+            "HF_AI_BRAIN_URL host cannot be empty",
+        ));
+    }
+    let _ = port_opt;
+
+    if !is_https {
+        let is_loopback =
+            host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost");
+        if !(allow_insecure_loopback_for_tests && is_loopback) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Misconfigured,
+                "HF_AI_BRAIN_URL must use https:// for remote Hugging Face endpoints",
+            ));
+        }
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn env_u64(key: &str, default: u64, min: u64, max: u64) -> u64 {

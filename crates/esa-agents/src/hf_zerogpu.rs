@@ -1,8 +1,8 @@
 use crate::ollama::{AICostTracker, TokenCounter, TokenStats};
 use crate::privacy;
 use crate::provider::{
-    InferenceError, InferenceErrorCategory, InferenceProvider, InferenceRequest, InferenceResponse,
-    ProviderKind,
+    validate_hf_base_url, InferenceError, InferenceErrorCategory, InferenceProvider,
+    InferenceRequest, InferenceResponse, ProviderKind, HF_AUTHORITATIVE_MODEL_ID,
 };
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
@@ -28,6 +28,7 @@ pub struct HfZeroGpuConfig {
     pub max_output_bytes: usize,
     pub circuit_breaker_cooldown: Duration,
     pub no_proxy: bool,
+    pub allow_insecure_loopback_for_tests: bool,
 }
 
 impl fmt::Debug for HfZeroGpuConfig {
@@ -67,6 +68,7 @@ impl HfZeroGpuConfig {
             max_output_bytes: 16 * 1024,
             circuit_breaker_cooldown: Duration::from_secs(30),
             no_proxy: false,
+            allow_insecure_loopback_for_tests: false,
         }
     }
 
@@ -110,16 +112,23 @@ impl HuggingFaceZeroGpuProvider {
     }
 
     fn validate_configured(&self) -> Result<(), InferenceError> {
-        if self.config.base_url.is_empty() {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::Misconfigured,
-                "HF_AI_BRAIN_URL is not configured",
-            ));
-        }
+        validate_hf_base_url(
+            &self.config.base_url,
+            self.config.allow_insecure_loopback_for_tests,
+        )?;
         if !self.config.has_token() {
             return Err(InferenceError::new(
                 InferenceErrorCategory::Misconfigured,
                 "HF_AI_BRAIN_TOKEN is not configured for private Hugging Face Space access",
+            ));
+        }
+        if self.config.model_id != HF_AUTHORITATIVE_MODEL_ID {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Misconfigured,
+                format!(
+                    "Configured Hugging Face model '{}' does not match authoritative Space model '{}'",
+                    self.config.model_id, HF_AUTHORITATIVE_MODEL_ID
+                ),
             ));
         }
         Ok(())
@@ -157,13 +166,13 @@ impl HuggingFaceZeroGpuProvider {
         cache_hit: bool,
         error: Option<&InferenceError>,
     ) {
-        let model_id = request.model_id.as_deref().unwrap_or(&self.config.model_id);
+        let merchant_id = request.scope.normalized_merchant_id().ok().flatten();
         self.cost_tracker.record_provider_inference(
             ProviderKind::HfZerogpu.as_str(),
             request.scope.as_str(),
-            model_id,
+            HF_AUTHORITATIVE_MODEL_ID,
             &request.agent_id,
-            request.scope.merchant_id(),
+            merchant_id,
             sanitized_prompt,
             response_text,
             total_latency_ms,
@@ -450,6 +459,23 @@ impl InferenceProvider for HuggingFaceZeroGpuProvider {
     }
 
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse, InferenceError> {
+        // 1. Strictly validate execution scope before cache lookup, network calls, or telemetry.
+        let scope_prefix = request.scope.cache_key_prefix()?;
+        let _ = request.scope.normalized_merchant_id()?;
+
+        // 2. Enforce authoritative Space model identity (never report mismatched model in telemetry).
+        if let Some(ref req_model) = request.model_id {
+            if req_model != HF_AUTHORITATIVE_MODEL_ID {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Misconfigured,
+                    format!(
+                        "Requested Hugging Face model '{}' does not match authoritative Space model '{}'",
+                        req_model, HF_AUTHORITATIVE_MODEL_ID
+                    ),
+                ));
+            }
+        }
+
         self.validate_configured()?;
 
         let max_prompt = self
@@ -474,8 +500,8 @@ impl InferenceProvider for HuggingFaceZeroGpuProvider {
         // Tenant-isolated cache lookup
         let cache_key = format!(
             "{}:{}:{}:{}",
-            request.scope.cache_key_prefix(),
-            self.config.model_id,
+            scope_prefix,
+            HF_AUTHORITATIVE_MODEL_ID,
             request.agent_id,
             sanitized_prompt.trim()
         );
@@ -929,6 +955,7 @@ mod tests {
             "Qwen/Qwen2.5-0.5B-Instruct",
         );
         cfg.no_proxy = true;
+        cfg.allow_insecure_loopback_for_tests = true;
         cfg.connect_timeout = Duration::from_secs(2);
         cfg.submit_timeout = Duration::from_secs(2);
         cfg.total_timeout = Duration::from_secs(5);
@@ -1389,5 +1416,253 @@ mod tests {
             agg.requests_per_provider.get("deterministic_fallback"),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn test_strict_execution_scope_validation_and_cache_isolation() {
+        // 1. Valid System, Merchant A, Merchant B
+        assert_eq!(
+            ExecutionScope::System.normalized_merchant_id().unwrap(),
+            None
+        );
+        assert_eq!(
+            ExecutionScope::MerchantScoped {
+                merchant_id: " merchant_a ".into()
+            }
+            .normalized_merchant_id()
+            .unwrap(),
+            Some("merchant_a")
+        );
+        assert_eq!(
+            ExecutionScope::MerchantScoped {
+                merchant_id: "merchant_b".into()
+            }
+            .cache_key_prefix()
+            .unwrap(),
+            "merchant:merchant_b"
+        );
+
+        // 2. Empty and whitespace-only merchant IDs are strictly rejected (never turned into System)
+        for bad in ["", "   ", "\t\n", "bad:id", "bad id"] {
+            let scope = ExecutionScope::MerchantScoped {
+                merchant_id: bad.into(),
+            };
+            assert_eq!(
+                scope.normalized_merchant_id().unwrap_err().category,
+                InferenceErrorCategory::InvalidScope
+            );
+            assert_eq!(
+                scope.cache_key_prefix().unwrap_err().category,
+                InferenceErrorCategory::InvalidScope
+            );
+        }
+
+        // 3. Invalid MerchantScoped requests never touch global cache or record misleading telemetry
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_c = Arc::clone(&calls);
+        let (url, _) = spawn_mock_hf_server(Arc::new(move |req, _| {
+            if req.method == "POST" {
+                let n = calls_c.fetch_add(1, Ordering::SeqCst) + 1;
+                (200, vec![], format!(r#"{{"event_id":"s{}"}}"#, n))
+            } else {
+                let n = calls_c.load(Ordering::SeqCst);
+                (
+                    200,
+                    vec![],
+                    format!("event: complete\ndata: [\"ok_{}\"]\n\n", n),
+                )
+            }
+        }))
+        .await;
+
+        let tracker = Arc::new(AICostTracker::new());
+        let provider = HuggingFaceZeroGpuProvider::new(test_config(url), Arc::clone(&tracker));
+
+        // Seed System cache
+        let sys = provider
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::System,
+                "same_prompt",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sys.text, "ok_1");
+
+        // Invalid empty merchant scope MUST fail with InvalidScope and MUST NOT hit System cache or record telemetry
+        let err_empty = provider
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::MerchantScoped {
+                    merchant_id: "".into(),
+                },
+                "same_prompt",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err_empty.category, InferenceErrorCategory::InvalidScope);
+
+        let err_ws = provider
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::MerchantScoped {
+                    merchant_id: "   ".into(),
+                },
+                "same_prompt",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err_ws.category, InferenceErrorCategory::InvalidScope);
+        assert_eq!(tracker.get_recent_metrics(10).len(), 1);
+
+        // Merchant A cannot read Merchant B's cache
+        let ma = provider
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::MerchantScoped {
+                    merchant_id: "merchant_a".into(),
+                },
+                "same_prompt",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(ma.text, "ok_2");
+        assert!(!ma.cache_hit);
+
+        let mb = provider
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::MerchantScoped {
+                    merchant_id: "merchant_b".into(),
+                },
+                "same_prompt",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mb.text, "ok_3");
+        assert!(!mb.cache_hit);
+
+        // OllamaProvider also rejects invalid MerchantScoped before any network call
+        let ollama_p = crate::ollama_provider::OllamaProvider::new(
+            crate::ollama::OllamaClient::new_without_proxy(
+                "http://127.0.0.1:59997".into(),
+                "qwen2.5:0.5b".into(),
+            ),
+        );
+        let ollama_err = ollama_p
+            .infer(InferenceRequest::new(
+                "diagnosis",
+                ExecutionScope::MerchantScoped {
+                    merchant_id: "   ".into(),
+                },
+                "same_prompt",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(ollama_err.category, InferenceErrorCategory::InvalidScope);
+    }
+
+    #[test]
+    fn test_ai_provider_config_debug_redacts_token_and_strict_env_validation() {
+        use crate::provider::AiProviderConfig;
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let fake_token = "hf_fake_canary_secret_value_for_debug_test_999";
+        let cfg = AiProviderConfig {
+            provider: ProviderKind::HfZerogpu,
+            hf_url: Some("https://example-space.hf.space".into()),
+            hf_token: Some(fake_token.into()),
+            ..Default::default()
+        };
+        let dbg = format!("{:?}", cfg);
+        assert!(!dbg.contains(fake_token));
+        assert!(dbg.contains("[REDACTED]"));
+
+        // Clear env
+        for k in [
+            "ESA_AI_PROVIDER",
+            "HF_AI_BRAIN_URL",
+            "HF_AI_BRAIN_TOKEN",
+            "HF_AI_MODEL_ID",
+        ] {
+            std::env::remove_var(k);
+        }
+
+        // 1. Variable absent -> defaults to Ollama
+        let c_absent = AiProviderConfig::try_from_env().unwrap();
+        assert_eq!(c_absent.provider, ProviderKind::Ollama);
+
+        // 2. Explicit ollama
+        std::env::set_var("ESA_AI_PROVIDER", "ollama");
+        assert_eq!(
+            AiProviderConfig::try_from_env().unwrap().provider,
+            ProviderKind::Ollama
+        );
+
+        // 3. Invalid provider string -> explicit Misconfigured error (never silently falls back to Ollama)
+        std::env::set_var("ESA_AI_PROVIDER", "unsupported_paid_api");
+        assert_eq!(
+            AiProviderConfig::try_from_env().unwrap_err().category,
+            InferenceErrorCategory::Misconfigured
+        );
+
+        // 4. hf_zerogpu missing URL -> Misconfigured
+        std::env::set_var("ESA_AI_PROVIDER", "hf_zerogpu");
+        assert_eq!(
+            AiProviderConfig::try_from_env().unwrap_err().category,
+            InferenceErrorCategory::Misconfigured
+        );
+
+        // 5. hf_zerogpu missing token -> Misconfigured
+        std::env::set_var("HF_AI_BRAIN_URL", "https://example-space.hf.space");
+        assert_eq!(
+            AiProviderConfig::try_from_env().unwrap_err().category,
+            InferenceErrorCategory::Misconfigured
+        );
+
+        // 6. hf_zerogpu with mismatched HF_AI_MODEL_ID -> Misconfigured
+        std::env::set_var("HF_AI_BRAIN_TOKEN", fake_token);
+        std::env::set_var("HF_AI_MODEL_ID", "other-org/other-model");
+        let model_err = AiProviderConfig::try_from_env().unwrap_err();
+        assert_eq!(model_err.category, InferenceErrorCategory::Misconfigured);
+        assert!(!model_err.message.contains(fake_token));
+
+        // 7. Valid hf_zerogpu
+        std::env::set_var("HF_AI_MODEL_ID", HF_AUTHORITATIVE_MODEL_ID);
+        let valid = AiProviderConfig::try_from_env().unwrap();
+        assert_eq!(valid.provider, ProviderKind::HfZerogpu);
+        assert_eq!(valid.hf_model_id, HF_AUTHORITATIVE_MODEL_ID);
+
+        for k in [
+            "ESA_AI_PROVIDER",
+            "HF_AI_BRAIN_URL",
+            "HF_AI_BRAIN_TOKEN",
+            "HF_AI_MODEL_ID",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn test_hf_base_url_safety_validation() {
+        // Production: HTTPS required; HTTP remote, credentials, queries, fragments, malformed rejected
+        assert!(validate_hf_base_url("https://sujithputta-esa-ai-brain.hf.space", false).is_ok());
+        assert!(validate_hf_base_url("http://sujithputta-esa-ai-brain.hf.space", false).is_err());
+        assert!(validate_hf_base_url("http://127.0.0.1:7860", false).is_err());
+        assert!(validate_hf_base_url("http://127.0.0.1:7860", true).is_ok());
+        assert!(
+            validate_hf_base_url("https://user:pass@sujithputta-esa-ai-brain.hf.space", false)
+                .is_err()
+        );
+        assert!(
+            validate_hf_base_url("https://sujithputta-esa-ai-brain.hf.space?foo=bar", false)
+                .is_err()
+        );
+        assert!(
+            validate_hf_base_url("https://sujithputta-esa-ai-brain.hf.space#frag", false).is_err()
+        );
+        assert!(validate_hf_base_url("not a url", false).is_err());
+        assert!(validate_hf_base_url("", false).is_err());
     }
 }
