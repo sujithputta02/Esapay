@@ -53,6 +53,21 @@ impl PayUProvider {
         }
     }
 
+    /// Build a provider with system proxy discovery disabled (useful in sandboxed test environments).
+    pub fn new_without_proxy(config: PayUConfig) -> Self {
+        let client = PayUClient::new_without_proxy(config);
+        Self {
+            client,
+            latency_sum_ms: AtomicU64::new(0),
+            latency_count: AtomicU64::new(0),
+            success_count: AtomicU64::new(0),
+            failure_count: AtomicU64::new(0),
+            circuit: RwLock::new(CircuitStateInternal::default()),
+            failure_threshold: 3,
+            cooldown_duration: std::time::Duration::from_secs(30),
+        }
+    }
+
     pub fn client(&self) -> &PayUClient {
         &self.client
     }
@@ -537,7 +552,7 @@ mod tests {
             verify_url: "https://test.payu.in/merchant/postservice?form=2".to_string(),
             env: crate::config::PayUEnv::Test,
         };
-        PayUProvider::new(cfg)
+        PayUProvider::new_without_proxy(cfg)
     }
 
     #[test]
