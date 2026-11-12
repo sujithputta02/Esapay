@@ -24,6 +24,19 @@ impl FluidReasonerClient {
         }
     }
 
+    /// Build a client with system proxy discovery disabled (useful in sandboxed test environments).
+    pub fn new_without_proxy(endpoint: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap_or_default();
+        Self {
+            client,
+            endpoint: endpoint.into(),
+        }
+    }
+
     pub fn default_local() -> Self {
         let endpoint = std::env::var("FLUID_REASONER_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:5005".to_string());
@@ -77,7 +90,7 @@ mod tests {
     #[tokio::test]
     async fn test_fluid_reasoner_unavailable_fallback() {
         // Point to an unused port
-        let client = FluidReasonerClient::new("http://127.0.0.1:59999");
+        let client = FluidReasonerClient::new_without_proxy("http://127.0.0.1:59999");
         assert!(!client.is_available().await);
 
         let conditions = vec![Condition {
