@@ -341,6 +341,15 @@ export async function executeProviderCheckout(
                         paymentReference: paymentId,
                         details: confirmRes,
                       });
+                    } else if (pState === 'authorized' || pState === 'already_authorized' || pState === 'pending') {
+                      resolve({
+                        status: 'pending',
+                        message: 'Razorpay payment is authorized and pending capture.',
+                        transactionId: decision.transaction_id,
+                        providerOrderId: orderId,
+                        paymentReference: paymentId,
+                        details: confirmRes,
+                      });
                     } else {
                       resolve({
                         status: 'failed',
