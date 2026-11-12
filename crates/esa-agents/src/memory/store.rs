@@ -1726,4 +1726,178 @@ mod tests {
         .unwrap();
         assert_eq!(proof_disc.accuracy(), OutcomeAccuracy::Correct);
     }
+
+    #[tokio::test]
+    async fn test_entity_created_at_fallback_removed_provider_mismatch_and_processed_timeout() {
+        use esa_state::{WebhookInboxRecord, WebhookStatus};
+
+        let now = Utc::now();
+
+        // 1. Payload with ONLY payload.payment.entity.created_at (old payment creation) must NOT verify WEBHOOK_DELAYED_OR_MISSING
+        let attempt = PaymentAttemptRecord {
+            transaction_id: "tx_ent_ts".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_ent_ts".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "captured".to_string(),
+            created_at: now - chrono::Duration::hours(3),
+            updated_at: now,
+        };
+        let wh_entity_ts_only = vec![WebhookInboxRecord {
+            id: 10,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_ent_ts".to_string(),
+            event_type: "PaymentCaptured".to_string(),
+            payment_id: Some("pay_ent_ts".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "created_at": (now - chrono::Duration::hours(3)).timestamp()
+                        }
+                    }
+                }
+            }),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_ent_ts = OutcomeEvaluationRecord::new_pending(
+            "inv_ent_ts".to_string(),
+            "merchant_a".to_string(),
+            "pay_ent_ts".to_string(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_ent_ts".to_string()]);
+        assert_eq!(
+            AuthoritativeOutcomeProof::from_authoritative_records(
+                &scope_for("merchant_a"),
+                &eval_ent_ts,
+                &attempt,
+                None,
+                &wh_entity_ts_only,
+                &[],
+            )
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 2. Evaluation provider mismatch against attempt provider MUST fail proof construction
+        let eval_prov_mismatch = OutcomeEvaluationRecord::new_pending(
+            "inv_prov_mm".to_string(),
+            "merchant_a".to_string(),
+            "pay_ent_ts".to_string(),
+            "cashfree".to_string(), // differs from attempt.provider ("razorpay")!
+            "HEALTHY_COMPLETED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        );
+        assert_eq!(
+            AuthoritativeOutcomeProof::from_authoritative_records(
+                &scope_for("merchant_a"),
+                &eval_prov_mismatch,
+                &attempt,
+                None,
+                &[],
+                &[],
+            )
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 3. Locally failed webhook-processing record with timeout-like error text MUST be rejected for PROVIDER_DEGRADED_OR_TIMEOUT
+        let attempt_failed = PaymentAttemptRecord {
+            state: "failed".to_string(),
+            ..attempt.clone()
+        };
+        let wh_local_timeout_err = vec![WebhookInboxRecord {
+            id: 11,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_local_to".to_string(),
+            event_type: "PaymentFailed".to_string(),
+            payment_id: Some("pay_ent_ts".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({"event": "payment.failed"}),
+            status: WebhookStatus::Failed,
+            error_message: Some("HTTP 504 provider timeout while parsing locally".to_string()),
+            received_at: now,
+            processed_at: None,
+        }];
+        let eval_local_to = OutcomeEvaluationRecord::new_pending(
+            "inv_local_to".to_string(),
+            "merchant_a".to_string(),
+            "pay_ent_ts".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["webhook:evt_local_to".to_string()]);
+        assert_eq!(
+            AuthoritativeOutcomeProof::from_authoritative_records(
+                &scope_for("merchant_a"),
+                &eval_local_to,
+                &attempt_failed,
+                None,
+                &wh_local_timeout_err,
+                &[],
+            )
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 4. Processed, matching provider-side timeout event with explicit citation MUST be accepted
+        let wh_processed_timeout = vec![WebhookInboxRecord {
+            id: 12,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_prov_to".to_string(),
+            event_type: "gateway_timeout".to_string(),
+            payment_id: Some("pay_ent_ts".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({"reason": "gateway_timeout"}),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_prov_to = OutcomeEvaluationRecord::new_pending(
+            "inv_prov_to".to_string(),
+            "merchant_a".to_string(),
+            "pay_ent_ts".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["webhook:evt_prov_to".to_string()]);
+        let proof_to = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_prov_to,
+            &attempt_failed,
+            None,
+            &wh_processed_timeout,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(proof_to.accuracy(), OutcomeAccuracy::Correct);
+    }
 }

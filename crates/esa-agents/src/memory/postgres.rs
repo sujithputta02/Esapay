@@ -1009,6 +1009,33 @@ mod tests {
             InferenceErrorCategory::InvalidResponse
         );
 
+        // Provider mismatch between evaluation and authoritative attempt is rejected in Postgres
+        let eval_prov_mm = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_pmm_{}", &suffix[..8]),
+            m_a.clone(),
+            pay_ref.clone(),
+            "cashfree".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        );
+        let eval_pmm_id = eval_prov_mm.evaluation_id.clone();
+        store.record_evaluation(eval_prov_mm).await.unwrap();
+        assert_eq!(
+            crate::memory::verify_outcome_from_webhook_store(
+                &wh_store,
+                &store,
+                &scope_a,
+                &eval_pmm_id,
+            )
+            .await
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
         // 5. Expired evaluation verification rejection & physical purge
         let mut exp_eval = OutcomeEvaluationRecord::new_pending(
             format!("inv_pg_exp_{}", &suffix[..8]),

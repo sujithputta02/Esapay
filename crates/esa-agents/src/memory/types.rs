@@ -413,6 +413,16 @@ impl AuthoritativeOutcomeProof {
                 "Authoritative payment attempt does not match evaluation payment_reference",
             ));
         }
+        if !eval
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(attempt.provider.trim())
+        {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Authoritative payment attempt provider does not match evaluation provider",
+            ));
+        }
 
         let authoritative_state = match payment_entity {
             Some(pe) => CanonicalPaymentState::from_payment_state(pe.state),
@@ -476,20 +486,11 @@ impl AuthoritativeOutcomeProof {
             }
 
             let et = ev.event_type.to_ascii_lowercase();
-            let err_msg = ev
-                .error_message
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase();
             let payload_str = ev.payload.to_string().to_ascii_lowercase();
-            let is_provider_timeout_or_outage = et.contains("timeout")
-                || et.contains("gateway_error")
-                || err_msg.contains("provider timeout")
-                || err_msg.contains("gateway timeout")
-                || err_msg.contains("502")
-                || err_msg.contains("503")
-                || err_msg.contains("504")
-                || payload_str.contains("gateway_timeout");
+            let is_provider_timeout_or_outage = ev.status == esa_state::WebhookStatus::Processed
+                && (et.contains("timeout")
+                    || et.contains("gateway_error")
+                    || payload_str.contains("gateway_timeout"));
             if is_provider_timeout_or_outage {
                 provider_timeout_event_ids.insert(ev.provider_event_id.clone());
             }
@@ -581,13 +582,13 @@ impl AuthoritativeOutcomeProof {
                 OutcomeAccuracy::Correct
             }
             "PROVIDER_DEGRADED_OR_TIMEOUT" => {
-                let has_provider_timeout = !provider_timeout_event_ids.is_empty()
+                let has_provider_timeout = has_cited_match("webhook:", &provider_timeout_event_ids)
                     || (authoritative_state == CanonicalPaymentState::Failed
                         && attempt.state.eq_ignore_ascii_case("timeout"));
                 if !has_provider_timeout {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
-                        "PROVIDER_DEGRADED_OR_TIMEOUT lacks authoritative provider timeout/degradation evidence; keeping evaluation pending",
+                        "PROVIDER_DEGRADED_OR_TIMEOUT lacks processed, cited provider timeout/degradation evidence; keeping evaluation pending",
                     ));
                 }
                 OutcomeAccuracy::Correct
@@ -767,12 +768,4 @@ fn extract_provider_event_occurred_at(payload: &serde_json::Value) -> Option<Dat
         .and_then(parse_ts)
         .or_else(|| payload.get("event_time").and_then(parse_ts))
         .or_else(|| payload.get("created_at").and_then(parse_ts))
-        .or_else(|| {
-            payload
-                .get("payload")
-                .and_then(|p| p.get("payment"))
-                .and_then(|p| p.get("entity"))
-                .and_then(|e| e.get("created_at"))
-                .and_then(parse_ts)
-        })
 }
