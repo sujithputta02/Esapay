@@ -284,6 +284,33 @@ pub trait WebhookStore: Send + Sync {
             remaining_balance: 0,
         })
     }
+
+    /// Read-only listing of recent payment attempts, strictly scoped to `merchant_id` when `Some`.
+    async fn list_payment_attempts_for_merchant(
+        &self,
+        _merchant_id: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<PaymentAttemptRecord>, WebhookStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Read-only chronological listing of webhook inbox events for a payment ID.
+    async fn list_inbox_events_for_payment(
+        &self,
+        _payment_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<WebhookInboxRecord>, WebhookStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Read-only listing of refund records/reservations for a payment.
+    async fn list_refunds_for_payment(
+        &self,
+        _provider: &str,
+        _payment_id: &str,
+    ) -> Result<Vec<RefundRecord>, WebhookStoreError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Durable PostgreSQL-backed implementation of WebhookStore
@@ -1770,6 +1797,147 @@ impl WebhookStore for PostgresWebhookStore {
         Ok(())
     }
 
+    async fn list_payment_attempts_for_merchant(
+        &self,
+        merchant_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PaymentAttemptRecord>, WebhookStoreError> {
+        let bounded_limit = limit.clamp(1, 200) as i64;
+        let rows = match merchant_id {
+            Some(mid) => {
+                let q = r#"
+                    SELECT transaction_id, merchant_id, provider, provider_order_id,
+                           payment_reference, amount_minor, currency, state, created_at, updated_at
+                    FROM payment_attempts
+                    WHERE merchant_id = $1
+                    ORDER BY updated_at DESC
+                    LIMIT $2;
+                "#;
+                sqlx::query(q)
+                    .bind(mid)
+                    .bind(bounded_limit)
+                    .fetch_all(&self.pool)
+                    .await
+            }
+            None => {
+                let q = r#"
+                    SELECT transaction_id, merchant_id, provider, provider_order_id,
+                           payment_reference, amount_minor, currency, state, created_at, updated_at
+                    FROM payment_attempts
+                    ORDER BY updated_at DESC
+                    LIMIT $1;
+                "#;
+                sqlx::query(q)
+                    .bind(bounded_limit)
+                    .fetch_all(&self.pool)
+                    .await
+            }
+        }
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let amt: i64 = r.get("amount_minor");
+                PaymentAttemptRecord {
+                    transaction_id: r.get("transaction_id"),
+                    merchant_id: r.get("merchant_id"),
+                    provider: r.get("provider"),
+                    provider_order_id: r.get("provider_order_id"),
+                    payment_reference: r.get("payment_reference"),
+                    amount_minor: amt as u64,
+                    currency: r.get("currency"),
+                    state: r.get("state"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                }
+            })
+            .collect())
+    }
+
+    async fn list_inbox_events_for_payment(
+        &self,
+        payment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WebhookInboxRecord>, WebhookStoreError> {
+        let bounded_limit = limit.clamp(1, 200) as i64;
+        let q = r#"
+            SELECT id, provider, provider_event_id, event_type, payment_id, refund_id,
+                   payload, status, error_message, received_at, processed_at
+            FROM webhook_inbox
+            WHERE payment_id = $1
+            ORDER BY received_at ASC, id ASC
+            LIMIT $2;
+        "#;
+        let rows = sqlx::query(q)
+            .bind(payment_id)
+            .bind(bounded_limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let status_str: String = r.get("status");
+                let status = match status_str.as_str() {
+                    "processed" => WebhookStatus::Processed,
+                    "failed" => WebhookStatus::Failed,
+                    "unapplied" => WebhookStatus::Unapplied,
+                    _ => WebhookStatus::Pending,
+                };
+                WebhookInboxRecord {
+                    id: r.get("id"),
+                    provider: r.get("provider"),
+                    provider_event_id: r.get("provider_event_id"),
+                    event_type: r.get("event_type"),
+                    payment_id: r.get("payment_id"),
+                    refund_id: r.get("refund_id"),
+                    payload: r.get("payload"),
+                    status,
+                    error_message: r.get("error_message"),
+                    received_at: r.get("received_at"),
+                    processed_at: r.get("processed_at"),
+                }
+            })
+            .collect())
+    }
+
+    async fn list_refunds_for_payment(
+        &self,
+        provider: &str,
+        payment_id: &str,
+    ) -> Result<Vec<RefundRecord>, WebhookStoreError> {
+        let q = r#"
+            SELECT provider, refund_id, payment_id, amount_minor, currency, status, applied_to_balance
+            FROM payment_refunds
+            WHERE provider = $1 AND payment_id = $2
+            ORDER BY created_at ASC;
+        "#;
+        let rows = sqlx::query(q)
+            .bind(provider)
+            .bind(payment_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let amt: i64 = r.get("amount_minor");
+                RefundRecord {
+                    provider: r.get("provider"),
+                    refund_id: r.get("refund_id"),
+                    payment_id: r.get("payment_id"),
+                    amount_minor: amt as u64,
+                    currency: r.get("currency"),
+                    status: r.get("status"),
+                    applied_to_balance: r.get("applied_to_balance"),
+                }
+            })
+            .collect())
+    }
+
     async fn reserve_refund(
         &self,
         provider: &str,
@@ -2889,6 +3057,70 @@ impl WebhookStore for InMemoryWebhookStore {
             }
         }
         Ok(())
+    }
+
+    async fn list_payment_attempts_for_merchant(
+        &self,
+        merchant_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PaymentAttemptRecord>, WebhookStoreError> {
+        let bounded = limit.clamp(1, 200);
+        let guard = self.attempts.lock();
+        let mut items: Vec<PaymentAttemptRecord> = guard
+            .values()
+            .filter(|a| match merchant_id {
+                Some(mid) => a.merchant_id == mid,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        items.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+        items.truncate(bounded);
+        Ok(items)
+    }
+
+    async fn list_inbox_events_for_payment(
+        &self,
+        payment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WebhookInboxRecord>, WebhookStoreError> {
+        let bounded = limit.clamp(1, 200);
+        let guard = self.inbox.lock();
+        let mut items: Vec<WebhookInboxRecord> = guard
+            .values()
+            .filter(|r| r.payment_id.as_deref() == Some(payment_id))
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.received_at
+                .cmp(&b.received_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        items.truncate(bounded);
+        Ok(items)
+    }
+
+    async fn list_refunds_for_payment(
+        &self,
+        provider: &str,
+        payment_id: &str,
+    ) -> Result<Vec<RefundRecord>, WebhookStoreError> {
+        let guard = self.refunds.lock();
+        let mut items: Vec<RefundRecord> = guard
+            .values()
+            .filter(|r| r.provider == provider && r.payment_id == payment_id)
+            .map(|r| RefundRecord {
+                provider: r.provider.clone(),
+                refund_id: r.refund_id.clone(),
+                payment_id: r.payment_id.clone(),
+                amount_minor: r.amount_minor,
+                currency: r.currency.clone(),
+                status: r.status.clone(),
+                applied_to_balance: r.applied_to_balance,
+            })
+            .collect();
+        items.sort_by(|a, b| a.refund_id.cmp(&b.refund_id));
+        Ok(items)
     }
 }
 

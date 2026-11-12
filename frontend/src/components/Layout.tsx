@@ -16,6 +16,7 @@ const navigation = [
   { name: 'Runtime', path: '/runtime', testAllowed: true },
   { name: 'Effects', path: '/effects', testAllowed: true },
   { name: 'Benchmarks', path: '/benchmarks', testAllowed: true },
+  { name: 'Intelligence', path: '/intelligence', testAllowed: true },
   { name: 'API Keys', path: '/keys', testAllowed: true },
   { name: 'Agents', path: '/agents', testAllowed: false },
   { name: 'Audit', path: '/audit', testAllowed: false },

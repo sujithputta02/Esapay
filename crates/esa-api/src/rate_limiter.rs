@@ -508,6 +508,7 @@ pub struct ApiRateLimiter {
     aggregate_keys_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     client_gen_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
     client_val_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
+    investigate_limiter: Arc<GovRateLimiter<String, BoundedKeyedStateStore<String>, DefaultClock>>,
     #[cfg(test)]
     client_gen_store: BoundedKeyedStateStore<String>,
     demo_limiter: Arc<GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
@@ -625,12 +626,20 @@ impl ApiRateLimiter {
                 BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
                 &clock,
             ));
+            let investigate_quota = Quota::per_second(NonZeroU32::new(2).unwrap())
+                .allow_burst(NonZeroU32::new(5).unwrap());
+            let investigate_limiter = Arc::new(GovRateLimiter::new(
+                investigate_quota,
+                BoundedKeyedStateStore::new(keyed_capacity, "overflow_merchant".to_string()),
+                &clock,
+            ));
 
             Self {
                 checkout_limiter: Arc::new(GovRateLimiter::direct(checkout_quota)),
                 aggregate_keys_limiter: Arc::new(GovRateLimiter::direct(aggregate_keys_quota)),
                 client_gen_limiter,
                 client_val_limiter,
+                investigate_limiter,
                 demo_limiter: Arc::new(GovRateLimiter::direct(demo_quota)),
                 call_count: Arc::new(AtomicU64::new(0)),
             }
@@ -678,16 +687,68 @@ impl ApiRateLimiter {
             BoundedKeyedStateStore::new(keyed_capacity, "overflow_client".to_string()),
             &clock,
         ));
+        let investigate_quota =
+            Quota::per_second(NonZeroU32::new(2).unwrap()).allow_burst(NonZeroU32::new(5).unwrap());
+        let investigate_limiter = Arc::new(GovRateLimiter::new(
+            investigate_quota,
+            BoundedKeyedStateStore::new(keyed_capacity, "overflow_merchant".to_string()),
+            &clock,
+        ));
 
         Self {
             checkout_limiter: Arc::new(GovRateLimiter::direct(checkout_quota)),
             aggregate_keys_limiter: Arc::new(GovRateLimiter::direct(aggregate_keys_quota)),
             client_gen_limiter,
             client_val_limiter,
+            investigate_limiter,
             client_gen_store: gen_store,
             demo_limiter: Arc::new(GovRateLimiter::direct(demo_quota)),
             call_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_investigate_quota(mut self, rps: u32, burst: u32) -> Self {
+        let quota = Quota::per_second(NonZeroU32::new(rps.max(1)).unwrap())
+            .allow_burst(NonZeroU32::new(burst.max(1)).unwrap());
+        let clock = DefaultClock::default();
+        self.investigate_limiter = Arc::new(GovRateLimiter::new(
+            quota,
+            BoundedKeyedStateStore::new(MAX_KEYED_ENTRIES, "overflow_merchant".to_string()),
+            &clock,
+        ));
+        self
+    }
+
+    /// Per-merchant rate limit check for read-only payment investigations.
+    /// Keyed strictly by the authenticated caller's merchant identity.
+    pub fn check_payment_investigate(&self, merchant_id: &str) -> Result<(), RateLimitError> {
+        #[allow(clippy::manual_is_multiple_of)]
+        if self.call_count.fetch_add(1, Ordering::Relaxed) % 256 == 0 {
+            self.investigate_limiter.retain_recent();
+        }
+
+        let clean_merchant = merchant_id.trim();
+        let key = format!("merchant:{}", clean_merchant);
+        if self.investigate_limiter.check_key(&key).is_err() {
+            let client_ref = privacy_preserving_client_id(&format!("auth_{}", clean_merchant));
+            tracing::warn!(
+                client_ref = %client_ref,
+                limiter = "payment_investigate_per_merchant",
+                "Merchant payment investigation rate limit exceeded"
+            );
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(json!({
+                    "error": "rate_limit_exceeded",
+                    "code": 429,
+                    "message": "Payment investigation rate limit exceeded for this merchant. Please back off and retry shortly."
+                })),
+            ));
+        }
+
+        Ok(())
     }
 
     pub fn check_checkout(&self) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -1190,5 +1251,29 @@ mod tests {
             limiter.gen_len(),
             capacity
         );
+    }
+
+    #[test]
+    fn test_payment_investigate_rate_limit_exhaustion_retry_and_merchant_isolation() {
+        let limiter = ApiRateLimiter::new().with_investigate_quota(2, 2);
+
+        // Merchant A consumes its burst of 2
+        assert!(limiter.check_payment_investigate("merchant_a").is_ok());
+        assert!(limiter.check_payment_investigate("merchant_a").is_ok());
+
+        // Third request for Merchant A is rate-limited with standard 429 + Retry-After
+        let err = limiter.check_payment_investigate("merchant_a").unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.1[0].0, axum::http::header::RETRY_AFTER);
+        assert_eq!(err.1[0].1, "1");
+        assert_eq!(err.2 .0["error"], "rate_limit_exceeded");
+
+        // Merchant B is completely unaffected by Merchant A's exhaustion
+        assert!(limiter.check_payment_investigate("merchant_b").is_ok());
+        assert!(limiter.check_payment_investigate("merchant_b").is_ok());
+
+        // After 600ms (> 1/2s = 500ms replenish interval), Merchant A can retry
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(limiter.check_payment_investigate("merchant_a").is_ok());
     }
 }

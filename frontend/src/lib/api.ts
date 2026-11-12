@@ -254,6 +254,30 @@ export class ApiClient {
   async confirmRazorpayPayment(paymentId: string): Promise<PaymentConfirmationResponse> {
     return this.post<PaymentConfirmationResponse>('/api/razorpay/confirm', { payment_id: paymentId });
   }
+
+  // Phase 3: Read-only Payment Intelligence & Persistent Memory
+  async getPaymentIntelligenceSummary(limit = 50): Promise<any> {
+    return this.get<any>(`/api/v1/intelligence/payments/summary?limit=${limit}`);
+  }
+
+  async investigatePayment(params: {
+    transaction_id?: string;
+    payment_reference?: string;
+    question?: string;
+  }): Promise<any> {
+    return this.post<any>('/api/v1/intelligence/payments/investigate', params);
+  }
+
+  async getIntelligenceProvidersHealth(): Promise<any> {
+    return this.get<any>('/api/v1/intelligence/payments/providers/health');
+  }
+
+  async getRecentPaymentMemory(memoryType?: string, limit = 20): Promise<any> {
+    const qs = memoryType
+      ? `?memory_type=${encodeURIComponent(memoryType)}&limit=${limit}`
+      : `?limit=${limit}`;
+    return this.get<any>(`/api/v1/intelligence/memory/recent${qs}`);
+  }
 }
 
 export const apiClient = new ApiClient();
