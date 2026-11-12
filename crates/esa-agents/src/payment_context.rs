@@ -3,7 +3,9 @@ use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory};
 use chrono::{DateTime, Utc};
 use esa_core::payment_state::{PaymentEntity, PaymentState};
 use esa_core::provider::{PaymentAttemptRecord, ProviderHealth};
-use esa_state::webhook_store::{RefundRecord, WebhookInboxRecord, WebhookStatus};
+use esa_state::webhook_store::{
+    RefundRecord, WebhookDeliveryAuditRecord, WebhookInboxRecord, WebhookStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
@@ -148,6 +150,31 @@ pub fn build_payment_intelligence_context(
     provider_health: Option<&ProviderHealth>,
     observed_provider_status: Option<&str>,
 ) -> Result<PaymentIntelligenceContext, InferenceError> {
+    build_payment_intelligence_context_with_deliveries(
+        scope,
+        attempt,
+        payment_entity,
+        inbox_events,
+        &[],
+        refunds,
+        provider_health,
+        observed_provider_status,
+    )
+}
+
+/// Builds a canonical `PaymentIntelligenceContext` including durable webhook delivery audit records.
+/// Enforces merchant ownership when `scope` is `MerchantScoped`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_payment_intelligence_context_with_deliveries(
+    scope: &ExecutionScope,
+    attempt: &PaymentAttemptRecord,
+    payment_entity: Option<&PaymentEntity>,
+    inbox_events: &[WebhookInboxRecord],
+    delivery_audits: &[WebhookDeliveryAuditRecord],
+    refunds: &[RefundRecord],
+    provider_health: Option<&ProviderHealth>,
+    observed_provider_status: Option<&str>,
+) -> Result<PaymentIntelligenceContext, InferenceError> {
     if let Some(caller_merchant) = scope.normalized_merchant_id()? {
         if attempt.merchant_id != caller_merchant {
             return Err(InferenceError::new(
@@ -246,6 +273,43 @@ pub fn build_payment_intelligence_context(
                 200,
             ),
         });
+    }
+
+    for dlv in delivery_audits {
+        let matches_provider = dlv.provider.eq_ignore_ascii_case(&attempt.provider);
+        let matches_payment = dlv.payment_id.as_deref().is_some_and(|pid| {
+            attempt.payment_reference.as_deref() == Some(pid) || attempt.transaction_id == pid
+        });
+        let matches_merchant = dlv
+            .merchant_id
+            .as_deref()
+            .is_none_or(|mid| mid == attempt.merchant_id);
+        if !matches_provider || !matches_payment || !matches_merchant {
+            continue;
+        }
+        allowed_refs.insert(format!("delivery:{}", dlv.delivery_id));
+        allowed_refs.insert(format!("webhook:{}", dlv.provider_event_id));
+        if dlv.is_duplicate && dlv.deduplication_result == "duplicate_suppressed" {
+            duplicate_webhook_count += 1;
+            duplicate_webhook_event_ids.insert(dlv.provider_event_id.clone());
+            events.push(PaymentEventTimelineItem {
+                timestamp: dlv.received_at,
+                source: "webhook_delivery_audit".to_string(),
+                event_type: "duplicate_delivery_suppressed".to_string(),
+                status: dlv.final_disposition.clone(),
+                event_id: dlv.delivery_id.clone(),
+                summary: privacy::truncate_utf8(
+                    &format!(
+                        "{} duplicate delivery #{} of event {} ({})",
+                        dlv.provider,
+                        dlv.attempt_number,
+                        dlv.provider_event_id,
+                        dlv.final_disposition
+                    ),
+                    200,
+                ),
+            });
+        }
     }
 
     if inbox_events.is_empty() {

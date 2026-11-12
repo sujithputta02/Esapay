@@ -188,6 +188,28 @@ pub struct RefundRecord {
     pub applied_to_balance: bool,
 }
 
+/// Durable audit record for every webhook delivery attempt (including duplicates, in-flight,
+/// signature failures, and processing errors). Never stores raw payloads or payment credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookDeliveryAuditRecord {
+    pub delivery_id: String,
+    pub merchant_id: Option<String>,
+    pub provider: String,
+    pub provider_event_id: String,
+    pub payment_id: Option<String>,
+    pub inbox_id: Option<i64>,
+    pub original_delivery_id: Option<String>,
+    pub attempt_number: u32,
+    pub first_received_at: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+    pub signature_verified: bool,
+    pub processing_result: String,
+    pub deduplication_result: String,
+    pub is_duplicate: bool,
+    pub final_disposition: String,
+    pub error_message: Option<String>,
+}
+
 #[async_trait]
 pub trait WebhookStore: Send + Sync {
     /// Return reference to underlying PostgreSQL connection pool if backed by Postgres
@@ -309,6 +331,34 @@ pub trait WebhookStore: Send + Sync {
         _provider: &str,
         _payment_id: &str,
     ) -> Result<Vec<RefundRecord>, WebhookStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Record a webhook delivery attempt durably (independent of event processing success).
+    async fn record_webhook_delivery_attempt(
+        &self,
+        _record: &WebhookDeliveryAuditRecord,
+    ) -> Result<(), WebhookStoreError> {
+        Ok(())
+    }
+
+    /// Merchant-isolated listing of webhook delivery audit records for a specific payment reference.
+    async fn list_webhook_delivery_audits_for_payment(
+        &self,
+        _merchant_id: &str,
+        _payment_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Merchant-isolated listing of webhook delivery audit records (optionally filtered by provider_event_id).
+    async fn list_webhook_delivery_audits_for_merchant(
+        &self,
+        _merchant_id: &str,
+        _provider_event_id: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
         Ok(Vec::new())
     }
 }
@@ -434,6 +484,30 @@ impl PostgresWebhookStore {
             "CREATE INDEX IF NOT EXISTS idx_payment_attempts_provider_order ON payment_attempts(provider, provider_order_id);",
             "CREATE INDEX IF NOT EXISTS idx_payment_attempts_merchant ON payment_attempts(merchant_id);",
             "CREATE INDEX IF NOT EXISTS idx_payment_attempts_reference ON payment_attempts(payment_reference);",
+            r#"
+            CREATE TABLE IF NOT EXISTS webhook_delivery_audit (
+                delivery_id VARCHAR(128) PRIMARY KEY,
+                merchant_id VARCHAR(255),
+                provider VARCHAR(64) NOT NULL,
+                provider_event_id VARCHAR(255) NOT NULL,
+                payment_id VARCHAR(255),
+                inbox_id BIGINT,
+                original_delivery_id VARCHAR(128),
+                attempt_number INTEGER NOT NULL DEFAULT 1,
+                first_received_at TIMESTAMPTZ NOT NULL,
+                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                signature_verified BOOLEAN NOT NULL DEFAULT TRUE,
+                processing_result VARCHAR(64) NOT NULL,
+                deduplication_result VARCHAR(64) NOT NULL,
+                is_duplicate BOOLEAN NOT NULL DEFAULT FALSE,
+                final_disposition VARCHAR(64) NOT NULL,
+                error_message TEXT
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_webhook_delivery_audit_provider_event ON webhook_delivery_audit(provider, provider_event_id, received_at ASC);",
+            "CREATE INDEX IF NOT EXISTS idx_webhook_delivery_audit_merchant ON webhook_delivery_audit(merchant_id, received_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_webhook_delivery_audit_payment ON webhook_delivery_audit(payment_id, received_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_webhook_delivery_audit_original ON webhook_delivery_audit(original_delivery_id);",
         ];
 
         for stmt in statements {
@@ -803,23 +877,199 @@ impl PostgresWebhookStore {
 
         Ok(())
     }
-}
 
-#[async_trait]
-impl WebhookStore for PostgresWebhookStore {
-    fn pg_pool(&self) -> Option<&PgPool> {
-        Some(&self.pool)
+    async fn resolve_merchant_id_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        provider: &str,
+        payment_id: &str,
+    ) -> Result<Option<String>, WebhookStoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT merchant_id
+            FROM payment_attempts
+            WHERE LOWER(provider) = LOWER($1)
+              AND (payment_reference = $2 OR transaction_id = $2)
+            ORDER BY created_at DESC
+            LIMIT 1;
+            "#,
+        )
+        .bind(provider)
+        .bind(payment_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(row.map(|r| r.get("merchant_id")))
     }
 
-    async fn health_check(&self) -> Result<(), WebhookStoreError> {
-        sqlx::query("SELECT 1;")
-            .execute(&self.pool)
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_delivery_audit_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        merchant_id_override: Option<&str>,
+        provider: &str,
+        provider_event_id: &str,
+        payment_id: Option<&str>,
+        inbox_id: Option<i64>,
+        signature_verified: bool,
+        processing_result: &str,
+        deduplication_result: &str,
+        is_duplicate: bool,
+        final_disposition: &str,
+        error_message: Option<&str>,
+    ) -> Result<WebhookDeliveryAuditRecord, WebhookStoreError> {
+        let lock_key = format!("delivery_audit:{}:{}", provider, provider_event_id);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1));")
+            .bind(&lock_key)
+            .execute(&mut **tx)
             .await
             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
-        Ok(())
+
+        let merchant_id = match merchant_id_override {
+            Some(mid) if !mid.trim().is_empty() => Some(mid.trim().to_string()),
+            _ => match payment_id {
+                Some(pid) if !pid.trim().is_empty() => {
+                    Self::resolve_merchant_id_in_tx(tx, provider, pid).await?
+                }
+                _ => None,
+            },
+        };
+
+        let first_row = sqlx::query(
+            r#"
+            SELECT delivery_id, first_received_at
+            FROM webhook_delivery_audit
+            WHERE provider = $1 AND provider_event_id = $2
+            ORDER BY attempt_number ASC
+            LIMIT 1;
+            "#,
+        )
+        .bind(provider)
+        .bind(provider_event_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        let max_attempt: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(MAX(attempt_number), 0)
+            FROM webhook_delivery_audit
+            WHERE provider = $1 AND provider_event_id = $2;
+            "#,
+        )
+        .bind(provider)
+        .bind(provider_event_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        let now = Utc::now();
+        let (original_delivery_id, first_received_at) = match first_row {
+            Some(r) => (
+                Some(r.get::<String, _>("delivery_id")),
+                r.get::<DateTime<Utc>, _>("first_received_at"),
+            ),
+            None => (None, now),
+        };
+        let attempt_number = (max_attempt + 1) as u32;
+        let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4().simple());
+        let is_dup = is_duplicate || attempt_number > 1;
+
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_delivery_audit (
+                delivery_id, merchant_id, provider, provider_event_id, payment_id,
+                inbox_id, original_delivery_id, attempt_number, first_received_at,
+                received_at, signature_verified, processing_result, deduplication_result,
+                is_duplicate, final_disposition, error_message
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, $15, $16
+            );
+            "#,
+        )
+        .bind(&delivery_id)
+        .bind(&merchant_id)
+        .bind(provider)
+        .bind(provider_event_id)
+        .bind(payment_id)
+        .bind(inbox_id)
+        .bind(&original_delivery_id)
+        .bind(attempt_number as i32)
+        .bind(first_received_at)
+        .bind(now)
+        .bind(signature_verified)
+        .bind(processing_result)
+        .bind(deduplication_result)
+        .bind(is_dup)
+        .bind(final_disposition)
+        .bind(error_message)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(WebhookDeliveryAuditRecord {
+            delivery_id,
+            merchant_id,
+            provider: provider.to_string(),
+            provider_event_id: provider_event_id.to_string(),
+            payment_id: payment_id.map(str::to_string),
+            inbox_id,
+            original_delivery_id,
+            attempt_number,
+            first_received_at,
+            received_at: now,
+            signature_verified,
+            processing_result: processing_result.to_string(),
+            deduplication_result: deduplication_result.to_string(),
+            is_duplicate: is_dup,
+            final_disposition: final_disposition.to_string(),
+            error_message: error_message.map(str::to_string),
+        })
     }
 
-    async fn process_webhook_event(
+    #[allow(clippy::too_many_arguments)]
+    async fn record_delivery_audit_on_pool(
+        &self,
+        merchant_id_override: Option<&str>,
+        provider: &str,
+        provider_event_id: &str,
+        payment_id: Option<&str>,
+        inbox_id: Option<i64>,
+        signature_verified: bool,
+        processing_result: &str,
+        deduplication_result: &str,
+        is_duplicate: bool,
+        final_disposition: &str,
+        error_message: Option<&str>,
+    ) -> Result<WebhookDeliveryAuditRecord, WebhookStoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        let rec = Self::insert_delivery_audit_in_tx(
+            &mut tx,
+            merchant_id_override,
+            provider,
+            provider_event_id,
+            payment_id,
+            inbox_id,
+            signature_verified,
+            processing_result,
+            deduplication_result,
+            is_duplicate,
+            final_disposition,
+            error_message,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(rec)
+    }
+
+    async fn process_webhook_event_pg_inner(
         &self,
         params: &WebhookEventParams<'_>,
     ) -> Result<WebhookProcessingResult, WebhookStoreError> {
@@ -941,6 +1191,21 @@ impl WebhookStore for PostgresWebhookStore {
 
                             if check_payment.is_none() {
                                 let _ = tx.rollback().await;
+                                let _ = self
+                                    .record_delivery_audit_on_pool(
+                                        None,
+                                        provider,
+                                        provider_event_id,
+                                        Some(pid.as_str()),
+                                        Some(id),
+                                        true,
+                                        "unapplied",
+                                        "duplicate_suppressed",
+                                        true,
+                                        "unapplied_pending",
+                                        None,
+                                    )
+                                    .await;
                                 return Ok(WebhookProcessingResult::Unapplied {
                                     inbox_id: id,
                                     provider: provider.to_string(),
@@ -1114,6 +1379,21 @@ impl WebhookStore for PostgresWebhookStore {
                 .bind(inbox_id)
                 .execute(&mut *tx)
                 .await;
+                Self::insert_delivery_audit_in_tx(
+                    &mut tx,
+                    None,
+                    provider,
+                    provider_event_id,
+                    Some(payment_id),
+                    Some(inbox_id),
+                    true,
+                    "metadata_recorded",
+                    "unique_accepted",
+                    false,
+                    "accepted",
+                    None,
+                )
+                .await?;
                 tx.commit()
                     .await
                     .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
@@ -1227,6 +1507,22 @@ impl WebhookStore for PostgresWebhookStore {
                         inbox_id
                     )));
                 }
+
+                Self::insert_delivery_audit_in_tx(
+                    &mut tx,
+                    None,
+                    provider,
+                    provider_event_id,
+                    Some(payment_id),
+                    Some(inbox_id),
+                    true,
+                    "unapplied",
+                    "unique_accepted",
+                    false,
+                    "unapplied_pending",
+                    None,
+                )
+                .await?;
 
                 tx.commit()
                     .await
@@ -1493,6 +1789,22 @@ impl WebhookStore for PostgresWebhookStore {
         .await
         .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
 
+        Self::insert_delivery_audit_in_tx(
+            &mut tx,
+            None,
+            provider,
+            provider_event_id,
+            Some(payment_id),
+            Some(inbox_id),
+            true,
+            "applied",
+            "unique_accepted",
+            false,
+            "accepted",
+            None,
+        )
+        .await?;
+
         // 9. Commit transaction
         tx.commit()
             .await
@@ -1506,6 +1818,88 @@ impl WebhookStore for PostgresWebhookStore {
             transition,
             payment: payment_entity,
         })
+    }
+}
+
+#[async_trait]
+impl WebhookStore for PostgresWebhookStore {
+    fn pg_pool(&self) -> Option<&PgPool> {
+        Some(&self.pool)
+    }
+
+    async fn health_check(&self) -> Result<(), WebhookStoreError> {
+        sqlx::query("SELECT 1;")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn process_webhook_event(
+        &self,
+        params: &WebhookEventParams<'_>,
+    ) -> Result<WebhookProcessingResult, WebhookStoreError> {
+        let res = self.process_webhook_event_pg_inner(params).await;
+        match &res {
+            Ok(WebhookProcessingResult::AlreadyProcessed {
+                inbox_id,
+                payment_id,
+                ..
+            }) => {
+                let _ = self
+                    .record_delivery_audit_on_pool(
+                        None,
+                        params.provider,
+                        params.provider_event_id,
+                        Some(payment_id.as_str()),
+                        Some(*inbox_id),
+                        true,
+                        "already_processed",
+                        "duplicate_suppressed",
+                        true,
+                        "deduplicated_noop",
+                        None,
+                    )
+                    .await;
+            }
+            Ok(WebhookProcessingResult::InFlight { inbox_id, .. }) => {
+                let _ = self
+                    .record_delivery_audit_on_pool(
+                        None,
+                        params.provider,
+                        params.provider_event_id,
+                        Some(params.payment_id),
+                        Some(*inbox_id),
+                        true,
+                        "in_flight",
+                        "in_flight_suppressed",
+                        true,
+                        "in_flight_deferred",
+                        None,
+                    )
+                    .await;
+            }
+            Err(err) => {
+                let err_str = err.to_string();
+                let _ = self
+                    .record_delivery_audit_on_pool(
+                        None,
+                        params.provider,
+                        params.provider_event_id,
+                        Some(params.payment_id),
+                        None,
+                        true,
+                        "error",
+                        "not_applicable",
+                        false,
+                        "failed",
+                        Some(&err_str),
+                    )
+                    .await;
+            }
+            _ => {}
+        }
+        res
     }
 
     async fn get_inbox_record(
@@ -2095,6 +2489,160 @@ impl WebhookStore for PostgresWebhookStore {
             remaining_balance: remaining,
         })
     }
+
+    async fn record_webhook_delivery_attempt(
+        &self,
+        record: &WebhookDeliveryAuditRecord,
+    ) -> Result<(), WebhookStoreError> {
+        self.record_delivery_audit_on_pool(
+            record.merchant_id.as_deref(),
+            &record.provider,
+            &record.provider_event_id,
+            record.payment_id.as_deref(),
+            record.inbox_id,
+            record.signature_verified,
+            &record.processing_result,
+            &record.deduplication_result,
+            record.is_duplicate,
+            &record.final_disposition,
+            record.error_message.as_deref(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn list_webhook_delivery_audits_for_payment(
+        &self,
+        merchant_id: &str,
+        payment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
+        let clean_mid = merchant_id.trim();
+        let clean_pid = payment_id.trim();
+        if clean_mid.is_empty() || clean_pid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lim = limit.clamp(1, 200) as i64;
+        let rows = sqlx::query(
+            r#"
+            SELECT wda.delivery_id, wda.merchant_id, wda.provider, wda.provider_event_id,
+                   wda.payment_id, wda.inbox_id, wda.original_delivery_id, wda.attempt_number,
+                   wda.first_received_at, wda.received_at, wda.signature_verified,
+                   wda.processing_result, wda.deduplication_result, wda.is_duplicate,
+                   wda.final_disposition, wda.error_message
+            FROM webhook_delivery_audit wda
+            WHERE wda.payment_id = $1
+              AND (
+                  wda.merchant_id = $2
+                  OR (
+                      wda.merchant_id IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM payment_attempts pa
+                          WHERE pa.merchant_id = $2
+                            AND (pa.payment_reference = wda.payment_id OR pa.transaction_id = wda.payment_id)
+                      )
+                  )
+              )
+            ORDER BY wda.received_at ASC, wda.attempt_number ASC
+            LIMIT $3;
+            "#,
+        )
+        .bind(clean_pid)
+        .bind(clean_mid)
+        .bind(lim)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WebhookDeliveryAuditRecord {
+                delivery_id: r.get("delivery_id"),
+                merchant_id: r.get("merchant_id"),
+                provider: r.get("provider"),
+                provider_event_id: r.get("provider_event_id"),
+                payment_id: r.get("payment_id"),
+                inbox_id: r.get("inbox_id"),
+                original_delivery_id: r.get("original_delivery_id"),
+                attempt_number: r.get::<i32, _>("attempt_number").max(1) as u32,
+                first_received_at: r.get("first_received_at"),
+                received_at: r.get("received_at"),
+                signature_verified: r.get("signature_verified"),
+                processing_result: r.get("processing_result"),
+                deduplication_result: r.get("deduplication_result"),
+                is_duplicate: r.get("is_duplicate"),
+                final_disposition: r.get("final_disposition"),
+                error_message: r.get("error_message"),
+            })
+            .collect())
+    }
+
+    async fn list_webhook_delivery_audits_for_merchant(
+        &self,
+        merchant_id: &str,
+        provider_event_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
+        let clean_mid = merchant_id.trim();
+        if clean_mid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let clean_event_id = provider_event_id.map(str::trim).filter(|s| !s.is_empty());
+        let lim = limit.clamp(1, 200) as i64;
+        let rows = sqlx::query(
+            r#"
+            SELECT wda.delivery_id, wda.merchant_id, wda.provider, wda.provider_event_id,
+                   wda.payment_id, wda.inbox_id, wda.original_delivery_id, wda.attempt_number,
+                   wda.first_received_at, wda.received_at, wda.signature_verified,
+                   wda.processing_result, wda.deduplication_result, wda.is_duplicate,
+                   wda.final_disposition, wda.error_message
+            FROM webhook_delivery_audit wda
+            WHERE (
+                wda.merchant_id = $1
+                OR (
+                    wda.merchant_id IS NULL
+                    AND wda.payment_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM payment_attempts pa
+                        WHERE pa.merchant_id = $1
+                          AND (pa.payment_reference = wda.payment_id OR pa.transaction_id = wda.payment_id)
+                    )
+                )
+            )
+              AND ($2::text IS NULL OR wda.provider_event_id = $2)
+            ORDER BY wda.received_at DESC, wda.attempt_number DESC
+            LIMIT $3;
+            "#,
+        )
+        .bind(clean_mid)
+        .bind(clean_event_id)
+        .bind(lim)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WebhookDeliveryAuditRecord {
+                delivery_id: r.get("delivery_id"),
+                merchant_id: r.get("merchant_id"),
+                provider: r.get("provider"),
+                provider_event_id: r.get("provider_event_id"),
+                payment_id: r.get("payment_id"),
+                inbox_id: r.get("inbox_id"),
+                original_delivery_id: r.get("original_delivery_id"),
+                attempt_number: r.get::<i32, _>("attempt_number").max(1) as u32,
+                first_received_at: r.get("first_received_at"),
+                received_at: r.get("received_at"),
+                signature_verified: r.get("signature_verified"),
+                processing_result: r.get("processing_result"),
+                deduplication_result: r.get("deduplication_result"),
+                is_duplicate: r.get("is_duplicate"),
+                final_disposition: r.get("final_disposition"),
+                error_message: r.get("error_message"),
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2119,6 +2667,7 @@ pub struct InMemoryWebhookStore {
     next_id: Arc<parking_lot::Mutex<i64>>,
     attempts: Arc<parking_lot::Mutex<HashMap<String, PaymentAttemptRecord>>>,
     order_index: Arc<parking_lot::Mutex<HashMap<String, String>>>,
+    delivery_audits: Arc<parking_lot::Mutex<Vec<WebhookDeliveryAuditRecord>>>,
 }
 
 impl InMemoryWebhookStore {
@@ -2130,7 +2679,83 @@ impl InMemoryWebhookStore {
             next_id: Arc::new(parking_lot::Mutex::new(1)),
             attempts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             order_index: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            delivery_audits: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
+    }
+
+    fn resolve_in_memory_merchant_id(&self, provider: &str, payment_id: &str) -> Option<String> {
+        let attempts_guard = self.attempts.lock();
+        attempts_guard
+            .values()
+            .find(|a| {
+                a.provider.eq_ignore_ascii_case(provider)
+                    && (a.payment_reference.as_deref() == Some(payment_id)
+                        || a.transaction_id == payment_id)
+            })
+            .map(|a| a.merchant_id.clone())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_in_memory_delivery_audit(
+        &self,
+        merchant_id_override: Option<&str>,
+        provider: &str,
+        provider_event_id: &str,
+        payment_id: Option<&str>,
+        inbox_id: Option<i64>,
+        signature_verified: bool,
+        processing_result: &str,
+        deduplication_result: &str,
+        is_duplicate: bool,
+        final_disposition: &str,
+        error_message: Option<&str>,
+    ) {
+        let merchant_id = match merchant_id_override {
+            Some(mid) if !mid.trim().is_empty() => Some(mid.trim().to_string()),
+            _ => payment_id.and_then(|pid| self.resolve_in_memory_merchant_id(provider, pid)),
+        };
+
+        let mut guard = self.delivery_audits.lock();
+        let existing_for_event: Vec<&WebhookDeliveryAuditRecord> = guard
+            .iter()
+            .filter(|r| r.provider == provider && r.provider_event_id == provider_event_id)
+            .collect();
+        let now = Utc::now();
+        let (original_delivery_id, first_received_at, attempt_number) =
+            if let Some(first) = existing_for_event.first() {
+                let max_attempt = existing_for_event
+                    .iter()
+                    .map(|r| r.attempt_number)
+                    .max()
+                    .unwrap_or(1);
+                (
+                    Some(first.delivery_id.clone()),
+                    first.first_received_at,
+                    max_attempt + 1,
+                )
+            } else {
+                (None, now, 1)
+            };
+
+        let is_dup = is_duplicate || attempt_number > 1;
+        guard.push(WebhookDeliveryAuditRecord {
+            delivery_id: format!("dlv_{}", uuid::Uuid::new_v4().simple()),
+            merchant_id,
+            provider: provider.to_string(),
+            provider_event_id: provider_event_id.to_string(),
+            payment_id: payment_id.map(str::to_string),
+            inbox_id,
+            original_delivery_id,
+            attempt_number,
+            first_received_at,
+            received_at: now,
+            signature_verified,
+            processing_result: processing_result.to_string(),
+            deduplication_result: deduplication_result.to_string(),
+            is_duplicate: is_dup,
+            final_disposition: final_disposition.to_string(),
+            error_message: error_message.map(str::to_string),
+        });
     }
 
     fn reconcile_in_memory_unapplied_refunds(
@@ -2390,11 +3015,8 @@ impl InMemoryWebhookStore {
             }
         }
     }
-}
 
-#[async_trait]
-impl WebhookStore for InMemoryWebhookStore {
-    async fn process_webhook_event(
+    async fn process_webhook_event_in_memory_inner(
         &self,
         params: &WebhookEventParams<'_>,
     ) -> Result<WebhookProcessingResult, WebhookStoreError> {
@@ -2810,6 +3432,137 @@ impl WebhookStore for InMemoryWebhookStore {
             payment: payment_entity,
         })
     }
+}
+
+#[async_trait]
+impl WebhookStore for InMemoryWebhookStore {
+    async fn process_webhook_event(
+        &self,
+        params: &WebhookEventParams<'_>,
+    ) -> Result<WebhookProcessingResult, WebhookStoreError> {
+        let res = self.process_webhook_event_in_memory_inner(params).await;
+        match &res {
+            Ok(WebhookProcessingResult::Applied {
+                inbox_id,
+                payment_id,
+                ..
+            }) => {
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(payment_id.as_str()),
+                    Some(*inbox_id),
+                    true,
+                    "applied",
+                    "unique_accepted",
+                    false,
+                    "accepted",
+                    None,
+                );
+            }
+            Ok(WebhookProcessingResult::AlreadyProcessed {
+                inbox_id,
+                payment_id,
+                ..
+            }) => {
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(payment_id.as_str()),
+                    Some(*inbox_id),
+                    true,
+                    "already_processed",
+                    "duplicate_suppressed",
+                    true,
+                    "deduplicated_noop",
+                    None,
+                );
+            }
+            Ok(WebhookProcessingResult::InFlight { inbox_id, .. }) => {
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(params.payment_id),
+                    Some(*inbox_id),
+                    true,
+                    "in_flight",
+                    "in_flight_suppressed",
+                    true,
+                    "in_flight_deferred",
+                    None,
+                );
+            }
+            Ok(WebhookProcessingResult::MetadataRecorded {
+                inbox_id,
+                payment_id,
+                ..
+            }) => {
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(payment_id.as_str()),
+                    Some(*inbox_id),
+                    true,
+                    "metadata_recorded",
+                    "unique_accepted",
+                    false,
+                    "accepted",
+                    None,
+                );
+            }
+            Ok(WebhookProcessingResult::Unapplied {
+                inbox_id,
+                payment_id,
+                ..
+            }) => {
+                let is_dup = {
+                    let guard = self.delivery_audits.lock();
+                    guard.iter().any(|r| {
+                        r.provider == params.provider
+                            && r.provider_event_id == params.provider_event_id
+                    })
+                };
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(payment_id.as_str()),
+                    Some(*inbox_id),
+                    true,
+                    "unapplied",
+                    if is_dup {
+                        "duplicate_suppressed"
+                    } else {
+                        "unique_accepted"
+                    },
+                    is_dup,
+                    "unapplied_pending",
+                    None,
+                );
+            }
+            Err(err) => {
+                let err_str = err.to_string();
+                self.record_in_memory_delivery_audit(
+                    None,
+                    params.provider,
+                    params.provider_event_id,
+                    Some(params.payment_id),
+                    None,
+                    true,
+                    "error",
+                    "not_applicable",
+                    false,
+                    "failed",
+                    Some(&err_str),
+                );
+            }
+        }
+        res
+    }
 
     async fn get_inbox_record(
         &self,
@@ -3120,6 +3873,109 @@ impl WebhookStore for InMemoryWebhookStore {
             })
             .collect();
         items.sort_by(|a, b| a.refund_id.cmp(&b.refund_id));
+        Ok(items)
+    }
+
+    async fn record_webhook_delivery_attempt(
+        &self,
+        record: &WebhookDeliveryAuditRecord,
+    ) -> Result<(), WebhookStoreError> {
+        self.record_in_memory_delivery_audit(
+            record.merchant_id.as_deref(),
+            &record.provider,
+            &record.provider_event_id,
+            record.payment_id.as_deref(),
+            record.inbox_id,
+            record.signature_verified,
+            &record.processing_result,
+            &record.deduplication_result,
+            record.is_duplicate,
+            &record.final_disposition,
+            record.error_message.as_deref(),
+        );
+        Ok(())
+    }
+
+    async fn list_webhook_delivery_audits_for_payment(
+        &self,
+        merchant_id: &str,
+        payment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
+        let clean_mid = merchant_id.trim();
+        let clean_pid = payment_id.trim();
+        if clean_mid.is_empty() || clean_pid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lim = limit.clamp(1, 200);
+        let attempts_guard = self.attempts.lock();
+        let merchant_owns_payment = attempts_guard.values().any(|a| {
+            a.merchant_id == clean_mid
+                && (a.payment_reference.as_deref() == Some(clean_pid)
+                    || a.transaction_id == clean_pid)
+        });
+        drop(attempts_guard);
+
+        let guard = self.delivery_audits.lock();
+        let mut items: Vec<WebhookDeliveryAuditRecord> = guard
+            .iter()
+            .filter(|r| r.payment_id.as_deref() == Some(clean_pid))
+            .filter(|r| match r.merchant_id.as_deref() {
+                Some(mid) => mid == clean_mid,
+                None => merchant_owns_payment,
+            })
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.received_at
+                .cmp(&b.received_at)
+                .then_with(|| a.attempt_number.cmp(&b.attempt_number))
+        });
+        items.truncate(lim);
+        Ok(items)
+    }
+
+    async fn list_webhook_delivery_audits_for_merchant(
+        &self,
+        merchant_id: &str,
+        provider_event_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<WebhookDeliveryAuditRecord>, WebhookStoreError> {
+        let clean_mid = merchant_id.trim();
+        if clean_mid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let clean_event_id = provider_event_id.map(str::trim).filter(|s| !s.is_empty());
+        let lim = limit.clamp(1, 200);
+        let attempts_guard = self.attempts.lock();
+        let owned_payments: std::collections::HashSet<String> = attempts_guard
+            .values()
+            .filter(|a| a.merchant_id == clean_mid)
+            .flat_map(|a| {
+                std::iter::once(a.transaction_id.clone()).chain(a.payment_reference.iter().cloned())
+            })
+            .collect();
+        drop(attempts_guard);
+
+        let guard = self.delivery_audits.lock();
+        let mut items: Vec<WebhookDeliveryAuditRecord> = guard
+            .iter()
+            .filter(|r| match r.merchant_id.as_deref() {
+                Some(mid) => mid == clean_mid,
+                None => r
+                    .payment_id
+                    .as_deref()
+                    .is_some_and(|pid| owned_payments.contains(pid)),
+            })
+            .filter(|r| clean_event_id.is_none_or(|eid| r.provider_event_id == eid))
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            b.received_at
+                .cmp(&a.received_at)
+                .then_with(|| b.attempt_number.cmp(&a.attempt_number))
+        });
+        items.truncate(lim);
         Ok(items)
     }
 }
@@ -7375,5 +8231,196 @@ mod tests {
         let _ = sqlx::query("DROP TABLE payment_refunds_legacy_test;")
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_durable_webhook_delivery_audit_and_merchant_isolation() {
+        let store = InMemoryWebhookStore::new();
+        let now = Utc::now();
+
+        store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_dlv_1".to_string(),
+                merchant_id: "merch_alpha".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_dlv_1".to_string()),
+                payment_reference: Some("pay_dlv_1".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({ "event": "payment.captured" });
+        let params = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_dlv_1",
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: "pay_dlv_1",
+            amount_minor: 50000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+
+        let r1 = store.process_webhook_event(&params).await.unwrap();
+        assert!(matches!(r1, WebhookProcessingResult::Applied { .. }));
+
+        let r2 = store.process_webhook_event(&params).await.unwrap();
+        assert!(matches!(
+            r2,
+            WebhookProcessingResult::AlreadyProcessed { .. }
+        ));
+
+        // Merchant alpha sees both deliveries with full duplicate linkage
+        let audits_alpha = store
+            .list_webhook_delivery_audits_for_payment("merch_alpha", "pay_dlv_1", 20)
+            .await
+            .unwrap();
+        assert_eq!(audits_alpha.len(), 2);
+        assert_eq!(audits_alpha[0].attempt_number, 1);
+        assert!(!audits_alpha[0].is_duplicate);
+        assert_eq!(audits_alpha[0].deduplication_result, "unique_accepted");
+        assert_eq!(audits_alpha[0].final_disposition, "accepted");
+        assert!(audits_alpha[0].original_delivery_id.is_none());
+
+        assert_eq!(audits_alpha[1].attempt_number, 2);
+        assert!(audits_alpha[1].is_duplicate);
+        assert_eq!(audits_alpha[1].deduplication_result, "duplicate_suppressed");
+        assert_eq!(audits_alpha[1].final_disposition, "deduplicated_noop");
+        assert_eq!(
+            audits_alpha[1].original_delivery_id.as_deref(),
+            Some(audits_alpha[0].delivery_id.as_str())
+        );
+
+        // Merchant beta cannot see merchant alpha's delivery audits
+        let audits_beta = store
+            .list_webhook_delivery_audits_for_payment("merch_beta", "pay_dlv_1", 20)
+            .await
+            .unwrap();
+        assert!(audits_beta.is_empty());
+
+        // Signature failure is also durably recorded
+        store
+            .record_webhook_delivery_attempt(&WebhookDeliveryAuditRecord {
+                delivery_id: String::new(),
+                merchant_id: Some("merch_alpha".to_string()),
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_bad_sig".to_string(),
+                payment_id: Some("pay_dlv_1".to_string()),
+                inbox_id: None,
+                original_delivery_id: None,
+                attempt_number: 1,
+                first_received_at: now,
+                received_at: now,
+                signature_verified: false,
+                processing_result: "signature_failed".to_string(),
+                deduplication_result: "not_applicable".to_string(),
+                is_duplicate: false,
+                final_disposition: "rejected_signature".to_string(),
+                error_message: Some("invalid signature".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let all_alpha = store
+            .list_webhook_delivery_audits_for_merchant("merch_alpha", Some("evt_bad_sig"), 10)
+            .await
+            .unwrap();
+        assert_eq!(all_alpha.len(), 1);
+        assert!(!all_alpha[0].signature_verified);
+        assert_eq!(all_alpha[0].final_disposition, "rejected_signature");
+    }
+
+    #[tokio::test]
+    async fn test_postgres_durable_webhook_delivery_audit_and_concurrent_duplicates() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&db_url).await.unwrap();
+        PostgresWebhookStore::init_schema(&pool).await.unwrap();
+        let store = PostgresWebhookStore::new(pool.clone());
+
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..10];
+        let tx_id = format!("tx_pg_dlv_{}", suffix);
+        let pay_id = format!("pay_pg_dlv_{}", suffix);
+        let evt_id = format!("evt_pg_dlv_{}", suffix);
+        let m_a = format!("merch_pg_a_{}", suffix);
+        let m_b = format!("merch_pg_b_{}", suffix);
+        let now = Utc::now();
+
+        store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: tx_id,
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: None,
+                payment_reference: Some(pay_id.clone()),
+                amount_minor: 25000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({ "event": "payment.captured", "id": evt_id });
+        let params1 = WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_id,
+            event_type: PaymentEventType::PaymentCaptured,
+            payment_id: &pay_id,
+            amount_minor: 25000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        let params2 = params1.clone();
+
+        let (res1, res2) = tokio::join!(
+            store.process_webhook_event(&params1),
+            store.process_webhook_event(&params2)
+        );
+        let r1 = res1.unwrap();
+        let r2 = res2.unwrap();
+        assert!(
+            (matches!(r1, WebhookProcessingResult::Applied { .. })
+                && matches!(r2, WebhookProcessingResult::AlreadyProcessed { .. }))
+                || (matches!(r2, WebhookProcessingResult::Applied { .. })
+                    && matches!(r1, WebhookProcessingResult::AlreadyProcessed { .. }))
+        );
+
+        // Simulate restart with a fresh PostgresWebhookStore instance
+        let restarted_store = PostgresWebhookStore::new(pool.clone());
+        let audits = restarted_store
+            .list_webhook_delivery_audits_for_payment(&m_a, &pay_id, 20)
+            .await
+            .unwrap();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].attempt_number, 1);
+        assert!(!audits[0].is_duplicate);
+        assert_eq!(audits[0].deduplication_result, "unique_accepted");
+        assert_eq!(audits[1].attempt_number, 2);
+        assert!(audits[1].is_duplicate);
+        assert_eq!(audits[1].deduplication_result, "duplicate_suppressed");
+        assert_eq!(
+            audits[1].original_delivery_id.as_deref(),
+            Some(audits[0].delivery_id.as_str())
+        );
+
+        // Cross-merchant isolation check
+        let cross = restarted_store
+            .list_webhook_delivery_audits_for_payment(&m_b, &pay_id, 20)
+            .await
+            .unwrap();
+        assert!(cross.is_empty());
     }
 }

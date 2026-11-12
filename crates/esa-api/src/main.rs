@@ -1234,6 +1234,38 @@ fn build_app(app_state: AppState) -> Router {
             "/api/v1/intelligence/memory/recent",
             get(get_intelligence_memory_recent),
         )
+        .route(
+            "/api/intelligence/resolutions",
+            get(list_intelligence_resolutions),
+        )
+        .route(
+            "/api/v1/intelligence/resolutions",
+            get(list_intelligence_resolutions),
+        )
+        .route(
+            "/api/intelligence/resolutions/:resolution_id",
+            get(get_intelligence_resolution),
+        )
+        .route(
+            "/api/v1/intelligence/resolutions/:resolution_id",
+            get(get_intelligence_resolution),
+        )
+        .route(
+            "/api/intelligence/resolutions/:resolution_id/verify",
+            post(verify_intelligence_resolution),
+        )
+        .route(
+            "/api/v1/intelligence/resolutions/:resolution_id/verify",
+            post(verify_intelligence_resolution),
+        )
+        .route(
+            "/api/intelligence/webhooks/deliveries",
+            get(list_intelligence_webhook_deliveries),
+        )
+        .route(
+            "/api/v1/intelligence/webhooks/deliveries",
+            get(list_intelligence_webhook_deliveries),
+        )
         // API Key Management & Sandbox Access
         .route(
             "/api/v1/keys/generate-sandbox",
@@ -1709,6 +1741,31 @@ async fn razorpay_webhook(
             | WebhookError::MissingSignature
             | WebhookError::MissingWebhookSecret,
         ) => {
+            let now = chrono::Utc::now();
+            let _ = state
+                .webhook_store
+                .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
+                    delivery_id: String::new(),
+                    merchant_id: None,
+                    provider: "razorpay".to_string(),
+                    provider_event_id: event_id_header
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or("unverified_razorpay_event")
+                        .to_string(),
+                    payment_id: None,
+                    inbox_id: None,
+                    original_delivery_id: None,
+                    attempt_number: 1,
+                    first_received_at: now,
+                    received_at: now,
+                    signature_verified: false,
+                    processing_result: "signature_failed".to_string(),
+                    deduplication_result: "not_applicable".to_string(),
+                    is_duplicate: false,
+                    final_disposition: "rejected_signature".to_string(),
+                    error_message: Some("invalid webhook signature".to_string()),
+                })
+                .await;
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "invalid webhook signature" })),
@@ -2671,6 +2728,33 @@ async fn cashfree_webhook(
         Ok(p) => p,
         Err(err) => {
             warn!("Cashfree webhook verification rejected: {}", err);
+            let now = chrono::Utc::now();
+            let _ = state
+                .webhook_store
+                .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
+                    delivery_id: String::new(),
+                    merchant_id: None,
+                    provider: "cashfree".to_string(),
+                    provider_event_id: header_map
+                        .get("x-webhook-id")
+                        .cloned()
+                        .unwrap_or_else(|| "unverified_cashfree_event".to_string()),
+                    payment_id: None,
+                    inbox_id: None,
+                    original_delivery_id: None,
+                    attempt_number: 1,
+                    first_received_at: now,
+                    received_at: now,
+                    signature_verified: false,
+                    processing_result: "signature_failed".to_string(),
+                    deduplication_result: "not_applicable".to_string(),
+                    is_duplicate: false,
+                    final_disposition: "rejected_signature".to_string(),
+                    error_message: Some(
+                        esa_agents::privacy::redact_sensitive_text(&err.to_string()).redacted,
+                    ),
+                })
+                .await;
             let status = match &err {
                 esa_core::provider::ProviderError::InvalidSignature { .. }
                 | esa_core::provider::ProviderError::AuthenticationFailed { .. } => {
@@ -3285,6 +3369,30 @@ async fn payu_webhook(
         Ok(p) => p,
         Err(err) => {
             warn!("PayU webhook verification failed: {}", err);
+            let now = chrono::Utc::now();
+            let _ = state
+                .webhook_store
+                .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
+                    delivery_id: String::new(),
+                    merchant_id: None,
+                    provider: "payu".to_string(),
+                    provider_event_id: "unverified_payu_event".to_string(),
+                    payment_id: None,
+                    inbox_id: None,
+                    original_delivery_id: None,
+                    attempt_number: 1,
+                    first_received_at: now,
+                    received_at: now,
+                    signature_verified: false,
+                    processing_result: "signature_failed".to_string(),
+                    deduplication_result: "not_applicable".to_string(),
+                    is_duplicate: false,
+                    final_disposition: "rejected_signature".to_string(),
+                    error_message: Some(
+                        esa_agents::privacy::redact_sensitive_text(&err.to_string()).redacted,
+                    ),
+                })
+                .await;
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": err.to_string() })),
@@ -6541,6 +6649,18 @@ async fn investigate_payment_intelligence_inner(
         Vec::new()
     };
 
+    let delivery_audits = if let Some(ref pref) = attempt.payment_reference {
+        state
+            .webhook_store
+            .list_webhook_delivery_audits_for_payment(&merchant_id, pref, 100)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to load webhook delivery audits: {}", e))
+            })?
+    } else {
+        Vec::new()
+    };
+
     let refunds = if let Some(ref pref) = attempt.payment_reference {
         state
             .webhook_store
@@ -6556,11 +6676,12 @@ async fn investigate_payment_intelligence_inner(
         merchant_id: merchant_id.clone(),
     };
 
-    let context = esa_agents::build_payment_intelligence_context(
+    let context = esa_agents::build_payment_intelligence_context_with_deliveries(
         &scope,
         &attempt,
         payment_entity.as_ref(),
         &inbox_events,
+        &delivery_audits,
         &refunds,
         health.as_ref(),
         None,
@@ -6691,6 +6812,235 @@ async fn get_intelligence_memory_recent(
         "merchant_id": merchant_id,
         "count": records.len(),
         "records": records,
+        "read_only": true,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolutionsListQuery {
+    merchant_id: Option<String>,
+    status: Option<String>,
+    payment_reference: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_intelligence_resolutions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ResolutionsListQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for trusted resolutions: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, query.merchant_id.as_deref())?;
+    let status = match query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(esa_agents::ResolutionStatus::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!("Unsupported resolution status: {}", raw))
+        })?),
+        None => None,
+    };
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let scope = esa_agents::ExecutionScope::MerchantScoped {
+        merchant_id: merchant_id.clone(),
+    };
+
+    let resolutions = state
+        .memory_store
+        .list_resolutions(&scope, status, query.payment_reference.as_deref(), limit)
+        .await
+        .map_err(|e| match e.category {
+            esa_agents::InferenceErrorCategory::Forbidden => AppError::Forbidden(e.message),
+            esa_agents::InferenceErrorCategory::InvalidScope => AppError::BadRequest(e.message),
+            _ => AppError::Internal(format!("Failed to list trusted resolutions: {}", e.message)),
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "count": resolutions.len(),
+        "resolutions": resolutions,
+        "read_only": true,
+    })))
+}
+
+async fn get_intelligence_resolution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resolution_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for trusted resolution details: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, None)?;
+    let scope = esa_agents::ExecutionScope::MerchantScoped {
+        merchant_id: merchant_id.clone(),
+    };
+
+    let (resolution, audit_history) = state
+        .memory_store
+        .get_resolution(&scope, resolution_id.trim())
+        .await
+        .map_err(|e| match e.category {
+            esa_agents::InferenceErrorCategory::Forbidden => AppError::Forbidden(e.message),
+            esa_agents::InferenceErrorCategory::InvalidScope => AppError::BadRequest(e.message),
+            _ => AppError::Internal(format!("Failed to fetch trusted resolution: {}", e.message)),
+        })?
+        .ok_or_else(|| AppError::NotFound("Trusted resolution not found".into()))?;
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "resolution": resolution,
+        "audit_history": audit_history,
+        "read_only": true,
+    })))
+}
+
+async fn verify_intelligence_resolution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resolution_id): Path<String>,
+) -> axum::response::Response {
+    match verify_intelligence_resolution_inner(state, headers, resolution_id).await {
+        Ok(resp) => resp,
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn verify_intelligence_resolution_inner(
+    state: AppState,
+    headers: HeaderMap,
+    resolution_id: String,
+) -> Result<axum::response::Response, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for trusted resolution verification: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:write"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:write' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, None)?;
+    if let Err(rate_limit_resp) = state
+        .rate_limiter
+        .check_payment_investigate(&caller.merchant_id)
+    {
+        return Ok(rate_limit_resp.into_response());
+    }
+
+    let scope = esa_agents::ExecutionScope::MerchantScoped {
+        merchant_id: merchant_id.clone(),
+    };
+
+    let (resolution, audit_history, promoted_memory) =
+        esa_agents::verify_resolution_from_webhook_store(
+            state.webhook_store.as_ref(),
+            state.memory_store.as_ref(),
+            &scope,
+            resolution_id.trim(),
+        )
+        .await
+        .map_err(|e| match e.category {
+            esa_agents::InferenceErrorCategory::Forbidden => AppError::Forbidden(e.message),
+            esa_agents::InferenceErrorCategory::NotFound => AppError::NotFound(e.message),
+            esa_agents::InferenceErrorCategory::InvalidScope
+            | esa_agents::InferenceErrorCategory::InvalidResponse => {
+                AppError::BadRequest(e.message)
+            }
+            _ => AppError::Internal(format!(
+                "Trusted resolution verification failed: {}",
+                e.message
+            )),
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "resolution": resolution,
+        "audit_history": audit_history,
+        "promoted_memory": promoted_memory,
+    }))
+    .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhookDeliveriesQuery {
+    merchant_id: Option<String>,
+    payment_reference: Option<String>,
+    provider_event_id: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_intelligence_webhook_deliveries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WebhookDeliveriesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for webhook delivery audit: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, query.merchant_id.as_deref())?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let deliveries = if let Some(pref) = query
+        .payment_reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        state
+            .webhook_store
+            .list_webhook_delivery_audits_for_payment(&merchant_id, pref, limit)
+            .await
+    } else {
+        state
+            .webhook_store
+            .list_webhook_delivery_audits_for_merchant(
+                &merchant_id,
+                query.provider_event_id.as_deref(),
+                limit,
+            )
+            .await
+    }
+    .map_err(|e| AppError::Internal(format!("Failed to load webhook delivery audits: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "count": deliveries.len(),
+        "deliveries": deliveries,
         "read_only": true,
     })))
 }
@@ -15567,6 +15917,155 @@ mod integration_tests {
             ))
             .unwrap();
         assert_eq!(app.oneshot(r3).await.unwrap().status(), StatusCode::OK);
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_phase4_resolution_lifecycle_and_delivery_audit_apis() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "merchant-a-p4-key");
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-p4-key");
+
+        let state = create_test_state();
+        let now = chrono::Utc::now();
+
+        state
+            .webhook_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_p4_api".to_string(),
+                merchant_id: "merchant_sandbox_01".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_p4_api".to_string()),
+                payment_reference: Some("pay_p4_api".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let wh_params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_p4_api_1",
+            event_type: esa_core::PaymentEventType::PaymentCaptured,
+            payment_id: "pay_p4_api",
+            amount_minor: 50000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &serde_json::json!({ "event": "payment.captured" }),
+        };
+        state
+            .webhook_store
+            .process_webhook_event(&wh_params)
+            .await
+            .unwrap();
+        state
+            .webhook_store
+            .process_webhook_event(&wh_params)
+            .await
+            .unwrap();
+
+        let app = build_app(state);
+
+        // 1. Unauthenticated access to resolutions & deliveries is rejected
+        let unauth_res = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/resolutions")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(unauth_res).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // 2. Investigate payment -> creates Pending resolution_id
+        let inv_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-p4-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_p4_api" }).to_string(),
+            ))
+            .unwrap();
+        let inv_resp = app.clone().oneshot(inv_req).await.unwrap();
+        assert_eq!(inv_resp.status(), StatusCode::OK);
+        let inv_bytes = axum::body::to_bytes(inv_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let inv_json: serde_json::Value = serde_json::from_slice(&inv_bytes).unwrap();
+        let resolution_id = inv_json["report"]["resolution_id"]
+            .as_str()
+            .expect("resolution_id should be present")
+            .to_string();
+
+        // 3. List & inspect resolution for merchant_sandbox_01
+        let list_req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/resolutions")
+            .header("x-api-key", "merchant-a-p4-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let list_resp = app.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_bytes = axum::body::to_bytes(list_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        assert_eq!(list_json["count"].as_u64().unwrap(), 1);
+
+        // 4. Verify resolution via authorized workflow (no caller-supplied outcome)
+        let verify_req = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/intelligence/resolutions/{}/verify",
+                resolution_id
+            ))
+            .header("x-api-key", "merchant-a-p4-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let verify_resp = app.clone().oneshot(verify_req).await.unwrap();
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verify_bytes = axum::body::to_bytes(verify_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let verify_json: serde_json::Value = serde_json::from_slice(&verify_bytes).unwrap();
+        assert_eq!(verify_json["resolution"]["status"], "verified");
+        assert!(verify_json["audit_history"].as_array().unwrap().len() >= 2);
+
+        // 5. Inspect durable webhook delivery audit records
+        let dlv_req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/webhooks/deliveries?payment_reference=pay_p4_api")
+            .header("x-api-key", "merchant-a-p4-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let dlv_resp = app.clone().oneshot(dlv_req).await.unwrap();
+        assert_eq!(dlv_resp.status(), StatusCode::OK);
+        let dlv_bytes = axum::body::to_bytes(dlv_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let dlv_json: serde_json::Value = serde_json::from_slice(&dlv_bytes).unwrap();
+        assert_eq!(dlv_json["count"].as_u64().unwrap(), 2);
+
+        // 6. Cross-merchant access to merchant_sandbox_01's resolution is Forbidden
+        let cross_req = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/api/v1/intelligence/resolutions/{}",
+                resolution_id
+            ))
+            .header("x-api-key", "admin-p4-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let cross_resp = app.oneshot(cross_req).await.unwrap();
+        assert_eq!(cross_resp.status(), StatusCode::FORBIDDEN);
 
         std::env::remove_var("ESA_TEST_API_KEY");
         std::env::remove_var("ESA_ADMIN_API_KEY");

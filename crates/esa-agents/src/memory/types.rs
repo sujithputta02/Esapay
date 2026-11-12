@@ -4,7 +4,7 @@ use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory, Pr
 use chrono::{DateTime, Duration, Utc};
 use esa_core::payment_state::{PaymentEntity, PaymentState};
 use esa_core::provider::PaymentAttemptRecord;
-use esa_state::webhook_store::{RefundRecord, WebhookInboxRecord};
+use esa_state::webhook_store::{RefundRecord, WebhookDeliveryAuditRecord, WebhookInboxRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -82,6 +82,23 @@ impl VerificationStatus {
     }
 }
 
+/// Immutable provenance metadata attached to every promoted episodic memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryProvenance {
+    pub evaluation_id: String,
+    pub resolution_id: String,
+    pub merchant_id: String,
+    pub payment_reference: String,
+    pub provider: String,
+    pub verified_at: DateTime<Utc>,
+    pub verification_method: String,
+    #[serde(default)]
+    pub supporting_evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_provenance: Vec<String>,
+    pub promotion_decision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub memory_id: String,
@@ -100,6 +117,8 @@ pub struct MemoryRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<MemoryProvenance>,
 }
 
 impl MemoryRecord {
@@ -162,7 +181,7 @@ impl MemoryRecord {
                     merchant_id: raw_mid.to_string(),
                 };
                 let clean_mid = scope_check.normalized_merchant_id()?.unwrap().to_string();
-                self.merchant_id = Some(clean_mid);
+                self.merchant_id = Some(clean_mid.clone());
 
                 if matches!(
                     self.memory_type,
@@ -180,6 +199,14 @@ impl MemoryRecord {
                         InferenceErrorCategory::InvalidResponse,
                         "Unverified diagnoses cannot be persisted into verified episodic memory",
                     ));
+                }
+                if let Some(ref prov) = self.provenance {
+                    if prov.merchant_id != clean_mid {
+                        return Err(InferenceError::new(
+                            InferenceErrorCategory::InvalidScope,
+                            "Memory provenance merchant_id does not match record merchant_id",
+                        ));
+                    }
                 }
             }
         }
@@ -363,6 +390,139 @@ impl OutcomeEvaluationRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionStatus {
+    Pending,
+    UnderReview,
+    Verified,
+    Rejected,
+    Expired,
+}
+
+impl ResolutionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResolutionStatus::Pending => "pending",
+            ResolutionStatus::UnderReview => "under_review",
+            ResolutionStatus::Verified => "verified",
+            ResolutionStatus::Rejected => "rejected",
+            ResolutionStatus::Expired => "expired",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "pending" => Some(ResolutionStatus::Pending),
+            "under_review" => Some(ResolutionStatus::UnderReview),
+            "verified" => Some(ResolutionStatus::Verified),
+            "rejected" => Some(ResolutionStatus::Rejected),
+            "expired" => Some(ResolutionStatus::Expired),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ResolutionStatus::Verified | ResolutionStatus::Rejected | ResolutionStatus::Expired
+        )
+    }
+
+    pub fn can_transition_to(&self, next: ResolutionStatus) -> bool {
+        matches!(
+            (*self, next),
+            (ResolutionStatus::Pending, ResolutionStatus::UnderReview)
+                | (ResolutionStatus::Pending, ResolutionStatus::Verified)
+                | (ResolutionStatus::Pending, ResolutionStatus::Rejected)
+                | (ResolutionStatus::Pending, ResolutionStatus::Expired)
+                | (ResolutionStatus::UnderReview, ResolutionStatus::Pending)
+                | (ResolutionStatus::UnderReview, ResolutionStatus::Verified)
+                | (ResolutionStatus::UnderReview, ResolutionStatus::Rejected)
+                | (ResolutionStatus::UnderReview, ResolutionStatus::Expired)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedResolutionRecord {
+    pub resolution_id: String,
+    pub investigation_id: String,
+    pub evaluation_id: String,
+    pub merchant_id: String,
+    pub payment_reference: String,
+    pub provider: String,
+    pub proposed_root_cause: String,
+    pub status: ResolutionStatus,
+    pub accuracy: OutcomeAccuracy,
+    pub authoritative_state: Option<CanonicalPaymentState>,
+    pub verification_method: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_provenance: Vec<String>,
+    #[serde(default)]
+    pub missing_evidence: Vec<String>,
+    pub verification_summary: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub promoted_memory_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl TrustedResolutionRecord {
+    pub fn from_evaluation(eval: &OutcomeEvaluationRecord) -> Self {
+        Self {
+            resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+            investigation_id: eval.investigation_id.clone(),
+            evaluation_id: eval.evaluation_id.clone(),
+            merchant_id: eval.merchant_id.clone(),
+            payment_reference: eval.payment_reference.clone(),
+            provider: eval.provider.clone(),
+            proposed_root_cause: eval.recommended_root_cause.clone(),
+            status: ResolutionStatus::Pending,
+            accuracy: eval.accuracy,
+            authoritative_state: Some(eval.observed_authoritative_state),
+            verification_method: None,
+            evidence_refs: eval.supporting_evidence_refs.clone(),
+            evidence_provenance: Vec::new(),
+            missing_evidence: Vec::new(),
+            verification_summary: None,
+            rejection_reason: None,
+            promoted_memory_id: eval.promoted_memory_id.clone(),
+            created_at: eval.created_at,
+            updated_at: eval.created_at,
+            verified_at: eval.verified_at,
+            expires_at: eval.expires_at,
+        }
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|exp| exp <= now)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionAuditEvent {
+    pub audit_id: String,
+    pub resolution_id: String,
+    pub evaluation_id: String,
+    pub merchant_id: String,
+    pub from_status: Option<ResolutionStatus>,
+    pub to_status: ResolutionStatus,
+    pub actor: String,
+    pub verification_method: String,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_provenance: Vec<String>,
+    pub promoted_memory_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Sealed authoritative outcome proof derived strictly inside `memory` from ESAPay's
 /// durable `WebhookStore` payment, webhook, and refund records.
 /// External callers cannot construct this proof using arbitrary payment records.
@@ -374,6 +534,9 @@ pub struct AuthoritativeOutcomeProof {
     authoritative_state: CanonicalPaymentState,
     accuracy: OutcomeAccuracy,
     verified_resolution: String,
+    evidence_refs: Vec<String>,
+    evidence_provenance: Vec<String>,
+    verification_method: String,
 }
 
 impl AuthoritativeOutcomeProof {
@@ -384,6 +547,27 @@ impl AuthoritativeOutcomeProof {
         attempt: &PaymentAttemptRecord,
         payment_entity: Option<&PaymentEntity>,
         inbox_events: &[WebhookInboxRecord],
+        refunds: &[RefundRecord],
+    ) -> Result<Self, InferenceError> {
+        Self::from_authoritative_records_with_deliveries(
+            scope,
+            eval,
+            attempt,
+            payment_entity,
+            inbox_events,
+            &[],
+            refunds,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn from_authoritative_records_with_deliveries(
+        scope: &ExecutionScope,
+        eval: &OutcomeEvaluationRecord,
+        attempt: &PaymentAttemptRecord,
+        payment_entity: Option<&PaymentEntity>,
+        inbox_events: &[WebhookInboxRecord],
+        delivery_audits: &[WebhookDeliveryAuditRecord],
         refunds: &[RefundRecord],
     ) -> Result<Self, InferenceError> {
         let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
@@ -542,16 +726,42 @@ impl AuthoritativeOutcomeProof {
                 })
         };
 
+        // Collect verified duplicate delivery IDs & event IDs from durable webhook_delivery_audit
+        let mut duplicate_delivery_ids = HashSet::new();
+        let mut duplicate_event_ids = HashSet::new();
+        for dlv in delivery_audits {
+            let belongs_to_payment = dlv.provider.eq_ignore_ascii_case(&attempt.provider)
+                && dlv.payment_id.as_deref() == Some(eval.payment_reference.as_str())
+                && dlv
+                    .merchant_id
+                    .as_deref()
+                    .is_none_or(|mid| mid == caller_mid);
+            if !belongs_to_payment {
+                continue;
+            }
+            if dlv.is_duplicate
+                && dlv.attempt_number > 1
+                && dlv.original_delivery_id.is_some()
+                && dlv.deduplication_result == "duplicate_suppressed"
+            {
+                duplicate_delivery_ids.insert(dlv.delivery_id.clone());
+                duplicate_event_ids.insert(dlv.provider_event_id.clone());
+            }
+        }
+
         // Diagnosis-level verification against specific authoritative evidence (never terminal state alone)
         let rc = eval.recommended_root_cause.as_str();
         let accuracy = match rc {
             "DUPLICATE_WEBHOOK_SUPPRESSED" => {
-                // webhook_inbox enforces UNIQUE(provider, provider_event_id) for idempotency and
-                // does not persist a durable duplicate-delivery log; keep unsupported until one exists.
-                return Err(InferenceError::new(
-                    InferenceErrorCategory::InvalidResponse,
-                    "DUPLICATE_WEBHOOK_SUPPRESSED cannot be independently promoted without durable duplicate-delivery evidence; keeping evaluation pending",
-                ));
+                let dup_ok = has_cited_match("delivery:", &duplicate_delivery_ids)
+                    || has_cited_match("webhook:", &duplicate_event_ids);
+                if !dup_ok || duplicate_delivery_ids.is_empty() {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "DUPLICATE_WEBHOOK_SUPPRESSED requires durable webhook_delivery_audit duplicate-suppression evidence; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
             }
             "WEBHOOK_DELAYED_OR_MISSING" => {
                 let delayed_ok = has_cited_match("webhook:", &delayed_event_ids);
@@ -582,9 +792,11 @@ impl AuthoritativeOutcomeProof {
                 OutcomeAccuracy::Correct
             }
             "PROVIDER_DEGRADED_OR_TIMEOUT" => {
+                let attempt_ref = format!("attempt:{}", attempt.transaction_id);
                 let has_provider_timeout = has_cited_match("webhook:", &provider_timeout_event_ids)
                     || (authoritative_state == CanonicalPaymentState::Failed
-                        && attempt.state.eq_ignore_ascii_case("timeout"));
+                        && attempt.state.eq_ignore_ascii_case("timeout")
+                        && cited.iter().any(|r| r == &attempt_ref));
                 if !has_provider_timeout {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
@@ -700,17 +912,27 @@ impl AuthoritativeOutcomeProof {
             }
         };
 
+        let mut provenance_sources = vec!["payment_attempts".to_string()];
+        if payment_entity.is_some() {
+            provenance_sources.push("payment_records".to_string());
+        }
+        if !inbox_events.is_empty() {
+            provenance_sources.push("webhook_inbox".to_string());
+        }
+        if !delivery_audits.is_empty() {
+            provenance_sources.push("webhook_delivery_audit".to_string());
+        }
+        if !refunds.is_empty() {
+            provenance_sources.push("payment_refunds".to_string());
+        }
+
         let verified_resolution = format!(
             "Authoritative {} payment {} verified '{}' for diagnosis '{}' (source: {})",
             attempt.provider,
             eval.payment_reference,
             authoritative_state.as_str(),
             rc,
-            if payment_entity.is_some() {
-                "payment_records+webhook_inbox+refunds"
-            } else {
-                "payment_attempts+webhook_inbox+refunds"
-            }
+            provenance_sources.join("+")
         );
 
         Ok(Self {
@@ -720,6 +942,9 @@ impl AuthoritativeOutcomeProof {
             authoritative_state,
             accuracy,
             verified_resolution,
+            evidence_refs: eval.supporting_evidence_refs.clone(),
+            evidence_provenance: provenance_sources,
+            verification_method: "deterministic_webhook_store_v1".to_string(),
         })
     }
 
@@ -745,6 +970,18 @@ impl AuthoritativeOutcomeProof {
 
     pub fn verified_resolution(&self) -> &str {
         &self.verified_resolution
+    }
+
+    pub fn evidence_refs(&self) -> &[String] {
+        &self.evidence_refs
+    }
+
+    pub fn evidence_provenance(&self) -> &[String] {
+        &self.evidence_provenance
+    }
+
+    pub fn verification_method(&self) -> &str {
+        &self.verification_method
     }
 }
 
