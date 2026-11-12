@@ -10,8 +10,28 @@ services:
         value: 8080
       - key: RUST_LOG
         value: info
+      - key: ESA_AI_PROVIDER
+        value: hf_zerogpu
       - key: HF_AI_BRAIN_URL
         value: https://sujithputta-esa-ai-brain.hf.space
+      - key: HF_AI_BRAIN_TOKEN
+        sync: false
+      - key: HF_AI_MODEL_ID
+        value: Qwen/Qwen2.5-0.5B-Instruct
+      - key: HF_AI_CONNECT_TIMEOUT_SECS
+        value: "5"
+      - key: HF_AI_SUBMIT_TIMEOUT_SECS
+        value: "10"
+      - key: HF_AI_TOTAL_TIMEOUT_SECS
+        value: "45"
+      - key: HF_AI_MAX_CONCURRENCY
+        value: "2"
+      - key: HF_AI_MAX_PROMPT_CHARS
+        value: "8192"
+      - key: HF_AI_MAX_OUTPUT_BYTES
+        value: "16384"
+      - key: HF_AI_CIRCUIT_BREAKER_COOLDOWN_SECS
+        value: "30"
       - key: OLLAMA_MODEL
         value: qwen2.5:0.5b
       - key: ESA_ENABLE_SIMULATED_CHECKOUT
