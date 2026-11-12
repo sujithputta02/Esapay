@@ -1415,4 +1415,315 @@ mod tests {
             InferenceErrorCategory::InvalidResponse
         );
     }
+
+    #[tokio::test]
+    async fn test_evidence_provenance_refund_failed_prompt_refund_empty_refs_and_discrepancy() {
+        use esa_core::payment_state::{PaymentEntity, PaymentState};
+        use esa_state::{WebhookInboxRecord, WebhookStatus};
+
+        let now = Utc::now();
+
+        // 1. Failed attempt + processed RefundFailed webhook MUST NOT verify PAYMENT_FAILED_AT_PROVIDER
+        let attempt_fail = PaymentAttemptRecord {
+            transaction_id: "tx_rf_fail".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_rf_fail".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "failed".to_string(),
+            created_at: now - chrono::Duration::hours(2),
+            updated_at: now,
+        };
+        let wh_refund_failed = vec![WebhookInboxRecord {
+            id: 1,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_rf_fail".to_string(),
+            event_type: "RefundFailed".to_string(),
+            payment_id: Some("pay_rf_fail".to_string()),
+            refund_id: Some("rfnd_1".to_string()),
+            payload: serde_json::json!({"event": "refund.failed"}),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_pay_fail = OutcomeEvaluationRecord::new_pending(
+            "inv_rf_fail".to_string(),
+            "merchant_a".to_string(),
+            "pay_rf_fail".to_string(),
+            "razorpay".to_string(),
+            "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["webhook:evt_rf_fail".to_string()]);
+        let err_rf_fail = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_pay_fail,
+            &attempt_fail,
+            None,
+            &wh_refund_failed,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_rf_fail.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 2. Empty supporting_evidence_refs NEVER satisfies PAYMENT_FAILED_AT_PROVIDER even with valid PaymentFailed event
+        let wh_pay_failed = vec![WebhookInboxRecord {
+            id: 2,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_pay_fail_ok".to_string(),
+            event_type: "PaymentFailed".to_string(),
+            payment_id: Some("pay_rf_fail".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({"event": "payment.failed"}),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_empty_refs = OutcomeEvaluationRecord::new_pending(
+            "inv_empty_refs".to_string(),
+            "merchant_a".to_string(),
+            "pay_rf_fail".to_string(),
+            "razorpay".to_string(),
+            "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        ); // empty supporting_evidence_refs!
+        let err_empty_refs = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_empty_refs,
+            &attempt_fail,
+            None,
+            &wh_pay_failed,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_empty_refs.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 3. Promptly delivered RefundProcessed webhook arriving 2h after attempt.created_at MUST NOT verify WEBHOOK_DELAYED_OR_MISSING
+        let attempt_old = PaymentAttemptRecord {
+            transaction_id: "tx_old".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_old".to_string()),
+            amount_minor: 50000,
+            currency: "INR".to_string(),
+            state: "captured".to_string(),
+            created_at: now - chrono::Duration::hours(2),
+            updated_at: now,
+        };
+        let wh_prompt_refund = vec![WebhookInboxRecord {
+            id: 3,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_rf_prompt".to_string(),
+            event_type: "RefundProcessed".to_string(),
+            payment_id: Some("pay_old".to_string()),
+            refund_id: Some("rfnd_prompt".to_string()),
+            payload: serde_json::json!({
+                "occurred_at": (now - chrono::Duration::seconds(5)).to_rfc3339()
+            }),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_prompt_rf = OutcomeEvaluationRecord::new_pending(
+            "inv_prompt_rf".to_string(),
+            "merchant_a".to_string(),
+            "pay_old".to_string(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_rf_prompt".to_string()]);
+        let err_prompt_rf = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_prompt_rf,
+            &attempt_old,
+            None,
+            &wh_prompt_refund,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_prompt_rf.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 4. Payment webhook WITHOUT trustworthy occurred_at in payload fails closed (Pending)
+        let wh_no_ts = vec![WebhookInboxRecord {
+            id: 4,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_no_ts".to_string(),
+            event_type: "PaymentCaptured".to_string(),
+            payment_id: Some("pay_old".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({"event": "payment.captured"}),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_no_ts = OutcomeEvaluationRecord::new_pending(
+            "inv_no_ts".to_string(),
+            "merchant_a".to_string(),
+            "pay_old".to_string(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_no_ts".to_string()]);
+        assert_eq!(
+            AuthoritativeOutcomeProof::from_authoritative_records(
+                &scope_for("merchant_a"),
+                &eval_no_ts,
+                &attempt_old,
+                None,
+                &wh_no_ts,
+                &[],
+            )
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        // 5. Genuinely delayed payment webhook (occurred_at 10m before received_at) with explicit citation -> verified
+        let wh_genuinely_delayed = vec![WebhookInboxRecord {
+            id: 5,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_real_delay".to_string(),
+            event_type: "PaymentCaptured".to_string(),
+            payment_id: Some("pay_old".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({
+                "created_at": (now - chrono::Duration::minutes(10)).timestamp()
+            }),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now,
+            processed_at: Some(now),
+        }];
+        let eval_real_delay = OutcomeEvaluationRecord::new_pending(
+            "inv_real_delay".to_string(),
+            "merchant_a".to_string(),
+            "pay_old".to_string(),
+            "razorpay".to_string(),
+            "WEBHOOK_DELAYED_OR_MISSING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_real_delay".to_string()]);
+        let proof_delay = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_real_delay,
+            &attempt_old,
+            None,
+            &wh_genuinely_delayed,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(proof_delay.accuracy(), OutcomeAccuracy::Correct);
+
+        // 6. Discrepancy provenance: arbitrary provider_observed:failed rejected; actual PaymentEntity(Captured) + Attempt(authorized) accepted
+        let attempt_disc = PaymentAttemptRecord {
+            transaction_id: "tx_disc2".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_disc2".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "authorized".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entity_disc = PaymentEntity {
+            payment_id: "pay_disc2".to_string(),
+            state: PaymentState::Captured,
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec![],
+            refunds: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let eval_arb_obs = OutcomeEvaluationRecord::new_pending(
+            "inv_arb_obs".to_string(),
+            "merchant_a".to_string(),
+            "pay_disc2".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_STATE_DISCREPANCY".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec![
+            "state:captured".to_string(),
+            "provider_observed:failed".to_string(),
+        ]);
+        assert_eq!(
+            AuthoritativeOutcomeProof::from_authoritative_records(
+                &scope_for("merchant_a"),
+                &eval_arb_obs,
+                &attempt_disc,
+                Some(&entity_disc),
+                &[],
+                &[],
+            )
+            .unwrap_err()
+            .category,
+            InferenceErrorCategory::InvalidResponse
+        );
+
+        let eval_exact_disc = OutcomeEvaluationRecord::new_pending(
+            "inv_exact_disc".to_string(),
+            "merchant_a".to_string(),
+            "pay_disc2".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_STATE_DISCREPANCY".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec![
+            "state:captured".to_string(),
+            "attempt_state:authorized".to_string(),
+        ]);
+        let proof_disc = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_exact_disc,
+            &attempt_disc,
+            Some(&entity_disc),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(proof_disc.accuracy(), OutcomeAccuracy::Correct);
+    }
 }

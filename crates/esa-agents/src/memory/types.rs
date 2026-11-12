@@ -442,14 +442,39 @@ impl AuthoritativeOutcomeProof {
         let mut provider_failed_event_ids = HashSet::new();
 
         for ev in inbox_events {
-            if ev
-                .received_at
-                .signed_duration_since(attempt.created_at)
-                .num_seconds()
-                > 300
-            {
-                delayed_event_ids.insert(ev.provider_event_id.clone());
+            // Require exact payment & provider ownership and Processed status
+            let belongs_to_payment = ev.provider.eq_ignore_ascii_case(&attempt.provider)
+                && ev.payment_id.as_deref() == Some(eval.payment_reference.as_str());
+            if !belongs_to_payment {
+                continue;
             }
+
+            let parsed_event = esa_state::parse_event_type(&ev.event_type);
+            let is_refund_event = matches!(
+                parsed_event,
+                Some(
+                    esa_core::events::PaymentEventType::RefundCreated
+                        | esa_core::events::PaymentEventType::RefundProcessed
+                        | esa_core::events::PaymentEventType::RefundFailed
+                        | esa_core::events::PaymentEventType::RefundSpeedChanged
+                )
+            );
+
+            // Delayed-webhook verification: require trustworthy provider event occurrence timestamp in payload
+            // and exclude refund lifecycle events. Fail closed if no trustworthy occurred_at timestamp exists.
+            if ev.status == esa_state::WebhookStatus::Processed && !is_refund_event {
+                if let Some(occurred_at) = extract_provider_event_occurred_at(&ev.payload) {
+                    if ev
+                        .received_at
+                        .signed_duration_since(occurred_at)
+                        .num_seconds()
+                        > 300
+                    {
+                        delayed_event_ids.insert(ev.provider_event_id.clone());
+                    }
+                }
+            }
+
             let et = ev.event_type.to_ascii_lowercase();
             let err_msg = ev
                 .error_message
@@ -468,9 +493,11 @@ impl AuthoritativeOutcomeProof {
             if is_provider_timeout_or_outage {
                 provider_timeout_event_ids.insert(ev.provider_event_id.clone());
             }
-            let is_provider_failure_event = (et.contains("failed") || et.contains("failure"))
-                && ev.status != esa_state::WebhookStatus::Failed;
-            if is_provider_failure_event {
+
+            // Exact recognized payment-failure event type + Processed status (never RefundFailed or local Failed)
+            if ev.status == esa_state::WebhookStatus::Processed
+                && parsed_event == Some(esa_core::events::PaymentEventType::PaymentFailed)
+            {
                 provider_failed_event_ids.insert(ev.provider_event_id.clone());
             }
         }
@@ -507,14 +534,11 @@ impl AuthoritativeOutcomeProof {
 
         let cited = &eval.supporting_evidence_refs;
         let has_cited_match = |prefix: &str, valid_ids: &HashSet<String>| {
-            if cited.is_empty() {
-                !valid_ids.is_empty()
-            } else {
-                cited.iter().any(|r| {
+            !cited.is_empty()
+                && cited.iter().any(|r| {
                     r.strip_prefix(prefix)
                         .is_some_and(|id| valid_ids.contains(id))
                 })
-            }
         };
 
         // Diagnosis-level verification against specific authoritative evidence (never terminal state alone)
@@ -570,8 +594,13 @@ impl AuthoritativeOutcomeProof {
             }
             "PROVIDER_STATE_DISCREPANCY" => {
                 let attempt_canon = CanonicalPaymentState::from_attempt_state(&attempt.state);
-                if payment_entity.is_none()
-                    || attempt_canon == CanonicalPaymentState::Unknown
+                let Some(pe) = payment_entity else {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "PROVIDER_STATE_DISCREPANCY requires durable PaymentEntity; keeping evaluation pending",
+                    ));
+                };
+                if attempt_canon == CanonicalPaymentState::Unknown
                     || attempt_canon == authoritative_state
                 {
                     return Err(InferenceError::new(
@@ -580,26 +609,31 @@ impl AuthoritativeOutcomeProof {
                     ));
                 }
                 let expected_state_ref = format!("state:{}", authoritative_state.as_str());
-                let expected_payment_ref = format!("payment:{}", eval.payment_reference);
+                let expected_payment_ref = format!("payment:{}", pe.payment_id);
                 let expected_attempt_ref = format!("attempt_state:{}", attempt.state.trim());
                 let expected_attempt_canon_ref =
                     format!("attempt_state:{}", attempt_canon.as_str());
 
-                let cites_auth = cited
+                // Reject arbitrary provider_observed:<state> unless independently persisted;
+                // require exact match to actual PaymentEntity state and persisted PaymentAttemptRecord state.
+                let cites_auth_state = cited.iter().any(|r| r == &expected_state_ref);
+                let cites_wrong_payment = cited
                     .iter()
-                    .any(|r| r == &expected_state_ref || r == &expected_payment_ref);
-                let cites_conflict = cited.iter().any(|r| {
-                    r == &expected_attempt_ref
-                        || r == &expected_attempt_canon_ref
-                        || r.strip_prefix("provider_observed:").is_some_and(|obs| {
-                            let c = CanonicalPaymentState::from_attempt_state(obs);
-                            c != CanonicalPaymentState::Unknown && c != authoritative_state
-                        })
-                });
-                if !cites_auth || !cites_conflict {
+                    .any(|r| r.starts_with("payment:") && r != &expected_payment_ref);
+                let cites_actual_attempt_conflict = cited
+                    .iter()
+                    .any(|r| r == &expected_attempt_ref || r == &expected_attempt_canon_ref);
+                let cites_unverified_observed =
+                    cited.iter().any(|r| r.starts_with("provider_observed:"));
+
+                if !cites_auth_state
+                    || cites_wrong_payment
+                    || !cites_actual_attempt_conflict
+                    || cites_unverified_observed
+                {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
-                        "PROVIDER_STATE_DISCREPANCY evidence refs do not match the actual conflicting authoritative and attempt/observed states; keeping evaluation pending",
+                        "PROVIDER_STATE_DISCREPANCY evidence refs must match the actual persisted PaymentEntity state and conflicting PaymentAttemptRecord state; keeping evaluation pending",
                     ));
                 }
                 OutcomeAccuracy::Correct
@@ -711,4 +745,34 @@ impl AuthoritativeOutcomeProof {
     pub fn verified_resolution(&self) -> &str {
         &self.verified_resolution
     }
+}
+
+/// Extracts a trustworthy provider event occurrence timestamp from a stored webhook payload.
+/// Returns `None` if no valid occurrence timestamp is present (fail-closed).
+fn extract_provider_event_occurred_at(payload: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let parse_ts = |val: &serde_json::Value| -> Option<DateTime<Utc>> {
+        if let Some(secs) = val.as_i64() {
+            return DateTime::from_timestamp(secs, 0);
+        }
+        if let Some(s) = val.as_str() {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s.trim()) {
+                return Some(dt.with_timezone(&Utc));
+            }
+        }
+        None
+    };
+
+    payload
+        .get("occurred_at")
+        .and_then(parse_ts)
+        .or_else(|| payload.get("event_time").and_then(parse_ts))
+        .or_else(|| payload.get("created_at").and_then(parse_ts))
+        .or_else(|| {
+            payload
+                .get("payload")
+                .and_then(|p| p.get("payment"))
+                .and_then(|p| p.get("entity"))
+                .and_then(|e| e.get("created_at"))
+                .and_then(parse_ts)
+        })
 }
