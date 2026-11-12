@@ -89,6 +89,43 @@ impl OllamaClient {
         }
     }
 
+    pub fn with_cost_tracker_no_proxy(
+        base_url: String,
+        model: String,
+        cost_tracker: Arc<AICostTracker>,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(25))
+            .build()
+            .expect("failed to build sandbox-safe Ollama HTTP client");
+
+        Self {
+            base_url,
+            model,
+            client,
+            token_counter: Arc::new(TokenCounter::new()),
+            cost_tracker,
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            consecutive_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_open_until: Arc::new(Mutex::new(None)),
+            response_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn token_counter(&self) -> Arc<TokenCounter> {
+        Arc::clone(&self.token_counter)
+    }
+
     pub async fn generate(&self, prompt: String) -> Result<OllamaResponse> {
         self.generate_with_agent("unknown", prompt).await
     }
@@ -493,6 +530,10 @@ impl TelemetryRetentionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceMetrics {
     pub request_id: String,
+    #[serde(default = "default_provider_name")]
+    pub provider: String,
+    #[serde(default = "default_execution_scope")]
+    pub execution_scope: String,
     pub merchant_id: Option<String>,
     pub model: String,
     pub agent_id: String,
@@ -505,11 +546,23 @@ pub struct InferenceMetrics {
     pub response_length: usize,
     pub input_tokens: usize,
     pub output_tokens: usize,
+    #[serde(default)]
+    pub queue_wait_ms: Option<u64>,
+    #[serde(default)]
+    pub gpu_execution_ms: Option<u64>,
     pub latency_ms: u64,
     pub cache_hit: bool,
     pub timestamp: DateTime<Utc>,
     pub error_category: Option<String>,
     pub error: Option<String>,
+}
+
+fn default_provider_name() -> String {
+    "ollama".to_string()
+}
+
+fn default_execution_scope() -> String {
+    "system".to_string()
 }
 
 impl InferenceMetrics {
@@ -530,9 +583,13 @@ pub struct AggregatedCostMetrics {
     pub total_tokens: usize,
     pub total_cost_usd: f64,
     pub average_latency_ms: f64,
+    pub avg_queue_wait_ms: Option<f64>,
+    pub avg_gpu_execution_ms: Option<f64>,
     pub cache_hit_rate: f64,
     pub requests_per_agent: HashMap<String, usize>,
     pub cost_per_agent: HashMap<String, f64>,
+    pub requests_per_provider: HashMap<String, usize>,
+    pub cost_per_provider: HashMap<String, f64>,
     pub time_window_start: DateTime<Utc>,
     pub time_window_end: DateTime<Utc>,
 }
@@ -585,6 +642,43 @@ impl AICostTracker {
         latency_ms: u64,
         error: Option<String>,
     ) -> String {
+        let scope = if merchant_id.is_some() {
+            "merchant_scoped"
+        } else {
+            "system"
+        };
+        self.record_provider_inference(
+            "ollama",
+            scope,
+            model,
+            agent_id,
+            merchant_id,
+            prompt,
+            response,
+            latency_ms,
+            None,
+            None,
+            None,
+            error,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_provider_inference(
+        &self,
+        provider: &str,
+        execution_scope: &str,
+        model: &str,
+        agent_id: &str,
+        merchant_id: Option<&str>,
+        prompt: &str,
+        response: &str,
+        latency_ms: u64,
+        queue_wait_ms: Option<u64>,
+        gpu_execution_ms: Option<u64>,
+        cache_hit_override: Option<bool>,
+        error: Option<String>,
+    ) -> String {
         let request_id = Uuid::new_v4().to_string();
         let prompt_redaction = crate::privacy::redact_sensitive_text(prompt);
         let stripped_response = crate::privacy::strip_chain_of_thought(response);
@@ -593,25 +687,35 @@ impl AICostTracker {
             prompt_redaction.redaction_count > 0 || response_redaction.redaction_count > 0;
 
         let prompt_hash = self.hash_prompt(&prompt_redaction.redacted);
-        let cache_scope_key = format!("{}:{}", merchant_id.unwrap_or("__global__"), prompt_hash);
+        let cache_scope_key = format!(
+            "{}:{}:{}",
+            provider,
+            merchant_id.unwrap_or("__global__"),
+            prompt_hash
+        );
 
-        let cache_hit = if error.is_none() {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some((cached_response, _)) = cache.get(&cache_scope_key) {
-                cached_response == &response_redaction.redacted
-            } else {
-                cache.insert(
-                    cache_scope_key,
-                    (response_redaction.redacted.clone(), Utc::now()),
-                );
-                false
+        let cache_hit = match cache_hit_override {
+            Some(v) => v,
+            None => {
+                if error.is_none() {
+                    let mut cache = self.cache.lock().unwrap();
+                    if let Some((cached_response, _)) = cache.get(&cache_scope_key) {
+                        cached_response == &response_redaction.redacted
+                    } else {
+                        cache.insert(
+                            cache_scope_key,
+                            (response_redaction.redacted.clone(), Utc::now()),
+                        );
+                        false
+                    }
+                } else {
+                    false
+                }
             }
-        } else {
-            false
         };
 
         let input_tokens = self.estimate_tokens(&prompt_redaction.redacted);
-        let output_tokens = if error.is_none() {
+        let output_tokens = if error.is_none() && !response_redaction.redacted.is_empty() {
             self.estimate_tokens(&response_redaction.redacted)
         } else {
             0
@@ -648,6 +752,8 @@ impl AICostTracker {
 
         let metric = InferenceMetrics {
             request_id: request_id.clone(),
+            provider: provider.to_string(),
+            execution_scope: execution_scope.to_string(),
             merchant_id: merchant_id.map(|s| s.to_string()),
             model: model.to_string(),
             agent_id: agent_id.to_string(),
@@ -660,6 +766,8 @@ impl AICostTracker {
             response_length: response.len(),
             input_tokens,
             output_tokens,
+            queue_wait_ms,
+            gpu_execution_ms,
             latency_ms,
             cache_hit,
             timestamp: Utc::now(),
@@ -727,6 +835,8 @@ impl AICostTracker {
 
         let mut requests_per_agent = HashMap::new();
         let mut cost_per_agent = HashMap::new();
+        let mut requests_per_provider = HashMap::new();
+        let mut cost_per_provider = HashMap::new();
 
         for metric in &filtered_metrics {
             *requests_per_agent
@@ -734,7 +844,33 @@ impl AICostTracker {
                 .or_insert(0) += 1;
             *cost_per_agent.entry(metric.agent_id.clone()).or_insert(0.0) +=
                 metric.estimated_cost_usd();
+            *requests_per_provider
+                .entry(metric.provider.clone())
+                .or_insert(0) += 1;
+            *cost_per_provider
+                .entry(metric.provider.clone())
+                .or_insert(0.0) += metric.estimated_cost_usd();
         }
+
+        let queue_waits: Vec<u64> = filtered_metrics
+            .iter()
+            .filter_map(|m| m.queue_wait_ms)
+            .collect();
+        let avg_queue_wait_ms = if queue_waits.is_empty() {
+            None
+        } else {
+            Some(queue_waits.iter().sum::<u64>() as f64 / queue_waits.len() as f64)
+        };
+
+        let gpu_execs: Vec<u64> = filtered_metrics
+            .iter()
+            .filter_map(|m| m.gpu_execution_ms)
+            .collect();
+        let avg_gpu_execution_ms = if gpu_execs.is_empty() {
+            None
+        } else {
+            Some(gpu_execs.iter().sum::<u64>() as f64 / gpu_execs.len() as f64)
+        };
 
         AggregatedCostMetrics {
             total_requests,
@@ -743,9 +879,13 @@ impl AICostTracker {
             total_tokens,
             total_cost_usd,
             average_latency_ms,
+            avg_queue_wait_ms,
+            avg_gpu_execution_ms,
             cache_hit_rate,
             requests_per_agent,
             cost_per_agent,
+            requests_per_provider,
+            cost_per_provider,
             time_window_start: window_start,
             time_window_end: now,
         }
@@ -934,6 +1074,8 @@ mod tests {
     fn test_inference_metrics_cost() {
         let metric = InferenceMetrics {
             request_id: "test_123".to_string(),
+            provider: "ollama".to_string(),
+            execution_scope: "merchant_scoped".to_string(),
             merchant_id: Some("merchant_01".to_string()),
             model: "llama2".to_string(),
             agent_id: "monitor".to_string(),
@@ -946,6 +1088,8 @@ mod tests {
             response_length: 50,
             input_tokens: 25,
             output_tokens: 12,
+            queue_wait_ms: None,
+            gpu_execution_ms: None,
             latency_ms: 150,
             cache_hit: false,
             timestamp: Utc::now(),

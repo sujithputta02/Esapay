@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(test)]
 use esa_agents::OllamaClient;
 use esa_cashfree::{CashfreeConfig, CashfreeProvider};
 use esa_core::*;
@@ -597,12 +598,10 @@ async fn main() -> anyhow::Result<()> {
     let audit_store = Arc::new(AuditStore::new());
     let broadcaster = Arc::new(TelemetryBroadcaster::new());
 
-    // Initialize Ollama client
-    let ollama_url =
-        std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let ollama_model =
-        std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "mistral:latest".to_string());
-    let ollama_client = OllamaClient::new(ollama_url, ollama_model);
+    // Initialize AI inference provider (Ollama by default, or Hugging Face ZeroGPU when configured)
+    let ai_cost_tracker = Arc::new(esa_agents::AICostTracker::new());
+    let inference_provider =
+        esa_agents::build_inference_provider_from_env(Arc::clone(&ai_cost_tracker), false);
 
     let agent_status = Arc::new(std::sync::RwLock::new(AgentStatusState::default()));
 
@@ -688,12 +687,13 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    // Initialize orchestrator
-    let orchestrator = Arc::new(EsaOrchestrator::new(
+    // Initialize orchestrator with configured InferenceProvider
+    let orchestrator = Arc::new(EsaOrchestrator::new_with_provider(
         Arc::clone(&state_fabric),
-        ollama_client.clone(),
+        Arc::clone(&inference_provider),
         Arc::clone(&audit_store),
         Some(event_handler),
+        esa_agents::FluidReasonerClient::default_local(),
     ));
 
     // Start background orchestration loop - AUTONOMOUS RECOVERY
@@ -913,7 +913,7 @@ async fn main() -> anyhow::Result<()> {
     let app_state = AppState {
         state_fabric,
         orchestrator,
-        ollama_client,
+        inference_provider,
         fluid_reasoner,
         broadcaster: Arc::clone(&broadcaster),
         audit_store,
@@ -1281,7 +1281,7 @@ pub async fn request_correlation_and_tracing_middleware(
 pub(crate) struct AppState {
     pub(crate) state_fabric: Arc<StateFabric>,
     pub(crate) orchestrator: Arc<EsaOrchestrator>,
-    pub(crate) ollama_client: OllamaClient,
+    pub(crate) inference_provider: Arc<dyn esa_agents::InferenceProvider>,
     pub(crate) fluid_reasoner: esa_agents::FluidReasonerClient,
     pub(crate) broadcaster: Arc<TelemetryBroadcaster>,
     pub(crate) audit_store: Arc<AuditStore>,
@@ -4034,7 +4034,7 @@ async fn get_token_metrics(
             "Caller lacks required 'telemetry:admin' scope".into(),
         ));
     }
-    let stats = state.ollama_client.get_token_stats();
+    let stats = state.inference_provider.token_stats();
     Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
@@ -4049,8 +4049,9 @@ fn build_agent_activity_for_caller(
         Some(caller.merchant_id.as_str())
     };
     let metrics = state
-        .ollama_client
-        .get_recent_inference_metrics_for_merchant(scope_merchant, 20);
+        .inference_provider
+        .cost_tracker()
+        .get_recent_metrics_for_merchant(scope_merchant, 20);
 
     let ai_thinking: Vec<serde_json::Value> = metrics
         .into_iter()
@@ -4058,6 +4059,8 @@ fn build_agent_activity_for_caller(
         .map(|m| {
             serde_json::json!({
                 "request_id": m.request_id,
+                "provider": m.provider,
+                "execution_scope": m.execution_scope,
                 "agent": m.agent_id,
                 "merchant_id": m.merchant_id,
                 "model": m.model,
@@ -4068,6 +4071,8 @@ fn build_agent_activity_for_caller(
                 "evidence_refs": m.evidence_refs,
                 "input_tokens": m.input_tokens,
                 "output_tokens": m.output_tokens,
+                "queue_wait_ms": m.queue_wait_ms,
+                "gpu_execution_ms": m.gpu_execution_ms,
                 "latency_ms": m.latency_ms,
                 "cache_hit": m.cache_hit,
                 "error_category": m.error_category,
@@ -4603,17 +4608,22 @@ async fn get_ai_costs(
             "Caller lacks required 'telemetry:admin' scope".into(),
         ));
     }
-    let cost_tracker = state.ollama_client.get_cost_tracker();
+    let cost_tracker = state.inference_provider.cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
 
     Ok(Json(serde_json::json!({
+        "active_provider": state.inference_provider.provider_kind().as_str(),
         "total_tokens": aggregated.total_tokens,
         "total_requests": aggregated.total_requests,
         "successful_requests": aggregated.successful_requests,
         "failed_requests": aggregated.failed_requests,
         "avg_latency_ms": aggregated.average_latency_ms,
+        "avg_queue_wait_ms": aggregated.avg_queue_wait_ms,
+        "avg_gpu_execution_ms": aggregated.avg_gpu_execution_ms,
         "cache_hit_rate": aggregated.cache_hit_rate,
         "total_cost_usd": aggregated.total_cost_usd,
+        "requests_per_provider": aggregated.requests_per_provider,
+        "cost_per_provider": aggregated.cost_per_provider,
         "time_window_start": aggregated.time_window_start,
         "time_window_end": aggregated.time_window_end
     })))
@@ -4634,7 +4644,7 @@ async fn get_costs_per_agent(
             "Caller lacks required 'telemetry:admin' scope".into(),
         ));
     }
-    let cost_tracker = state.ollama_client.get_cost_tracker();
+    let cost_tracker = state.inference_provider.cost_tracker();
     let aggregated = cost_tracker.get_aggregated_metrics(None);
 
     // Get per-agent stats from aggregated metrics
@@ -6265,6 +6275,8 @@ mod integration_tests {
             "http://localhost:11434".to_string(),
             "deepseek-r1:1.5b".to_string(),
         );
+        let inference_provider: Arc<dyn esa_agents::InferenceProvider> =
+            Arc::new(esa_agents::OllamaProvider::new(ollama_client.clone()));
         let orchestrator = Arc::new(EsaOrchestrator::new_without_proxy(
             Arc::clone(&state_fabric),
             ollama_client.clone(),
@@ -6284,7 +6296,7 @@ mod integration_tests {
         AppState {
             state_fabric,
             orchestrator,
-            ollama_client,
+            inference_provider,
             fluid_reasoner,
             broadcaster,
             audit_store,
@@ -14696,7 +14708,7 @@ mod integration_tests {
         std::env::set_var("ESA_ADMIN_API_KEY", "admin-secret-key-activity-test");
 
         let state = create_test_state();
-        let tracker = state.ollama_client.get_cost_tracker();
+        let tracker = state.inference_provider.cost_tracker();
 
         tracker.record_inference_with_scope(
             "deepseek-r1:1.5b",
@@ -14784,6 +14796,66 @@ mod integration_tests {
         assert!(!serialized.contains("alpha@example.com"));
         assert!(!serialized.contains("hidden cot alpha"));
 
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_hf_provider_unavailability_never_blocks_checkout_and_reports_provider_metrics() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        clear_mode_env_vars();
+        std::env::set_var("ESA_ENABLE_SIMULATED_CHECKOUT", "true");
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-secret-key-hf-p2-test");
+
+        let mut state = create_test_state();
+        let tracker = state.inference_provider.cost_tracker();
+        let hf_cfg = esa_agents::AiProviderConfig {
+            provider: esa_agents::ProviderKind::HfZerogpu,
+            hf_url: Some("https://sujithputta-esa-ai-brain.hf.space".to_string()),
+            hf_token: Some("hf_dummy_unit_test_token_12345".to_string()),
+            ..Default::default()
+        };
+        state.inference_provider =
+            esa_agents::build_inference_provider(&hf_cfg, Arc::clone(&tracker), true);
+
+        let merchant_key = insert_test_merchant_key(&state, "merchant_hf_p2_checkout").await;
+        let app = build_app(state);
+
+        // 1. Checkout succeeds normally even when Hugging Face ZeroGPU is unconfigured/unavailable
+        let req_checkout = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("x-api-key", &merchant_key)
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "amount_minor": 10000,
+                    "currency": "INR",
+                    "gateway": "razorpay"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp_checkout = app.clone().oneshot(req_checkout).await.unwrap();
+        assert_eq!(resp_checkout.status(), StatusCode::OK);
+
+        // 2. /api/v1/costs/ai distinguishes active_provider = hf_zerogpu
+        let req_costs = Request::builder()
+            .method("GET")
+            .uri("/api/v1/costs/ai")
+            .header("x-api-key", "admin-secret-key-hf-p2-test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_costs = app.oneshot(req_costs).await.unwrap();
+        assert_eq!(resp_costs.status(), StatusCode::OK);
+        let costs_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_costs.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(costs_json["active_provider"], "hf_zerogpu");
+
+        std::env::remove_var("ESA_ENABLE_SIMULATED_CHECKOUT");
         std::env::remove_var("ESA_ADMIN_API_KEY");
     }
 }

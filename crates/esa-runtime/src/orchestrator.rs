@@ -63,6 +63,22 @@ impl EsaOrchestrator {
         event_handler: Option<RuntimeEventHandler>,
         fluid_client: FluidReasonerClient,
     ) -> Self {
+        Self::new_with_provider(
+            state_fabric,
+            Arc::new(OllamaProvider::new(ollama_client)),
+            audit_store,
+            event_handler,
+            fluid_client,
+        )
+    }
+
+    pub fn new_with_provider(
+        state_fabric: Arc<StateFabric>,
+        provider: Arc<dyn InferenceProvider>,
+        audit_store: Arc<AuditStore>,
+        event_handler: Option<RuntimeEventHandler>,
+        fluid_client: FluidReasonerClient,
+    ) -> Self {
         let intent_manager = Arc::new(IntentManager::new());
         let policy_engine = Arc::new(PolicyEngine::new(
             Arc::clone(&state_fabric),
@@ -77,7 +93,7 @@ impl EsaOrchestrator {
         Self {
             monitor_agent: Arc::new(MonitorAgent::new(Arc::clone(&state_fabric))),
             diagnosis_agent: Arc::new(
-                DiagnosisAgent::new(ollama_client).with_fluid_reasoner(fluid_client),
+                DiagnosisAgent::with_provider(provider).with_fluid_reasoner(fluid_client),
             ),
             planning_agent,
             safety_agent: Arc::new(SafetyAgent::new()),
