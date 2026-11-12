@@ -101,3 +101,4 @@ The mismatch between the old README (which claimed Ollama-compatible `/api/gener
 ### Known Limitations
 - Live authenticated inference against a private ZeroGPU Space was not executed in CI/sandbox because no `HF_AI_BRAIN_TOKEN` secret is provisioned in the local environment.
 - `AICostTracker` remains process-local in-memory telemetry (persistent cross-node AI memory/storage is deferred to Phase 3).
+

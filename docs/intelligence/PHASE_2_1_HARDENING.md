@@ -40,3 +40,4 @@
 
 - Live Space startup and CUDA execution on Hugging Face ZeroGPU hardware have not been executed locally (local checks used `ESA_HF_MOCK_MODE=true` and mocked HTTP/SSE servers).
 - Deployment requires a private Hugging Face Space with Gradio `5.20.0`, ZeroGPU-provided PyTorch `>=2.8.0`, and backend-only `HF_AI_BRAIN_TOKEN` (`sync: false` in `render.yaml`).
+
