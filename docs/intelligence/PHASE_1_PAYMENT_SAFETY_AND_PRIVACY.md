@@ -84,3 +84,4 @@
    - Server-side `HF_AI_BRAIN_TOKEN` injection only (never exposed to `frontend/`).
    - Strict provider abstraction (`ModelProvider` trait) routing both Ollama and Hugging Face ZeroGPU responses through `OutputValidator` and `privacy::redact_sensitive_text`.
    - Explicit timeouts, queueing/concurrency caps, and graceful fallback to deterministic rules when ZeroGPU quota is exhausted or cold-starting so payment execution is never blocked.
+
