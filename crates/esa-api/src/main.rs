@@ -909,6 +909,27 @@ async fn main() -> anyhow::Result<()> {
     };
     api_keys::set_global_sandbox_key_store(Arc::clone(&sandbox_keys));
 
+    // Initialize Phase 3 Payment Memory Store & Payment Intelligence Agent
+    let memory_store: Arc<dyn esa_agents::PaymentMemoryStore> =
+        if let Some(pool) = webhook_store.pg_pool() {
+            Arc::new(esa_agents::PostgresPaymentMemoryStore::new(pool.clone()))
+        } else {
+            Arc::new(esa_agents::InMemoryPaymentMemoryStore::new())
+        };
+    memory_store.init_schema().await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to initialize payment memory store schema: {}",
+            e.message
+        )
+    })?;
+    esa_agents::seed_system_knowledge(memory_store.as_ref())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to seed payment system knowledge: {}", e.message))?;
+    let payment_intelligence = Arc::new(esa_agents::PaymentIntelligenceAgent::new(
+        Arc::clone(&inference_provider),
+        esa_agents::MemoryRetriever::new(Arc::clone(&memory_store)),
+    ));
+
     // Create app state
     let app_state = AppState {
         state_fabric,
@@ -930,6 +951,8 @@ async fn main() -> anyhow::Result<()> {
         order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sandbox_keys,
+        memory_store,
+        payment_intelligence,
     };
 
     let app = build_app(app_state);
@@ -1152,6 +1175,39 @@ fn build_app(app_state: AppState) -> Router {
         .route("/api/v1/intent/active", get(get_active_intents))
         .route("/api/intent/violations", get(get_constraint_violations))
         .route("/api/v1/intent/violations", get(get_constraint_violations))
+        // Phase 3 Payment Intelligence & Persistent Memory (read-only)
+        .route(
+            "/api/intelligence/payments/summary",
+            get(get_intelligence_payments_summary),
+        )
+        .route(
+            "/api/v1/intelligence/payments/summary",
+            get(get_intelligence_payments_summary),
+        )
+        .route(
+            "/api/intelligence/payments/investigate",
+            post(investigate_payment_intelligence),
+        )
+        .route(
+            "/api/v1/intelligence/payments/investigate",
+            post(investigate_payment_intelligence),
+        )
+        .route(
+            "/api/intelligence/payments/providers/health",
+            get(get_intelligence_providers_health),
+        )
+        .route(
+            "/api/v1/intelligence/payments/providers/health",
+            get(get_intelligence_providers_health),
+        )
+        .route(
+            "/api/intelligence/memory/recent",
+            get(get_intelligence_memory_recent),
+        )
+        .route(
+            "/api/v1/intelligence/memory/recent",
+            get(get_intelligence_memory_recent),
+        )
         // API Key Management & Sandbox Access
         .route(
             "/api/v1/keys/generate-sandbox",
@@ -1304,6 +1360,8 @@ pub(crate) struct AppState {
     /// Concurrency control for benchmark execution to prevent duplicate concurrent runs.
     pub(crate) benchmark_running: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sandbox_keys: Arc<api_keys::SandboxKeyStore>,
+    pub(crate) memory_store: Arc<dyn esa_agents::PaymentMemoryStore>,
+    pub(crate) payment_intelligence: Arc<esa_agents::PaymentIntelligenceAgent>,
 }
 
 struct BenchmarkGuard(Arc<std::sync::atomic::AtomicBool>);
@@ -6261,6 +6319,338 @@ async fn universal_checkout(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3: Read-Only Payment Intelligence & Persistent Memory Endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct IntelligenceSummaryQuery {
+    merchant_id: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvestigatePaymentRequest {
+    transaction_id: Option<String>,
+    payment_reference: Option<String>,
+    question: Option<String>,
+    merchant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryRecentQuery {
+    merchant_id: Option<String>,
+    memory_type: Option<String>,
+    limit: Option<usize>,
+}
+
+fn resolve_intelligence_merchant<'a>(
+    caller: &'a api_keys::CallerIdentity,
+    requested_merchant_id: Option<&'a str>,
+) -> Result<String, AppError> {
+    let caller_mid = caller.merchant_id.trim();
+    if let Some(req_mid) = requested_merchant_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if req_mid != caller_mid && !caller.is_admin() {
+            return Err(AppError::Forbidden(
+                "Cross-merchant intelligence access is restricted to administrators".into(),
+            ));
+        }
+        return Ok(req_mid.to_string());
+    }
+    if caller_mid.is_empty() {
+        return Err(AppError::Forbidden(
+            "Caller has empty merchant scope".into(),
+        ));
+    }
+    Ok(caller_mid.to_string())
+}
+
+fn provider_health_for_name(state: &AppState, provider: &str) -> Option<ProviderHealth> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "razorpay" => state.razorpay.as_ref().map(|p| p.health()),
+        "cashfree" => state.cashfree.as_ref().map(|p| p.health()),
+        "payu" => state.payu.as_ref().map(|p| p.health()),
+        _ => None,
+    }
+}
+
+async fn get_intelligence_payments_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<IntelligenceSummaryQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for payment intelligence summary: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, query.merchant_id.as_deref())?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let attempts = state
+        .webhook_store
+        .list_payment_attempts_for_merchant(Some(&merchant_id), limit)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to list merchant attempts: {}", e)))?;
+
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut provider_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for att in &attempts {
+        let canon = esa_agents::CanonicalPaymentState::from_attempt_state(&att.state);
+        *state_counts.entry(canon.as_str().to_string()).or_insert(0) += 1;
+        *provider_counts
+            .entry(att.provider.to_ascii_lowercase())
+            .or_insert(0) += 1;
+    }
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "total_attempts": attempts.len(),
+        "state_counts": state_counts,
+        "provider_counts": provider_counts,
+        "recent_attempts": attempts,
+        "inference_provider": state.inference_provider.provider_kind().as_str(),
+        "model_id": state.inference_provider.model_id(),
+        "read_only": true,
+    })))
+}
+
+async fn investigate_payment_intelligence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<InvestigatePaymentRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for payment investigation: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, req.merchant_id.as_deref())?;
+    let tx_id = req
+        .transaction_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let pay_ref = req
+        .payment_reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if tx_id.is_none() && pay_ref.is_none() {
+        return Err(AppError::BadRequest(
+            "Provide either transaction_id or payment_reference".into(),
+        ));
+    }
+
+    let attempts = state
+        .webhook_store
+        .list_payment_attempts_for_merchant(Some(&merchant_id), 200)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to query payment attempts: {}", e)))?;
+
+    let attempt = attempts
+        .into_iter()
+        .find(|a| {
+            tx_id.is_some_and(|t| a.transaction_id == t)
+                || pay_ref.is_some_and(|p| a.payment_reference.as_deref() == Some(p))
+        })
+        .ok_or_else(|| {
+            AppError::NotFound("Payment attempt not found within caller merchant scope".into())
+        })?;
+
+    let payment_entity = if let Some(ref pref) = attempt.payment_reference {
+        state
+            .webhook_store
+            .get_payment_record(pref)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to load payment record: {}", e)))?
+    } else {
+        None
+    };
+
+    let inbox_events = if let Some(ref pref) = attempt.payment_reference {
+        state
+            .webhook_store
+            .list_inbox_events_for_payment(pref, 50)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to load webhook inbox events: {}", e))
+            })?
+    } else {
+        Vec::new()
+    };
+
+    let refunds = if let Some(ref pref) = attempt.payment_reference {
+        state
+            .webhook_store
+            .list_refunds_for_payment(&attempt.provider, pref)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to load refund records: {}", e)))?
+    } else {
+        Vec::new()
+    };
+
+    let health = provider_health_for_name(&state, &attempt.provider);
+    let scope = esa_agents::ExecutionScope::MerchantScoped {
+        merchant_id: merchant_id.clone(),
+    };
+
+    let context = esa_agents::build_payment_intelligence_context(
+        &scope,
+        &attempt,
+        payment_entity.as_ref(),
+        &inbox_events,
+        &refunds,
+        health.as_ref(),
+        None,
+    )
+    .map_err(|e| match e.category {
+        esa_agents::InferenceErrorCategory::Forbidden => AppError::Forbidden(e.message),
+        esa_agents::InferenceErrorCategory::InvalidScope => AppError::BadRequest(e.message),
+        _ => AppError::Internal(e.message),
+    })?;
+
+    let report = state
+        .payment_intelligence
+        .investigate(&context, req.question.as_deref())
+        .await
+        .map_err(|e| AppError::Internal(format!("Payment investigation failed: {}", e.message)))?;
+
+    Ok(Json(serde_json::json!({
+        "context": context,
+        "report": report,
+        "read_only": true,
+    })))
+}
+
+async fn get_intelligence_providers_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for provider health intelligence: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let mut providers = Vec::new();
+    if let Some(ref rzp) = state.razorpay {
+        providers.push(rzp.health());
+    }
+    if let Some(ref cf) = state.cashfree {
+        providers.push(cf.health());
+    }
+    if let Some(ref pu) = state.payu {
+        providers.push(pu.health());
+    }
+
+    Ok(Json(serde_json::json!({
+        "providers": providers,
+        "inference_provider": state.inference_provider.provider_kind().as_str(),
+        "model_id": state.inference_provider.model_id(),
+        "read_only": true,
+    })))
+}
+
+async fn get_intelligence_memory_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryRecentQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
+        AppError::Unauthorized(format!(
+            "Authentication required for payment memory lookup: {}",
+            e
+        ))
+    })?;
+    if !caller.has_any_scope(&["payments:read"]) {
+        return Err(AppError::Forbidden(
+            "Caller lacks required 'payments:read' scope".into(),
+        ));
+    }
+
+    let merchant_id = resolve_intelligence_merchant(&caller, query.merchant_id.as_deref())?;
+    let limit = query.limit.unwrap_or(20).clamp(1, 50);
+
+    let memory_types = match query
+        .memory_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => {
+            let parsed = esa_agents::MemoryType::parse(raw)
+                .ok_or_else(|| AppError::BadRequest(format!("Unsupported memory_type: {}", raw)))?;
+            vec![parsed]
+        }
+        None => vec![
+            esa_agents::MemoryType::Episodic,
+            esa_agents::MemoryType::Semantic,
+            esa_agents::MemoryType::Procedural,
+        ],
+    };
+
+    let scope = if memory_types.iter().all(|t| {
+        matches!(
+            t,
+            esa_agents::MemoryType::Semantic | esa_agents::MemoryType::Procedural
+        )
+    }) {
+        esa_agents::ExecutionScope::System
+    } else {
+        esa_agents::ExecutionScope::MerchantScoped {
+            merchant_id: merchant_id.clone(),
+        }
+    };
+
+    let records = state
+        .memory_store
+        .query_memories(&esa_agents::MemoryQuery {
+            scope,
+            memory_types,
+            provider: None,
+            incident_category: None,
+            lifecycle_state: None,
+            since: None,
+            limit,
+        })
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to query payment memories: {}", e.message))
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "merchant_id": merchant_id,
+        "count": records.len(),
+        "records": records,
+        "read_only": true,
+    })))
+}
+
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod integration_tests {
@@ -6292,6 +6682,12 @@ mod integration_tests {
         );
         let rate_limiter = rate_limiter::ApiRateLimiter::new();
         let sandbox_keys = api_keys::get_global_sandbox_key_store();
+        let memory_store: Arc<dyn esa_agents::PaymentMemoryStore> =
+            Arc::new(esa_agents::InMemoryPaymentMemoryStore::new());
+        let payment_intelligence = Arc::new(esa_agents::PaymentIntelligenceAgent::new(
+            Arc::clone(&inference_provider),
+            esa_agents::MemoryRetriever::new(Arc::clone(&memory_store)),
+        ));
 
         AppState {
             state_fabric,
@@ -6313,6 +6709,8 @@ mod integration_tests {
             order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox_keys,
+            memory_store,
+            payment_intelligence,
         }
     }
 
@@ -14857,5 +15255,165 @@ mod integration_tests {
 
         std::env::remove_var("ESA_ENABLE_SIMULATED_CHECKOUT");
         std::env::remove_var("ESA_ADMIN_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_phase3_intelligence_endpoints_auth_isolation_and_read_only_safety() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-intel-test-key");
+        std::env::set_var("ESA_TEST_API_KEY", "merchant-a-intel-test-key");
+
+        let state = create_test_state();
+        esa_agents::seed_system_knowledge(state.memory_store.as_ref())
+            .await
+            .unwrap();
+
+        // Seed Merchant A and Merchant B payment attempts
+        state
+            .webhook_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_intel_a".to_string(),
+                merchant_id: "merchant_sandbox_01".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_a".to_string()),
+                payment_reference: Some("pay_a".to_string()),
+                amount_minor: 25000,
+                currency: "INR".to_string(),
+                state: "authorized".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        state
+            .webhook_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_intel_b".to_string(),
+                merchant_id: "merchant_b".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_b".to_string()),
+                payment_reference: Some("pay_b".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let app = build_app(state.clone());
+
+        // 1. Unauthenticated request is rejected (401)
+        let req_unauth = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/payments/summary")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_unauth = app.clone().oneshot(req_unauth).await.unwrap();
+        assert_eq!(resp_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Merchant A can read its own summary (sees only tx_intel_a)
+        let req_sum = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/payments/summary")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_sum = app.clone().oneshot(req_sum).await.unwrap();
+        assert_eq!(resp_sum.status(), StatusCode::OK);
+        let sum_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_sum.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sum_json["total_attempts"], 1);
+        assert_eq!(sum_json["read_only"], true);
+
+        // 3. Merchant A cannot request Merchant B's summary (403)
+        let req_cross = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/payments/summary?merchant_id=merchant_b")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_cross = app.clone().oneshot(req_cross).await.unwrap();
+        assert_eq!(resp_cross.status(), StatusCode::FORBIDDEN);
+
+        // 4. Merchant A cannot investigate Merchant B's transaction (404/403 scoped)
+        let req_inv_b = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_intel_b" }).to_string(),
+            ))
+            .unwrap();
+        let resp_inv_b = app.clone().oneshot(req_inv_b).await.unwrap();
+        assert_eq!(resp_inv_b.status(), StatusCode::NOT_FOUND);
+
+        // 5. Merchant A investigates its own transaction (deterministic fallback works offline)
+        let req_inv_a = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_intel_a" }).to_string(),
+            ))
+            .unwrap();
+        let resp_inv_a = app.clone().oneshot(req_inv_a).await.unwrap();
+        assert_eq!(resp_inv_a.status(), StatusCode::OK);
+        let inv_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_inv_a.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inv_json["read_only"], true);
+        assert_eq!(
+            inv_json["report"]["authoritative_payment_state"],
+            "authorized"
+        );
+
+        // 6. Financial safety: attempt state was NOT mutated by investigation
+        let after_attempts = state
+            .webhook_store
+            .list_payment_attempts_for_merchant(Some("merchant_sandbox_01"), 10)
+            .await
+            .unwrap();
+        assert_eq!(after_attempts[0].state, "authorized");
+
+        // 7. Recent memory endpoint returns seeded system knowledge
+        let req_mem = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/memory/recent")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_mem = app.clone().oneshot(req_mem).await.unwrap();
+        assert_eq!(resp_mem.status(), StatusCode::OK);
+        let mem_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_mem.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(mem_json["count"].as_u64().unwrap_or(0) >= 1);
+
+        // 8. Providers health intelligence endpoint works
+        let req_ph = Request::builder()
+            .method("GET")
+            .uri("/api/v1/intelligence/payments/providers/health")
+            .header("x-api-key", "merchant-a-intel-test-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp_ph = app.oneshot(req_ph).await.unwrap();
+        assert_eq!(resp_ph.status(), StatusCode::OK);
+
+        std::env::remove_var("ESA_ADMIN_API_KEY");
+        std::env::remove_var("ESA_TEST_API_KEY");
     }
 }

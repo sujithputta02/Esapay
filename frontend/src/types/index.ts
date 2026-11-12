@@ -145,3 +145,90 @@ export interface AgentStatus {
   latest_observation: string | null;
   latest_decision: string | null;
 }
+
+export interface PaymentAttemptSummary {
+  transaction_id: string;
+  merchant_id: string;
+  provider: string;
+  provider_order_id: string | null;
+  payment_reference: string | null;
+  amount_minor: number;
+  currency: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaymentIntelligenceSummaryResponse {
+  merchant_id: string;
+  total_attempts: number;
+  state_counts: Record<string, number>;
+  provider_counts: Record<string, number>;
+  recent_attempts: PaymentAttemptSummary[];
+  inference_provider: string;
+  model_id: string;
+  read_only: boolean;
+}
+
+export interface PaymentInvestigationReport {
+  investigation_id: string;
+  payment_reference: string;
+  authoritative_payment_state: string;
+  observed_provider_state: string | null;
+  issue_summary: string;
+  probable_root_cause: string;
+  confidence: number;
+  supporting_evidence_refs: string[];
+  alternative_explanations: string[];
+  uncertainty_notes: string[];
+  recommended_next_investigation: string[];
+  memory_refs_used: string[];
+  provider_used: string;
+  model_id: string;
+  deterministic_fallback_used: boolean;
+  evaluation_id: string | null;
+}
+
+export interface PaymentInvestigationResponse {
+  context: {
+    investigation_id: string;
+    authoritative_state: string;
+    attempt_state: string;
+    allowed_evidence_refs: string[];
+    missing_data: string[];
+    refund_summary: {
+      captured_amount_minor: number;
+      processed_refunds_minor: number;
+      pending_reservations_minor: number;
+      remaining_refundable_minor: number;
+    };
+  };
+  report: PaymentInvestigationReport;
+  read_only: boolean;
+}
+
+export interface PaymentMemoryRecord {
+  memory_id: string;
+  memory_type: 'working' | 'episodic' | 'semantic' | 'procedural';
+  scope: 'system' | 'merchant';
+  merchant_id: string | null;
+  provider: string | null;
+  incident_category: string;
+  lifecycle_state: string | null;
+  title: string;
+  summary: string;
+  resolution: string | null;
+  source_refs: string[];
+  verification_status: 'unverified' | 'verified' | 'rejected';
+  version: number;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+}
+
+export interface PaymentMemoryRecentResponse {
+  merchant_id: string;
+  count: number;
+  records: PaymentMemoryRecord[];
+  read_only: boolean;
+}

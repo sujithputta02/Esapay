@@ -9,6 +9,7 @@ import { EffectsView } from './pages/EffectsView';
 import { CostsView } from './pages/CostsView';
 import { PolicyView } from './pages/PolicyView';
 import { BenchmarksView } from './pages/BenchmarksView';
+import IntelligenceView from './pages/IntelligenceView';
 import { LandingPage } from './pages/LandingPage';
 import { AuthPage } from './pages/AuthPage';
 import { ApiKeysView } from './pages/ApiKeysView';
@@ -43,6 +44,7 @@ function App() {
             <Route path="costs" element={<CostsView />} />
             <Route path="policy" element={<PolicyView />} />
             <Route path="benchmarks" element={<BenchmarksView />} />
+            <Route path="intelligence" element={<IntelligenceView />} />
             <Route path="keys" element={<ApiKeysView />} />
           </Route>
           <Route path="/runtime" element={<Layout />}><Route index element={<RuntimeView />} /></Route>
@@ -52,6 +54,7 @@ function App() {
           <Route path="/costs" element={<Layout />}><Route index element={<CostsView />} /></Route>
           <Route path="/policy" element={<Layout />}><Route index element={<PolicyView />} /></Route>
           <Route path="/benchmarks" element={<Layout />}><Route index element={<BenchmarksView />} /></Route>
+          <Route path="/intelligence" element={<Layout />}><Route index element={<IntelligenceView />} /></Route>
           <Route path="/keys" element={<Layout />}><Route index element={<ApiKeysView />} /></Route>
         </Routes>
       </BrowserRouter>
