@@ -53,6 +53,21 @@ impl CashfreeProvider {
         }
     }
 
+    /// Build a provider with system proxy discovery disabled (useful in sandboxed test environments).
+    pub fn new_without_proxy(config: CashfreeConfig) -> Self {
+        let client = CashfreeClient::new_without_proxy(config);
+        Self {
+            client,
+            latency_sum_ms: AtomicU64::new(0),
+            latency_count: AtomicU64::new(0),
+            success_count: AtomicU64::new(0),
+            failure_count: AtomicU64::new(0),
+            circuit: RwLock::new(CircuitStateInternal::default()),
+            failure_threshold: 3,
+            cooldown_duration: std::time::Duration::from_secs(30),
+        }
+    }
+
     pub fn client(&self) -> &CashfreeClient {
         &self.client
     }
@@ -664,7 +679,7 @@ mod tests {
             api_base: "https://sandbox.cashfree.com/pg".to_string(),
             env: crate::config::CashfreeEnv::Sandbox,
         };
-        CashfreeProvider::new(cfg)
+        CashfreeProvider::new_without_proxy(cfg)
     }
 
     #[test]

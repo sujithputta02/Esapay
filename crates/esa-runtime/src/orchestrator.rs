@@ -29,6 +29,40 @@ impl EsaOrchestrator {
         audit_store: Arc<AuditStore>,
         event_handler: Option<RuntimeEventHandler>,
     ) -> Self {
+        Self::new_with_fluid_client(
+            state_fabric,
+            ollama_client,
+            audit_store,
+            event_handler,
+            FluidReasonerClient::default_local(),
+        )
+    }
+
+    /// Build an orchestrator with system proxy discovery disabled (useful in sandboxed test environments).
+    pub fn new_without_proxy(
+        state_fabric: Arc<StateFabric>,
+        ollama_client: OllamaClient,
+        audit_store: Arc<AuditStore>,
+        event_handler: Option<RuntimeEventHandler>,
+    ) -> Self {
+        let endpoint = std::env::var("FLUID_REASONER_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:5005".to_string());
+        Self::new_with_fluid_client(
+            state_fabric,
+            ollama_client,
+            audit_store,
+            event_handler,
+            FluidReasonerClient::new_without_proxy(endpoint),
+        )
+    }
+
+    pub fn new_with_fluid_client(
+        state_fabric: Arc<StateFabric>,
+        ollama_client: OllamaClient,
+        audit_store: Arc<AuditStore>,
+        event_handler: Option<RuntimeEventHandler>,
+        fluid_client: FluidReasonerClient,
+    ) -> Self {
         let intent_manager = Arc::new(IntentManager::new());
         let policy_engine = Arc::new(PolicyEngine::new(
             Arc::clone(&state_fabric),
@@ -40,7 +74,6 @@ impl EsaOrchestrator {
         ));
         let decision_verifier = Arc::new(DecisionVerifier::new(Arc::clone(&state_fabric)));
 
-        let fluid_client = FluidReasonerClient::default_local();
         Self {
             monitor_agent: Arc::new(MonitorAgent::new(Arc::clone(&state_fabric))),
             diagnosis_agent: Arc::new(
