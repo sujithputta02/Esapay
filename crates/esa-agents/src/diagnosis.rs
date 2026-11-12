@@ -1,24 +1,31 @@
 use crate::monitor::Condition;
 use crate::ollama::OllamaClient;
+use crate::ollama_provider::OllamaProvider;
 use crate::privacy;
+use crate::provider::{ExecutionScope, InferenceProvider, InferenceRequest, ProviderKind};
 use crate::validation::OutputValidator;
 use esa_core::EsaResult;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::fluid_reasoner::FluidReasonerClient;
 
 /// Diagnosis Agent - Analyzes conditions and identifies root causes
 pub struct DiagnosisAgent {
-    ollama_client: OllamaClient,
+    provider: Arc<dyn InferenceProvider>,
     fluid_client: Option<FluidReasonerClient>,
     validator: OutputValidator,
 }
 
 impl DiagnosisAgent {
     pub fn new(ollama_client: OllamaClient) -> Self {
+        Self::with_provider(Arc::new(OllamaProvider::new(ollama_client)))
+    }
+
+    pub fn with_provider(provider: Arc<dyn InferenceProvider>) -> Self {
         Self {
-            ollama_client,
+            provider,
             fluid_client: None,
             validator: OutputValidator::with_default_limits(),
         }
@@ -30,6 +37,15 @@ impl DiagnosisAgent {
     }
 
     pub async fn diagnose(&self, conditions: &[Condition]) -> EsaResult<Diagnosis> {
+        self.diagnose_with_scope(conditions, ExecutionScope::System)
+            .await
+    }
+
+    pub async fn diagnose_with_scope(
+        &self,
+        conditions: &[Condition],
+        scope: ExecutionScope,
+    ) -> EsaResult<Diagnosis> {
         if conditions.is_empty() {
             return Ok(Diagnosis {
                 hypothesis: "No conditions detected".to_string(),
@@ -40,7 +56,12 @@ impl DiagnosisAgent {
             });
         }
 
-        info!("Diagnosis agent analyzing {} conditions", conditions.len());
+        info!(
+            "Diagnosis agent analyzing {} conditions (provider: {}, scope: {})",
+            conditions.len(),
+            self.provider.provider_kind(),
+            scope.as_str()
+        );
 
         // Tier 1: Try Fluid Reasoning Engine (Autonomous Topological Rule Induction)
         if let Some(fluid_client) = &self.fluid_client {
@@ -80,36 +101,91 @@ impl DiagnosisAgent {
             }
         }
 
-        // Tier 2: Ollama LLM
+        // Tier 2: Configured InferenceProvider (Ollama or Hugging Face ZeroGPU)
         let prompt = self.build_diagnosis_prompt(conditions);
-        match self
-            .ollama_client
-            .generate_with_agent("diagnosis", prompt)
-            .await
-        {
+        let req = InferenceRequest::new("diagnosis", scope.clone(), prompt.clone())
+            .with_model_id(self.provider.model_id());
+
+        match self.provider.infer(req).await {
             Ok(response) => {
-                // Parse LLM response
-                match self.parse_diagnosis_response(&response.response, conditions) {
+                // Parse and strictly validate provider output
+                match self.parse_diagnosis_response(&response.text, conditions) {
                     Ok(diagnosis) => Ok(diagnosis),
                     Err(e) => {
                         warn!(
-                            "Failed to parse LLM diagnosis, falling back to rules: {}",
+                            "Failed to validate {} diagnosis, falling back to deterministic rules: {}",
+                            self.provider.provider_kind(),
                             e
                         );
-                        Ok(self.rule_based_diagnosis(conditions))
+                        Ok(self.record_deterministic_fallback(conditions, &scope, &prompt))
                     }
                 }
             }
             Err(e) => {
-                warn!("Ollama unavailable, using rule-based diagnosis: {}", e);
+                warn!(
+                    "Provider {} unavailable ({}), using deterministic rule-based diagnosis",
+                    self.provider.provider_kind(),
+                    e
+                );
                 // Tier 3: Deterministic Rule-based diagnosis
-                Ok(self.rule_based_diagnosis(conditions))
+                Ok(self.record_deterministic_fallback(conditions, &scope, &prompt))
             }
         }
     }
 
+    fn record_deterministic_fallback(
+        &self,
+        conditions: &[Condition],
+        scope: &ExecutionScope,
+        prompt: &str,
+    ) -> Diagnosis {
+        let diag = self.rule_based_diagnosis(conditions);
+        let summary = serde_json::to_string(&diag).unwrap_or_default();
+        self.provider.cost_tracker().record_provider_inference(
+            ProviderKind::DeterministicFallback.as_str(),
+            scope.as_str(),
+            "deterministic_rules_v1",
+            "diagnosis",
+            scope.merchant_id(),
+            prompt,
+            &summary,
+            0,
+            None,
+            None,
+            Some(false),
+            None,
+        );
+        diag
+    }
+
     fn build_diagnosis_prompt(&self, conditions: &[Condition]) -> String {
-        let raw_conditions_json = serde_json::to_string(conditions).unwrap_or_default();
+        // Construct prompt strictly from allowlisted structured telemetry fields (data minimization).
+        let allowlisted: Vec<serde_json::Value> = conditions
+            .iter()
+            .take(16)
+            .map(|c| {
+                let mut m = serde_json::Map::new();
+                for key in &[
+                    "p50_latency_ms",
+                    "p95_latency_ms",
+                    "p99_latency_ms",
+                    "rate_per_min",
+                    "queue_depth",
+                    "error_rate",
+                ] {
+                    if let Some(val) = c.metrics.get(*key).and_then(|v| v.as_f64()) {
+                        m.insert((*key).to_string(), serde_json::json!(val));
+                    }
+                }
+                serde_json::json!({
+                    "workload_id": privacy::truncate_utf8(&privacy::sanitize_prompt(&c.workload_id), 96),
+                    "condition_type": c.condition_type.to_string(),
+                    "severity": format!("{:?}", c.severity),
+                    "metrics": m,
+                })
+            })
+            .collect();
+        let raw_conditions_json = serde_json::to_string(&allowlisted).unwrap_or_default();
         let conditions_json = privacy::sanitize_prompt(&raw_conditions_json);
 
         format!(
