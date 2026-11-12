@@ -57,6 +57,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 payment_reference VARCHAR(255) NOT NULL,
                 provider VARCHAR(64) NOT NULL,
                 recommended_root_cause VARCHAR(128) NOT NULL,
+                supporting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
                 inference_provider VARCHAR(64) NOT NULL,
                 model_id VARCHAR(255) NOT NULL,
                 deterministic_fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
@@ -70,6 +71,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             );
             "#,
             "ALTER TABLE esa_experience_evaluations ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;",
+            "ALTER TABLE esa_experience_evaluations ADD COLUMN IF NOT EXISTS supporting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb;",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_merchant ON esa_experience_evaluations(merchant_id, created_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_expires ON esa_experience_evaluations(expires_at);",
         ];
@@ -266,18 +268,20 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         &self,
         eval: OutcomeEvaluationRecord,
     ) -> Result<OutcomeEvaluationRecord, InferenceError> {
+        let evidence_json =
+            serde_json::to_value(&eval.supporting_evidence_refs).unwrap_or_default();
         sqlx::query(
             r#"
             INSERT INTO esa_experience_evaluations (
                 evaluation_id, investigation_id, merchant_id, payment_reference, provider,
-                recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
+                recommended_root_cause, supporting_evidence_refs, inference_provider, model_id, deterministic_fallback_used,
                 observed_authoritative_state, verified_outcome_state, accuracy,
                 promoted_memory_id, created_at, verified_at, expires_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
-                $6, $7, $8, $9,
-                $10, $11, $12,
-                $13, $14, $15, $16
+                $6, $7, $8, $9, $10,
+                $11, $12, $13,
+                $14, $15, $16, $17
             );
             "#,
         )
@@ -287,6 +291,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         .bind(&eval.payment_reference)
         .bind(&eval.provider)
         .bind(&eval.recommended_root_cause)
+        .bind(evidence_json)
         .bind(eval.inference_provider.as_str())
         .bind(&eval.model_id)
         .bind(eval.deterministic_fallback_used)
@@ -322,7 +327,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         let row = sqlx::query(
             r#"
             SELECT evaluation_id, investigation_id, merchant_id, payment_reference, provider,
-                   recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
+                   recommended_root_cause, supporting_evidence_refs, inference_provider, model_id, deterministic_fallback_used,
                    observed_authoritative_state, verified_outcome_state, accuracy,
                    promoted_memory_id, created_at, verified_at, expires_at
             FROM esa_experience_evaluations
@@ -396,7 +401,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         let row = sqlx::query(
             r#"
             SELECT evaluation_id, investigation_id, merchant_id, payment_reference, provider,
-                   recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
+                   recommended_root_cause, supporting_evidence_refs, inference_provider, model_id, deterministic_fallback_used,
                    observed_authoritative_state, verified_outcome_state, accuracy,
                    promoted_memory_id, created_at, verified_at, expires_at
             FROM esa_experience_evaluations
@@ -686,6 +691,12 @@ fn row_to_evaluation(r: sqlx::postgres::PgRow) -> OutcomeEvaluationRecord {
     let verified_at: Option<DateTime<Utc>> = r.get("verified_at");
     let expires_at: Option<DateTime<Utc>> = r.get("expires_at");
 
+    let evidence_val: serde_json::Value = r
+        .try_get("supporting_evidence_refs")
+        .unwrap_or_else(|_| serde_json::json!([]));
+    let supporting_evidence_refs: Vec<String> =
+        serde_json::from_value(evidence_val).unwrap_or_default();
+
     OutcomeEvaluationRecord {
         evaluation_id: r.get("evaluation_id"),
         investigation_id: r.get("investigation_id"),
@@ -693,6 +704,7 @@ fn row_to_evaluation(r: sqlx::postgres::PgRow) -> OutcomeEvaluationRecord {
         payment_reference: r.get("payment_reference"),
         provider: r.get("provider"),
         recommended_root_cause: r.get("recommended_root_cause"),
+        supporting_evidence_refs,
         inference_provider: inf_prov,
         model_id: r.get("model_id"),
         deterministic_fallback_used: r.get("deterministic_fallback_used"),
@@ -832,21 +844,31 @@ mod tests {
             InferenceErrorCategory::Forbidden
         );
 
-        // 4. Atomic verified promotion via AuthoritativeOutcomeProof & idempotency
+        // 4. Atomic verified promotion via WebhookStore boundary & diagnosis-level checks
+        use esa_state::WebhookStore;
+        esa_state::PostgresWebhookStore::init_schema(&pool)
+            .await
+            .unwrap();
+        let wh_store = esa_state::PostgresWebhookStore::new(pool.clone());
+
+        let pay_ref = format!("pay_pg_{}", &suffix[..8]);
+        let tx_id = format!("tx_pg_{}", &suffix[..8]);
         let attempt_cap = esa_core::provider::PaymentAttemptRecord {
-            transaction_id: format!("tx_pg_{}", &suffix[..8]),
+            transaction_id: tx_id.clone(),
             merchant_id: m_a.clone(),
             provider: "razorpay".to_string(),
             provider_order_id: None,
-            payment_reference: Some("pay_pg_a".to_string()),
+            payment_reference: Some(pay_ref.clone()),
             amount_minor: 10000,
             currency: "INR".to_string(),
             state: "captured".to_string(),
             created_at: now,
             updated_at: now,
         };
+        wh_store.record_payment_attempt(&attempt_cap).await.unwrap();
+
         let entity_cap = esa_core::payment_state::PaymentEntity {
-            payment_id: "pay_pg_a".to_string(),
+            payment_id: pay_ref.clone(),
             state: esa_core::payment_state::PaymentState::Captured,
             amount_minor: 10000,
             currency: "INR".to_string(),
@@ -856,30 +878,75 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let eval_loaded = store
-            .get_evaluation(&scope_a, &eval_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let proof = AuthoritativeOutcomeProof::from_authoritative_records(
-            &scope_a,
-            &eval_loaded,
-            &attempt_cap,
-            Some(&entity_cap),
-        )
-        .unwrap();
 
-        let (ev1, mem1) = store
-            .verify_and_promote_outcome(&scope_a, proof.clone())
-            .await
-            .unwrap();
+        // Update eval's payment_reference to match unique test payment
+        let eval_unique = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_u_{}", &suffix[..8]),
+            m_a.clone(),
+            pay_ref.clone(),
+            "razorpay".to_string(),
+            "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        let eval_unique_id = eval_unique.evaluation_id.clone();
+        store.record_evaluation(eval_unique).await.unwrap();
+
+        // Unsupported diagnosis (DUPLICATE_WEBHOOK_SUPPRESSED without duplicate webhook) stays pending even when Captured
+        let eval_unsupported = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_unsup_{}", &suffix[..8]),
+            m_a.clone(),
+            pay_ref.clone(),
+            "razorpay".to_string(),
+            "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_missing_dup".to_string()]);
+        let eval_unsup_id = eval_unsupported.evaluation_id.clone();
+        store.record_evaluation(eval_unsupported).await.unwrap();
+        let unsup_err = crate::memory::verify_outcome_from_webhook_store(
+            &wh_store,
+            &store,
+            &scope_a,
+            &eval_unsup_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unsup_err.category, InferenceErrorCategory::InvalidResponse);
+        assert_eq!(
+            store
+                .get_evaluation(&scope_a, &eval_unsup_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .accuracy,
+            OutcomeAccuracy::Pending
+        );
+
+        let (ev1, mem1) = crate::memory::verify_outcome_from_webhook_store(
+            &wh_store,
+            &store,
+            &scope_a,
+            &eval_unique_id,
+        )
+        .await
+        .unwrap();
         let promoted_id = ev1.promoted_memory_id.clone().unwrap();
         assert_eq!(mem1.unwrap().memory_id, promoted_id);
 
-        let (ev2, mem2) = store
-            .verify_and_promote_outcome(&scope_a, proof)
-            .await
-            .unwrap();
+        let (ev2, mem2) = crate::memory::verify_outcome_from_webhook_store(
+            &wh_store,
+            &store,
+            &scope_a,
+            &eval_unique_id,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             ev2.promoted_memory_id.as_deref(),
             Some(promoted_id.as_str())
@@ -890,7 +957,7 @@ mod tests {
         let mut exp_eval = OutcomeEvaluationRecord::new_pending(
             format!("inv_pg_exp_{}", &suffix[..8]),
             m_a.clone(),
-            "pay_pg_a".to_string(),
+            pay_ref.clone(),
             "razorpay".to_string(),
             "HEALTHY_COMPLETED".to_string(),
             ProviderKind::Ollama,
@@ -903,6 +970,8 @@ mod tests {
             &exp_eval,
             &attempt_cap,
             Some(&entity_cap),
+            &[],
+            &[],
         )
         .unwrap();
         exp_eval.expires_at = Some(Utc::now() - chrono::Duration::seconds(10));

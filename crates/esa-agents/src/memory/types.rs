@@ -2,10 +2,11 @@ use crate::payment_context::{CanonicalPaymentState, PaymentIntelligenceContext};
 use crate::privacy;
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory, ProviderKind};
 use chrono::{DateTime, Duration, Utc};
-use esa_core::payment_state::PaymentEntity;
+use esa_core::payment_state::{PaymentEntity, PaymentState};
 use esa_core::provider::PaymentAttemptRecord;
+use esa_state::webhook_store::{RefundRecord, WebhookInboxRecord};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -303,6 +304,8 @@ pub struct OutcomeEvaluationRecord {
     pub payment_reference: String,
     pub provider: String,
     pub recommended_root_cause: String,
+    #[serde(default)]
+    pub supporting_evidence_refs: Vec<String>,
     pub inference_provider: ProviderKind,
     pub model_id: String,
     pub deterministic_fallback_used: bool,
@@ -336,6 +339,7 @@ impl OutcomeEvaluationRecord {
             payment_reference,
             provider,
             recommended_root_cause,
+            supporting_evidence_refs: Vec::new(),
             inference_provider,
             model_id,
             deterministic_fallback_used,
@@ -349,13 +353,19 @@ impl OutcomeEvaluationRecord {
         }
     }
 
+    pub fn with_evidence_refs(mut self, refs: Vec<String>) -> Self {
+        self.supporting_evidence_refs = refs;
+        self
+    }
+
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|exp| exp <= now)
     }
 }
 
-/// Sealed authoritative outcome proof derived strictly from ESAPay's durable payment records.
-/// Prevents callers from promoting episodic memory using arbitrary state or accuracy labels.
+/// Sealed authoritative outcome proof derived strictly inside `memory` from ESAPay's
+/// durable `WebhookStore` payment, webhook, and refund records.
+/// External callers cannot construct this proof using arbitrary payment records.
 #[derive(Debug, Clone)]
 pub struct AuthoritativeOutcomeProof {
     evaluation_id: String,
@@ -367,11 +377,13 @@ pub struct AuthoritativeOutcomeProof {
 }
 
 impl AuthoritativeOutcomeProof {
-    pub fn from_authoritative_records(
+    pub(super) fn from_authoritative_records(
         scope: &ExecutionScope,
         eval: &OutcomeEvaluationRecord,
         attempt: &PaymentAttemptRecord,
         payment_entity: Option<&PaymentEntity>,
+        inbox_events: &[WebhookInboxRecord],
+        refunds: &[RefundRecord],
     ) -> Result<Self, InferenceError> {
         let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
             InferenceError::new(
@@ -423,38 +435,216 @@ impl AuthoritativeOutcomeProof {
             ));
         }
 
+        // Compute deterministic evidence facts from authoritative records
+        let mut seen_event_ids = HashSet::new();
+        let mut dup_event_ids = HashSet::new();
+        let mut delayed_event_ids = HashSet::new();
+        let mut provider_timeout_event_ids = HashSet::new();
+
+        for ev in inbox_events {
+            if !seen_event_ids.insert(ev.provider_event_id.clone()) {
+                dup_event_ids.insert(ev.provider_event_id.clone());
+            }
+            if ev
+                .received_at
+                .signed_duration_since(attempt.created_at)
+                .num_seconds()
+                > 300
+            {
+                delayed_event_ids.insert(ev.provider_event_id.clone());
+            }
+            let et = ev.event_type.to_ascii_lowercase();
+            let err_msg = ev
+                .error_message
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let payload_str = ev.payload.to_string().to_ascii_lowercase();
+            let is_provider_timeout_or_outage = et.contains("timeout")
+                || et.contains("gateway_error")
+                || err_msg.contains("provider timeout")
+                || err_msg.contains("gateway timeout")
+                || err_msg.contains("502")
+                || err_msg.contains("503")
+                || err_msg.contains("504")
+                || payload_str.contains("gateway_timeout");
+            if is_provider_timeout_or_outage {
+                provider_timeout_event_ids.insert(ev.provider_event_id.clone());
+            }
+        }
+
+        let captured_amount_minor = match payment_entity {
+            Some(pe)
+                if matches!(
+                    pe.state,
+                    PaymentState::Captured
+                        | PaymentState::PartiallyRefunded
+                        | PaymentState::Refunded
+                ) =>
+            {
+                pe.amount_minor
+            }
+            _ => 0,
+        };
+        let processed_refunds_minor = payment_entity
+            .map(|pe| pe.refunded_amount_minor)
+            .unwrap_or(0);
+        let pending_reservations_minor: u64 = refunds
+            .iter()
+            .filter(|r| !r.applied_to_balance && r.status.eq_ignore_ascii_case("pending"))
+            .map(|r| r.amount_minor)
+            .fold(0u64, |acc, x| acc.saturating_add(x));
+        let remaining_refundable_minor = captured_amount_minor
+            .saturating_sub(processed_refunds_minor)
+            .saturating_sub(pending_reservations_minor);
+
+        let has_overage_refund = captured_amount_minor > 0
+            && refunds
+                .iter()
+                .any(|r| !r.applied_to_balance && r.amount_minor > remaining_refundable_minor);
+
+        let cited = &eval.supporting_evidence_refs;
+        let has_cited_match = |prefix: &str, valid_ids: &HashSet<String>| {
+            if cited.is_empty() {
+                !valid_ids.is_empty()
+            } else {
+                cited.iter().any(|r| {
+                    r.strip_prefix(prefix)
+                        .is_some_and(|id| valid_ids.contains(id))
+                })
+            }
+        };
+
+        // Diagnosis-level verification against specific authoritative evidence (never terminal state alone)
         let rc = eval.recommended_root_cause.as_str();
-        let accuracy = match authoritative_state {
-            CanonicalPaymentState::Captured
-            | CanonicalPaymentState::PartiallyRefunded
-            | CanonicalPaymentState::Refunded => match rc {
-                "HEALTHY_COMPLETED"
-                | "REFUND_RESERVATION_PENDING"
-                | "REFUND_EXCEEDS_REMAINING_BALANCE"
-                | "DUPLICATE_WEBHOOK_SUPPRESSED"
-                | "WEBHOOK_DELAYED_OR_MISSING" => OutcomeAccuracy::Correct,
-                "PAYMENT_FAILED_AT_PROVIDER" => OutcomeAccuracy::Incorrect,
-                _ => OutcomeAccuracy::PartiallyCorrect,
-            },
-            CanonicalPaymentState::Failed => match rc {
-                "PAYMENT_FAILED_AT_PROVIDER" | "PROVIDER_DEGRADED_OR_TIMEOUT" => {
+        let accuracy = match rc {
+            "DUPLICATE_WEBHOOK_SUPPRESSED" => {
+                if !has_cited_match("webhook:", &dup_event_ids) {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "DUPLICATE_WEBHOOK_SUPPRESSED could not be verified against duplicate webhook records; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "WEBHOOK_DELAYED_OR_MISSING" => {
+                let delayed_ok = has_cited_match("webhook:", &delayed_event_ids);
+                let missing_ok = inbox_events.is_empty()
+                    && (cited.is_empty()
+                        || cited
+                            .iter()
+                            .any(|r| r.starts_with("attempt:") || r.starts_with("state:")));
+                if !delayed_ok && !missing_ok {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "WEBHOOK_DELAYED_OR_MISSING could not be verified against webhook timeline; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "REFUND_RESERVATION_PENDING" => {
+                if pending_reservations_minor == 0 {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "REFUND_RESERVATION_PENDING has no pending reservation in authoritative refund records; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "REFUND_EXCEEDS_REMAINING_BALANCE" => {
+                if !has_overage_refund {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "REFUND_EXCEEDS_REMAINING_BALANCE has no over-balance refund in authoritative records; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "PROVIDER_DEGRADED_OR_TIMEOUT" => {
+                let has_provider_timeout = !provider_timeout_event_ids.is_empty()
+                    || (authoritative_state == CanonicalPaymentState::Failed
+                        && attempt.state.eq_ignore_ascii_case("timeout"));
+                if !has_provider_timeout {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "PROVIDER_DEGRADED_OR_TIMEOUT lacks authoritative provider timeout/degradation evidence; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "PROVIDER_STATE_DISCREPANCY" => {
+                let attempt_canon = CanonicalPaymentState::from_attempt_state(&attempt.state);
+                if payment_entity.is_none() || attempt_canon == authoritative_state {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "PROVIDER_STATE_DISCREPANCY has no conflicting authoritative vs attempt state; keeping evaluation pending",
+                    ));
+                }
+                OutcomeAccuracy::Correct
+            }
+            "HEALTHY_COMPLETED" => match authoritative_state {
+                CanonicalPaymentState::Captured
+                | CanonicalPaymentState::PartiallyRefunded
+                | CanonicalPaymentState::Refunded
+                    if pending_reservations_minor == 0 =>
+                {
                     OutcomeAccuracy::Correct
                 }
-                "HEALTHY_COMPLETED" => OutcomeAccuracy::Incorrect,
-                _ => OutcomeAccuracy::PartiallyCorrect,
+                CanonicalPaymentState::Failed => OutcomeAccuracy::Incorrect,
+                _ => {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "HEALTHY_COMPLETED cannot be verified while reservations or non-terminal states remain; keeping evaluation pending",
+                    ));
+                }
             },
-            _ => OutcomeAccuracy::Pending,
+            "PAYMENT_FAILED_AT_PROVIDER" => match authoritative_state {
+                CanonicalPaymentState::Failed => OutcomeAccuracy::Correct,
+                CanonicalPaymentState::Captured
+                | CanonicalPaymentState::PartiallyRefunded
+                | CanonicalPaymentState::Refunded => OutcomeAccuracy::Incorrect,
+                _ => {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "PAYMENT_FAILED_AT_PROVIDER is not supported by authoritative state; keeping evaluation pending",
+                    ));
+                }
+            },
+            "AUTHORIZATION_NOT_CAPTURED"
+            | "PROVIDER_CAPTURE_PENDING"
+            | "RECONCILIATION_REQUIRED" => match authoritative_state {
+                CanonicalPaymentState::Captured
+                | CanonicalPaymentState::PartiallyRefunded
+                | CanonicalPaymentState::Refunded
+                | CanonicalPaymentState::Failed => OutcomeAccuracy::PartiallyCorrect,
+                _ => {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "Evaluation remains pending until authoritative payment resolves",
+                    ));
+                }
+            },
+            _ => {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::InvalidResponse,
+                    format!(
+                        "Diagnosis '{}' cannot be independently verified from authoritative records; keeping evaluation pending",
+                        rc
+                    ),
+                ));
+            }
         };
 
         let verified_resolution = format!(
-            "Authoritative {} payment {} reached terminal state '{}' (source: {})",
+            "Authoritative {} payment {} verified '{}' for diagnosis '{}' (source: {})",
             attempt.provider,
             eval.payment_reference,
             authoritative_state.as_str(),
+            rc,
             if payment_entity.is_some() {
-                "payment_records"
+                "payment_records+webhook_inbox+refunds"
             } else {
-                "payment_attempts"
+                "payment_attempts+webhook_inbox+refunds"
             }
         );
 

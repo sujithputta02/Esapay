@@ -28,6 +28,6 @@ Phase 3 evolves ESAPay's Intelligence Core from infrastructure-level diagnostics
 - `POST /api/v1/intelligence/payments/investigate` (per-merchant rate-limited via `ApiRateLimiter::check_payment_investigate` using authenticated `caller.merchant_id`)
 - `GET /api/v1/intelligence/payments/providers/health`
 - `GET /api/v1/intelligence/memory/recent`
-- **Important persistence note:** Investigations never mutate payment, attempt, refund, or routing state; they do persist an internal `OutcomeEvaluationRecord` in `esa_experience_evaluations` (with 90-day retention) for post-hoc verification.
+- **Important persistence note:** Investigations never mutate payment, attempt, refund, or routing state; they do persist an internal `Pending` `OutcomeEvaluationRecord` in `esa_experience_evaluations` (with 90-day retention and hourly physical `purge_expired()` cleanup). Automatic episodic promotion remains dormant in the live API runtime until an independently verified resolution workflow is wired.
 - Frontend view: `frontend/src/pages/IntelligenceView.tsx` (`/intelligence`).
 

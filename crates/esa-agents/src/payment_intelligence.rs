@@ -410,7 +410,8 @@ impl PaymentIntelligenceAgent {
             model_id.clone(),
             fallback_used,
             context.authoritative_state,
-        );
+        )
+        .with_evidence_refs(diag.supporting_evidence_refs.clone());
         let eval_id = self
             .retriever
             .store()
@@ -687,13 +688,10 @@ fn validate_root_cause_state_compatibility(
             let degraded = obs.provider_healthy == Some(false)
                 || obs.p95_latency_ms.is_some_and(|ms| ms > 1500.0)
                 || obs.success_rate.is_some_and(|sr| sr < 0.90)
-                || ctx.events.iter().any(|e| {
-                    e.status.eq_ignore_ascii_case("failed")
-                        || e.summary.to_ascii_lowercase().contains("timeout")
-                });
+                || ctx.events.iter().any(is_provider_timeout_or_outage_event);
             if !degraded {
                 return Err(
-                    "PROVIDER_DEGRADED_OR_TIMEOUT requires degraded provider health, high latency, low success rate, or timeout event evidence"
+                    "PROVIDER_DEGRADED_OR_TIMEOUT requires degraded provider health, high latency, low success rate, or provider-side timeout/outage evidence"
                         .into(),
                 );
             }
@@ -883,10 +881,7 @@ fn validate_evidence_relevance(
             let timeout_event_refs: HashSet<String> = ctx
                 .events
                 .iter()
-                .filter(|e| {
-                    e.status.eq_ignore_ascii_case("failed")
-                        || e.summary.to_ascii_lowercase().contains("timeout")
-                })
+                .filter(|e| is_provider_timeout_or_outage_event(e))
                 .map(|e| format!("webhook:{}", e.event_id))
                 .collect();
 
@@ -894,7 +889,7 @@ fn validate_evidence_relevance(
             let cited_timeout_event = refs.iter().any(|r| timeout_event_refs.contains(r));
             if !cited_health && !cited_timeout_event {
                 return Err(
-                    "PROVIDER_DEGRADED_OR_TIMEOUT must cite the degraded 'provider_health:<provider>' snapshot or a failed/timeout 'webhook:<event_id>'"
+                    "PROVIDER_DEGRADED_OR_TIMEOUT must cite the degraded 'provider_health:<provider>' snapshot or a provider-side timeout/outage 'webhook:<event_id>'"
                         .into(),
                 );
             }
@@ -937,15 +932,30 @@ fn validate_evidence_relevance(
             }
         }
         PaymentIncidentRootCause::ProviderStateDiscrepancy => {
-            let has_authoritative_side = refs
-                .iter()
-                .any(|r| r.starts_with("state:") || r.starts_with("payment:"));
-            let has_conflicting_side = refs
-                .iter()
-                .any(|r| r.starts_with("provider_observed:") || r.starts_with("attempt_state:"));
-            if !has_authoritative_side || !has_conflicting_side {
+            let expected_state_ref = format!("state:{}", ctx.authoritative_state.as_str());
+            let expected_payment_ref = ctx
+                .identity
+                .payment_reference
+                .as_ref()
+                .map(|pid| format!("payment:{}", pid));
+
+            let has_authoritative_side = refs.iter().any(|r| {
+                r == &expected_state_ref || expected_payment_ref.as_ref().is_some_and(|pr| r == pr)
+            });
+
+            let has_genuinely_conflicting_side = refs.iter().any(|r| {
+                let candidate = r
+                    .strip_prefix("provider_observed:")
+                    .or_else(|| r.strip_prefix("attempt_state:"));
+                candidate.is_some_and(|raw| {
+                    let parsed = CanonicalPaymentState::from_attempt_state(raw);
+                    parsed != CanonicalPaymentState::Unknown && parsed != ctx.authoritative_state
+                })
+            });
+
+            if !has_authoritative_side || !has_genuinely_conflicting_side {
                 return Err(
-                    "PROVIDER_STATE_DISCREPANCY must cite both authoritative ('state:'/'payment:') and conflicting ('provider_observed:'/'attempt_state:') evidence"
+                    "PROVIDER_STATE_DISCREPANCY must cite both the authoritative state/payment reference and a genuinely conflicting 'provider_observed:' or 'attempt_state:' value"
                         .into(),
                 );
             }
@@ -954,6 +964,22 @@ fn validate_evidence_relevance(
     }
 
     Ok(())
+}
+
+fn is_provider_timeout_or_outage_event(
+    e: &crate::payment_context::PaymentEventTimelineItem,
+) -> bool {
+    let et = e.event_type.to_ascii_lowercase();
+    let sum = e.summary.to_ascii_lowercase();
+    // Distinguish provider-side timeout/5xx/outage from local webhook_inbox processing failures
+    et.contains("timeout")
+        || et.contains("gateway_error")
+        || sum.contains("provider timeout")
+        || sum.contains("gateway timeout")
+        || sum.contains("gateway_timeout")
+        || sum.contains("502")
+        || sum.contains("503")
+        || sum.contains("504")
 }
 
 fn sanitize_bounded_list(
@@ -1474,42 +1500,33 @@ mod tests {
             .unwrap();
         assert!(before.is_empty());
 
-        // Verify and promote outcome using authoritative records
+        // Verify and promote outcome strictly through WebhookStore boundary
+        use esa_state::WebhookStore;
+        let wh_store = esa_state::InMemoryWebhookStore::new();
         let now = Utc::now();
-        let attempt_cap = PaymentAttemptRecord {
-            transaction_id: "tx_intel_1".to_string(),
-            merchant_id: "merchant_a".to_string(),
-            provider: "razorpay".to_string(),
-            provider_order_id: Some("order_intel_1".to_string()),
-            payment_reference: Some("pay_intel_1".to_string()),
-            amount_minor: 75000,
-            currency: "INR".to_string(),
-            state: "captured".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
-        let entity_cap = PaymentEntity {
-            payment_id: "pay_intel_1".to_string(),
-            state: PaymentState::Captured,
-            amount_minor: 75000,
-            currency: "INR".to_string(),
-            refunded_amount_minor: 0,
-            events_seen: vec!["evt_intel_1".to_string()],
-            refunds: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        let proof = crate::memory::AuthoritativeOutcomeProof::from_authoritative_records(
-            &scope_for("merchant_a"),
-            &eval_rec,
-            &attempt_cap,
-            Some(&entity_cap),
-        )
-        .unwrap();
-        let (updated_eval, promoted) = store
-            .verify_and_promote_outcome(&scope_for("merchant_a"), proof)
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_intel_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_intel_1".to_string()),
+                payment_reference: Some("pay_intel_1".to_string()),
+                amount_minor: 75000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
             .await
             .unwrap();
+        let (updated_eval, promoted) = crate::memory::verify_outcome_from_webhook_store(
+            &wh_store,
+            store.as_ref(),
+            &scope_for("merchant_a"),
+            &eval_id,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             updated_eval.verified_outcome_state,
             Some(CanonicalPaymentState::Captured)
@@ -2221,6 +2238,47 @@ mod tests {
         .to_string();
         assert!(validator
             .validate(&missing_rf_json, &ctx_rf_missing, &empty_mem)
+            .is_err());
+
+        // 9. Negative: PROVIDER_STATE_DISCREPANCY with non-conflicting state:captured + attempt_state:captured -> rejected
+        let ctx_non_conflict = make_ctx(0, vec![], vec![], true, Some("failed"));
+        let non_conflict_json = serde_json::json!({
+            "issue_summary": "Non-conflicting refs cited",
+            "probable_root_cause": "PROVIDER_STATE_DISCREPANCY",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["state:captured", "attempt_state:captured"],
+            "recommended_next_investigation": ["Compare gateway status"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&non_conflict_json, &ctx_non_conflict, &empty_mem)
+            .is_err());
+
+        // 10. Negative: PROVIDER_DEGRADED_OR_TIMEOUT with local WebhookStatus::Failed (not provider timeout) -> rejected
+        let wh_local_fail = vec![WebhookInboxRecord {
+            id: 9,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_local_fail".to_string(),
+            event_type: "payment.captured".to_string(),
+            payment_id: Some("pay_sem_1".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({}),
+            status: WebhookStatus::Failed,
+            error_message: Some("Local webhook JSON parse error".to_string()),
+            received_at: now - chrono::Duration::minutes(9),
+            processed_at: None,
+        }];
+        let ctx_local_fail = make_ctx(0, wh_local_fail, vec![], true, None);
+        let local_fail_json = serde_json::json!({
+            "issue_summary": "Local webhook error misattributed to provider",
+            "probable_root_cause": "PROVIDER_DEGRADED_OR_TIMEOUT",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["webhook:evt_local_fail"],
+            "recommended_next_investigation": ["Check webhook inbox"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&local_fail_json, &ctx_local_fail, &empty_mem)
             .is_err());
     }
 }

@@ -106,11 +106,41 @@ pub async fn verify_outcome_from_webhook_store(
         None
     };
 
+    let inbox_events = if let Some(ref pref) = attempt.payment_reference {
+        webhook_store
+            .list_inbox_events_for_payment(pref, 50)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to load authoritative webhook inbox events: {}", e),
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    let refunds = if let Some(ref pref) = attempt.payment_reference {
+        webhook_store
+            .list_refunds_for_payment(&attempt.provider, pref)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to load authoritative refund records: {}", e),
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
     let proof = AuthoritativeOutcomeProof::from_authoritative_records(
         scope,
         &eval,
         &attempt,
         payment_entity.as_ref(),
+        &inbox_events,
+        &refunds,
     )?;
 
     memory_store.verify_and_promote_outcome(scope, proof).await
@@ -842,6 +872,8 @@ mod tests {
             &eval,
             &captured_attempt,
             Some(&captured_entity),
+            &[],
+            &[],
         )
         .unwrap();
         let (ev1, mem1) = store
@@ -883,6 +915,8 @@ mod tests {
             &eval,
             &captured_attempt,
             Some(&failed_entity),
+            &[],
+            &[],
         )
         .unwrap();
         let err_conflict = store
@@ -942,6 +976,8 @@ mod tests {
             &eval,
             &attempt,
             Some(&entity),
+            &[],
+            &[],
         )
         .unwrap();
         eval.expires_at = Some(now - chrono::Duration::seconds(5));
@@ -1008,5 +1044,127 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_diagnosis_level_verification_requires_specific_evidence_not_terminal_state() {
+        use esa_core::events::PaymentEventType;
+        use esa_state::{InMemoryWebhookStore, WebhookEventParams};
+
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let wh_store = InMemoryWebhookStore::new();
+        let now = Utc::now();
+
+        // Seed a Captured payment attempt + entity in WebhookStore (terminal state = Captured)
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_diag_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_diag_1".to_string()),
+                payment_reference: Some("pay_diag_1".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now - chrono::Duration::minutes(5),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let payload = serde_json::json!({"event": "payment.captured"});
+        wh_store
+            .process_webhook_event(&WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_cap_once",
+                event_type: PaymentEventType::PaymentCaptured,
+                payment_id: "pay_diag_1",
+                amount_minor: 50000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &payload,
+            })
+            .await
+            .unwrap();
+
+        // Diagnosis claims DUPLICATE_WEBHOOK_SUPPRESSED even though NO duplicate webhook exists!
+        let eval_dup = OutcomeEvaluationRecord::new_pending(
+            "inv_diag_1".to_string(),
+            "merchant_a".to_string(),
+            "pay_diag_1".to_string(),
+            "razorpay".to_string(),
+            "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_cap_once".to_string()]);
+        let eval_id = eval_dup.evaluation_id.clone();
+        mem_store.record_evaluation(eval_dup).await.unwrap();
+
+        // Terminal Captured state alone MUST NOT verify DUPLICATE_WEBHOOK_SUPPRESSED
+        let err = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.category, InferenceErrorCategory::InvalidResponse);
+
+        // Evaluation stays Pending and zero episodic memories were created
+        let still_pending = mem_store
+            .get_evaluation(&scope_for("merchant_a"), &eval_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_pending.accuracy, OutcomeAccuracy::Pending);
+        assert!(still_pending.promoted_memory_id.is_none());
+
+        // Diagnosis claiming REFUND_RESERVATION_PENDING fails when no pending reservation exists
+        let eval_rf = OutcomeEvaluationRecord::new_pending(
+            "inv_diag_2".to_string(),
+            "merchant_a".to_string(),
+            "pay_diag_1".to_string(),
+            "razorpay".to_string(),
+            "REFUND_RESERVATION_PENDING".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["refund:rfnd_diag_1".to_string()]);
+        let eval_rf_id = eval_rf.evaluation_id.clone();
+        mem_store.record_evaluation(eval_rf).await.unwrap();
+        let err_no_rf = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_rf_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_no_rf.category, InferenceErrorCategory::InvalidResponse);
+
+        // Now create an authoritative pending refund reservation in WebhookStore
+        wh_store
+            .reserve_refund("razorpay", "pay_diag_1", "rfnd_diag_1", 10000, "INR")
+            .await
+            .unwrap();
+
+        // With actual pending reservation record present, verification succeeds and promotes once
+        let (verified, promoted) = verify_outcome_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &eval_rf_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified.accuracy, OutcomeAccuracy::Correct);
+        assert!(promoted.is_some());
     }
 }
