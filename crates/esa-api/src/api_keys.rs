@@ -201,10 +201,8 @@ pub struct JwksKeyCache {
 }
 
 async fn fetch_jwks_endpoint_async(endpoint: &str, timeout: Duration) -> Result<String, AuthError> {
-    let builder = reqwest::Client::builder().timeout(timeout);
-    #[cfg(test)]
-    let builder = builder.no_proxy();
-    let client = builder
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
         .build()
         .map_err(|e| AuthError::KeyDiscoveryFailed(format!("HTTP client build failed: {}", e)))?;
     let resp = client.get(endpoint).send().await.map_err(|e| {

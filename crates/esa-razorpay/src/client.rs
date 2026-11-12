@@ -28,23 +28,6 @@ impl RazorpayClient {
         }
     }
 
-    /// Build a client with system proxy discovery disabled (useful in sandboxed test environments).
-    pub fn new_without_proxy(config: RazorpayConfig) -> Self {
-        let rate_limiter = RazorpayRateLimiter::per_second(config.api_rate_limit_per_sec);
-
-        let http = Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build Razorpay HTTP client");
-
-        Self {
-            http,
-            config,
-            rate_limiter,
-        }
-    }
-
     pub fn config(&self) -> &RazorpayConfig {
         &self.config
     }

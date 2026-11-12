@@ -19,17 +19,6 @@ impl CashfreeClient {
         Self { http, config }
     }
 
-    /// Build a client with system proxy discovery disabled (useful in sandboxed test environments).
-    pub fn new_without_proxy(config: CashfreeConfig) -> Self {
-        let http = Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build Cashfree HTTP client");
-
-        Self { http, config }
-    }
-
     pub fn config(&self) -> &CashfreeConfig {
         &self.config
     }

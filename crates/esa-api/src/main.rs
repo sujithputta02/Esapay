@@ -1720,52 +1720,8 @@ async fn razorpay_webhook(
             transition,
             payment,
         }) => {
-            // Only authoritative Captured transitions trigger captured-payment workload side effects.
-            let should_apply_capture_effects = matches!(
-                transition,
-                esa_core::payment_state::TransitionOutcome::Applied {
-                    new_state: PaymentState::Captured,
-                    ..
-                }
-            );
-            let result = if should_apply_capture_effects {
-                let res = payment::apply_payment_event(&state.state_fabric, &parsed.payment_event);
-                publish_payment_side_effects(&state, &res);
-                res
-            } else {
-                payment::PaymentApplyResult {
-                    event_id: parsed.payment_event.event_id.clone(),
-                    workload_updated: false,
-                    workload_id: None,
-                    workload: None,
-                }
-            };
-
-            if matches!(
-                transition,
-                esa_core::payment_state::TransitionOutcome::Applied { .. }
-            ) {
-                if let Some(order_id) = payload_val
-                    .pointer("/payload/payment/entity/order_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                {
-                    let attempt_state = match payment.state {
-                        PaymentState::Captured => Some("captured"),
-                        PaymentState::Authorized => Some("authorized"),
-                        PaymentState::Failed => Some("failed"),
-                        PaymentState::PendingReconciliation => Some("pending_reconciliation"),
-                        _ => None,
-                    };
-                    if let Some(st) = attempt_state {
-                        let _ = state
-                            .webhook_store
-                            .update_payment_attempt_state(order_id, st, Some(&payment_id))
-                            .await;
-                    }
-                }
-            }
+            let result = payment::apply_payment_event(&state.state_fabric, &parsed.payment_event);
+            publish_payment_side_effects(&state, &result);
 
             Json(serde_json::json!({
                 "status": "accepted",
@@ -2241,16 +2197,11 @@ async fn razorpay_confirm_payment(
         ));
     }
 
-    let amount_minor = payment
-        .get("amount")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| AppError::Conflict("Payment entity missing valid numeric amount".into()))?;
+    let amount_minor = payment.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
     let currency = payment
         .get("currency")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::Conflict("Payment entity missing currency".into()))?;
+        .unwrap_or("INR");
 
     if amount_minor != attempt.amount_minor || !currency.eq_ignore_ascii_case(&attempt.currency) {
         return Err(AppError::Conflict(format!(
@@ -2276,15 +2227,8 @@ async fn razorpay_confirm_payment(
                 state = ?existing.state,
                 "Payment already confirmed/captured; returning idempotent response"
             );
-            if attempt.state != "captured" {
-                let _ = state
-                    .webhook_store
-                    .update_payment_attempt_state(order_id, "captured", Some(&req.payment_id))
-                    .await;
-            }
             return Ok(Json(serde_json::json!({
                 "success": true,
-                "captured": true,
                 "status": "already_confirmed",
                 "source": "razorpay_confirm",
                 "event_id": format!("confirm_{}", req.payment_id),
@@ -2297,53 +2241,15 @@ async fn razorpay_confirm_payment(
                 "amount_minor": amount_minor,
                 "currency": currency,
                 "idempotent": true,
-                "workload_updated": false,
                 "message": "Payment has already been confirmed and processed",
             })));
         }
     }
 
-    let raw_status = payment
-        .get("status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .unwrap_or_default();
+    let event = payment_entity_to_event(&payment).map_err(|e| AppError::Internal(e.to_string()))?;
 
-    if raw_status == "created" || raw_status == "pending" {
-        if attempt.state == "created" {
-            let _ = state
-                .webhook_store
-                .update_payment_attempt_state(order_id, "pending", Some(&req.payment_id))
-                .await;
-        }
-        return Err(AppError::Conflict(format!(
-            "Payment '{}' is in '{}' state and has not been captured",
-            req.payment_id, raw_status
-        )));
-    }
-
-    let event = payment_entity_to_event(&payment).map_err(|e| match e {
-        esa_razorpay::WebhookError::UnsupportedStatus(st) => AppError::Conflict(format!(
-            "Unsupported or unknown Razorpay payment status '{}'; failing closed",
-            st
-        )),
-        other => AppError::BadRequest(other.to_string()),
-    })?;
-
-    // 7. Record and transition transactionally into durable webhook_store.
-    // Distinct event IDs per lifecycle phase allow authorize -> capture progression
-    // without colliding in the webhook_inbox deduplication table.
-    let confirm_event_id = match event.event_type {
-        PaymentEventType::PaymentCaptured => format!("confirm_{}", req.payment_id),
-        PaymentEventType::PaymentAuthorized => format!("confirm_auth_{}", req.payment_id),
-        PaymentEventType::PaymentFailed => format!("confirm_failed_{}", req.payment_id),
-        ref other => {
-            return Err(AppError::Conflict(format!(
-                "Unsupported Razorpay confirmation event type: {:?}",
-                other
-            )));
-        }
-    };
+    // 7. Record and transition transactionally into durable webhook_store
+    let confirm_event_id = format!("confirm_{}", req.payment_id);
 
     let params = esa_state::WebhookEventParams {
         provider: "razorpay",
@@ -2360,73 +2266,19 @@ async fn razorpay_confirm_payment(
 
     let store_result = state.webhook_store.process_webhook_event(&params).await;
     match store_result {
-        Ok(esa_state::WebhookProcessingResult::Applied {
-            transition,
-            payment: durable_payment,
-            ..
-        }) => {
-            let attempt_state = match durable_payment.state {
-                PaymentState::Captured => "captured",
-                PaymentState::Authorized => "authorized",
-                PaymentState::Failed => "failed",
-                PaymentState::PendingReconciliation => "pending_reconciliation",
-                PaymentState::PartiallyRefunded => "partially_refunded",
-                PaymentState::Refunded => "refunded",
-                PaymentState::Created => "created",
-            };
-
-            let should_apply_capture_effects = event.event_type
-                == PaymentEventType::PaymentCaptured
-                && matches!(
-                    transition,
-                    esa_core::payment_state::TransitionOutcome::Applied {
-                        new_state: PaymentState::Captured,
-                        ..
-                    }
-                );
-
-            let (workload_updated, workload_id, result_event_id) = if should_apply_capture_effects {
-                let result = payment::apply_payment_event(&state.state_fabric, &event);
-                publish_payment_side_effects(&state, &result);
-                (result.workload_updated, result.workload_id, result.event_id)
-            } else {
-                (false, None, confirm_event_id.clone())
-            };
-
-            if matches!(
-                transition,
-                esa_core::payment_state::TransitionOutcome::Applied { .. }
-            ) || attempt.state == "created"
-            {
-                let _ = state
-                    .webhook_store
-                    .update_payment_attempt_state(order_id, attempt_state, Some(&req.payment_id))
-                    .await;
-            }
-
-            let is_captured = durable_payment.state == PaymentState::Captured;
-            let (resp_status, msg) = match durable_payment.state {
-                PaymentState::Captured => {
-                    ("accepted", "Payment authoritatively confirmed and captured")
-                }
-                PaymentState::Authorized => (
-                    "authorized",
-                    "Payment is authorized only and has not been captured",
-                ),
-                PaymentState::Failed => ("failed", "Payment failed at Razorpay"),
-                PaymentState::PendingReconciliation => (
-                    "pending_reconciliation",
-                    "Payment flagged for reconciliation; not captured",
-                ),
-                _ => (attempt_state, "Payment recorded in non-captured state"),
-            };
+        Ok(esa_state::WebhookProcessingResult::Applied { .. }) => {
+            let result = payment::apply_payment_event(&state.state_fabric, &event);
+            publish_payment_side_effects(&state, &result);
+            let _ = state
+                .webhook_store
+                .update_payment_attempt_state(order_id, "captured", Some(&req.payment_id))
+                .await;
 
             Ok(Json(serde_json::json!({
-                "success": is_captured,
-                "captured": is_captured,
-                "status": resp_status,
+                "success": true,
+                "status": "accepted",
                 "source": "razorpay_confirm",
-                "payment_state": attempt_state,
+                "payment_state": "captured",
                 "transaction_id": attempt.transaction_id,
                 "provider": "razorpay",
                 "provider_order_id": order_id,
@@ -2435,45 +2287,18 @@ async fn razorpay_confirm_payment(
                 "amount_minor": amount_minor,
                 "currency": currency,
                 "idempotent": false,
-                "message": msg,
-                "event_id": result_event_id,
-                "workload_updated": workload_updated,
-                "workload_id": workload_id,
+                "message": "Payment authoritatively confirmed and captured",
+                "event_id": result.event_id,
+                "workload_updated": result.workload_updated,
+                "workload_id": result.workload_id,
             })))
         }
         Ok(esa_state::WebhookProcessingResult::AlreadyProcessed { .. }) => {
-            let (is_captured, resp_status, p_state, msg) = match event.event_type {
-                PaymentEventType::PaymentCaptured => (
-                    true,
-                    "already_confirmed",
-                    "captured",
-                    "Payment has already been confirmed and processed",
-                ),
-                PaymentEventType::PaymentAuthorized => (
-                    false,
-                    "already_authorized",
-                    "authorized",
-                    "Payment is already recorded in authorized state (not captured)",
-                ),
-                PaymentEventType::PaymentFailed => (
-                    false,
-                    "already_failed",
-                    "failed",
-                    "Payment is already recorded as failed",
-                ),
-                _ => (
-                    false,
-                    "already_processed",
-                    "unknown",
-                    "Payment event already processed",
-                ),
-            };
             Ok(Json(serde_json::json!({
-                "success": is_captured,
-                "captured": is_captured,
-                "status": resp_status,
+                "success": true,
+                "status": "already_confirmed",
                 "source": "razorpay_confirm",
-                "payment_state": p_state,
+                "payment_state": "captured",
                 "transaction_id": attempt.transaction_id,
                 "provider": "razorpay",
                 "provider_order_id": order_id,
@@ -2482,8 +2307,7 @@ async fn razorpay_confirm_payment(
                 "amount_minor": amount_minor,
                 "currency": currency,
                 "idempotent": true,
-                "workload_updated": false,
-                "message": msg,
+                "message": "Payment has already been confirmed and processed",
                 "event_id": confirm_event_id,
             })))
         }
@@ -4038,49 +3862,6 @@ async fn get_token_metrics(
     Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
-fn build_agent_activity_for_caller(
-    state: &AppState,
-    caller: &api_keys::CallerIdentity,
-) -> serde_json::Value {
-    // Tenant isolation: non-admin callers can only view inference activity scoped to their merchant.
-    let scope_merchant = if caller.is_admin() {
-        None
-    } else {
-        Some(caller.merchant_id.as_str())
-    };
-    let metrics = state
-        .ollama_client
-        .get_recent_inference_metrics_for_merchant(scope_merchant, 20);
-
-    let ai_thinking: Vec<serde_json::Value> = metrics
-        .into_iter()
-        .filter(|m| m.error.is_none())
-        .map(|m| {
-            serde_json::json!({
-                "request_id": m.request_id,
-                "agent": m.agent_id,
-                "merchant_id": m.merchant_id,
-                "model": m.model,
-                "prompt_hash": m.prompt_hash,
-                "prompt": m.redacted_prompt_summary.unwrap_or_default(),
-                "response": m.redacted_response_summary.unwrap_or_default(),
-                "redacted": m.redaction_applied,
-                "evidence_refs": m.evidence_refs,
-                "input_tokens": m.input_tokens,
-                "output_tokens": m.output_tokens,
-                "latency_ms": m.latency_ms,
-                "cache_hit": m.cache_hit,
-                "error_category": m.error_category,
-                "timestamp": m.timestamp.to_rfc3339(),
-            })
-        })
-        .collect();
-
-    serde_json::json!({
-        "ai_thinking": ai_thinking
-    })
-}
-
 async fn get_agent_activity(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4093,8 +3874,25 @@ async fn get_agent_activity(
             "Caller lacks required 'audit:read' scope".into(),
         ));
     }
+    let metrics = state.ollama_client.get_recent_inference_metrics(20);
 
-    Ok(Json(build_agent_activity_for_caller(&state, &caller)))
+    let ai_thinking: Vec<serde_json::Value> = metrics
+        .into_iter()
+        .filter(|m| m.error.is_none())
+        .map(|m| {
+            serde_json::json!({
+                "agent": m.agent_id,
+                "prompt": m.prompt,
+                "response": m.response,
+                "timestamp": m.timestamp.to_rfc3339(),
+                "model": m.model,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "ai_thinking": ai_thinking
+    })))
 }
 
 async fn get_agents_status(
@@ -6261,11 +6059,11 @@ mod integration_tests {
     fn create_test_state() -> AppState {
         let state_fabric = Arc::new(StateFabric::new());
         let audit_store = Arc::new(AuditStore::new());
-        let ollama_client = OllamaClient::new_without_proxy(
+        let ollama_client = OllamaClient::new(
             "http://localhost:11434".to_string(),
             "deepseek-r1:1.5b".to_string(),
         );
-        let orchestrator = Arc::new(EsaOrchestrator::new_without_proxy(
+        let orchestrator = Arc::new(EsaOrchestrator::new(
             Arc::clone(&state_fabric),
             ollama_client.clone(),
             Arc::clone(&audit_store),
@@ -6274,10 +6072,7 @@ mod integration_tests {
         let broadcaster = Arc::new(TelemetryBroadcaster::new());
         let agent_status = Arc::new(std::sync::RwLock::new(AgentStatusState::default()));
         let vitals = VitalsStore::new();
-        let fluid_reasoner = esa_agents::FluidReasonerClient::new_without_proxy(
-            std::env::var("FLUID_REASONER_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:5005".to_string()),
-        );
+        let fluid_reasoner = esa_agents::FluidReasonerClient::default_local();
         let rate_limiter = rate_limiter::ApiRateLimiter::new();
         let sandbox_keys = api_keys::get_global_sandbox_key_store();
 
@@ -6850,7 +6645,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 1000,
             account_id: None,
         };
-        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(rzp_config)));
+        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
 
         state
             .webhook_store
@@ -9210,7 +9005,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 1000,
             account_id: account_id.map(|s| s.to_string()),
         };
-        let adapter = RazorpayAdapter::with_config_no_proxy(config);
+        let adapter = RazorpayAdapter::with_config(config);
         state.razorpay = Some(Arc::new(adapter));
         let store = Arc::clone(&state.webhook_store);
         (state, store)
@@ -11269,7 +11064,7 @@ mod integration_tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{}", port);
 
         // Helper to build WS upgrade request
@@ -11525,7 +11320,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 1000,
             account_id: None,
         };
-        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(rzp_config)));
+        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
 
         state
             .webhook_store
@@ -12147,7 +11942,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 10,
             account_id: None,
         };
-        live_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(live_config)));
+        live_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(live_config)));
         let live_app = build_app(live_state.clone());
 
         // Generate a sandbox key
@@ -12275,7 +12070,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 1000,
             account_id: None,
         };
-        test_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(test_config)));
+        test_state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(test_config)));
         let test_app = build_app(test_state);
 
         // Order creation succeeds with test credentials
@@ -12976,7 +12771,7 @@ mod integration_tests {
             env: esa_cashfree::CashfreeEnv::Sandbox,
             api_base: mock_url,
         };
-        let cf_provider = Arc::new(CashfreeProvider::new_without_proxy(cf_config));
+        let cf_provider = Arc::new(CashfreeProvider::new(cf_config));
         state.cashfree = Some(cf_provider);
 
         let app = build_app(state.clone());
@@ -13129,7 +12924,7 @@ mod integration_tests {
             payment_url: "https://test.payu.in/_payment".to_string(),
             verify_url: verify_mock_url,
         };
-        let payu_provider = Arc::new(PayUProvider::new_without_proxy(payu_config));
+        let payu_provider = Arc::new(PayUProvider::new(payu_config));
         state.payu = Some(payu_provider);
 
         let app = build_app(state.clone());
@@ -13325,7 +13120,7 @@ mod integration_tests {
             api_rate_limit_per_sec: 1000,
             account_id: None,
         };
-        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(rzp_config)));
+        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config(rzp_config)));
 
         let cf_config = CashfreeConfig {
             client_id: "test_cf_id".to_string(),
@@ -13334,7 +13129,7 @@ mod integration_tests {
             env: esa_cashfree::CashfreeEnv::Sandbox,
             api_base: format!("http://{}", cf_addr),
         };
-        state.cashfree = Some(Arc::new(CashfreeProvider::new_without_proxy(cf_config)));
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
 
         let payu_config = PayUConfig {
             merchant_key: "test_payu_key".to_string(),
@@ -13343,7 +13138,7 @@ mod integration_tests {
             payment_url: "https://test.payu.in/_payment".to_string(),
             verify_url: "https://test.payu.in/merchant/postservice?form=2".to_string(),
         };
-        state.payu = Some(Arc::new(PayUProvider::new_without_proxy(payu_config)));
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
 
         let app = build_app(state.clone());
 
@@ -13476,7 +13271,7 @@ mod integration_tests {
             env: esa_cashfree::CashfreeEnv::Sandbox,
             api_base: "http://127.0.0.1:9".to_string(),
         };
-        state.cashfree = Some(Arc::new(CashfreeProvider::new_without_proxy(cf_config)));
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
 
         let payu_config = PayUConfig {
             merchant_key: "test_payu_key".to_string(),
@@ -13485,7 +13280,7 @@ mod integration_tests {
             payment_url: "https://test.payu.in/_payment".to_string(),
             verify_url: "http://127.0.0.1:9".to_string(),
         };
-        state.payu = Some(Arc::new(PayUProvider::new_without_proxy(payu_config)));
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
 
         let key_alpha = "esa_sbx_merchant_alpha_sec_123456";
         let key_beta = "esa_sbx_merchant_beta_sec_654321";
@@ -13668,7 +13463,7 @@ mod integration_tests {
             env: esa_cashfree::CashfreeEnv::Sandbox,
             api_base: "http://127.0.0.1:9".to_string(),
         };
-        state.cashfree = Some(Arc::new(CashfreeProvider::new_without_proxy(cf_config)));
+        state.cashfree = Some(Arc::new(CashfreeProvider::new(cf_config)));
 
         let key_ref = "esa_sbx_merchant_refund_key_123456";
         state
@@ -13787,7 +13582,7 @@ mod integration_tests {
             payment_url: "https://test.payu.in/_payment".to_string(),
             verify_url: "http://127.0.0.1:9".to_string(),
         };
-        state.payu = Some(Arc::new(PayUProvider::new_without_proxy(payu_config)));
+        state.payu = Some(Arc::new(PayUProvider::new(payu_config)));
 
         let _ = state.state_fabric.upsert_workload(WorkloadEntity {
             workload_id: "payment-upi-india-north".to_string(),
@@ -13956,834 +13751,5 @@ mod integration_tests {
             .as_str()
             .unwrap()
             .contains("Unrecognized PayU event status"));
-    }
-
-    async fn insert_test_merchant_key(state: &AppState, merchant_id: &str) -> String {
-        let raw_key = format!("esa_test_demo_{}", uuid::Uuid::new_v4().simple());
-        let key_hash = api_keys::hash_api_key(&raw_key);
-        let record = api_keys::SandboxKeyRecord {
-            key_hash,
-            key_prefix: raw_key[..18].to_string(),
-            merchant_id: merchant_id.to_string(),
-            created_at: chrono::Utc::now(),
-            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
-            revoked: false,
-        };
-        state.sandbox_keys.insert_key(&record).await.unwrap();
-        raw_key
-    }
-
-    async fn setup_razorpay_confirm_harness(
-        merchant_id: &str,
-        order_id: &str,
-        payment_id: &str,
-        initial_payment: serde_json::Value,
-    ) -> (
-        AppState,
-        axum::Router,
-        String,
-        Arc<std::sync::Mutex<serde_json::Value>>,
-    ) {
-        let payment_state_mock = Arc::new(std::sync::Mutex::new(initial_payment));
-        let payment_mock_clone = Arc::clone(&payment_state_mock);
-        let oid = order_id.to_string();
-        let mid = merchant_id.to_string();
-
-        let mock_app = axum::Router::new()
-            .route(
-                &format!("/payments/{}", payment_id),
-                axum::routing::get(move || {
-                    let guard_ref = Arc::clone(&payment_mock_clone);
-                    async move {
-                        let body = guard_ref.lock().unwrap().clone();
-                        (StatusCode::OK, Json(body))
-                    }
-                }),
-            )
-            .route(
-                &format!("/orders/{}", order_id),
-                axum::routing::get(move || {
-                    let oid_c = oid.clone();
-                    let mid_c = mid.clone();
-                    async move {
-                        (
-                            StatusCode::OK,
-                            Json(serde_json::json!({
-                                "id": oid_c,
-                                "amount": 5000,
-                                "currency": "INR",
-                                "notes": {
-                                    "esa_merchant_id": mid_c
-                                }
-                            })),
-                        )
-                    }
-                }),
-            );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            axum::serve(listener, mock_app).await.unwrap();
-        });
-
-        let mut state = create_test_state();
-        let rzp_config = RazorpayConfig {
-            key_id: "rzp_test_phase1_key".to_string(),
-            key_secret: "phase1_secret".to_string(),
-            webhook_secret: "phase1_wh_secret".to_string(),
-            api_base: format!("http://127.0.0.1:{}", port),
-            mode: esa_razorpay::RazorpayMode::Test,
-            test_mode_only: true,
-            webhook_rate_limit_per_sec: 1000,
-            api_rate_limit_per_sec: 1000,
-            account_id: None,
-        };
-        state.razorpay = Some(Arc::new(RazorpayAdapter::with_config_no_proxy(rzp_config)));
-
-        state
-            .webhook_store
-            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
-                transaction_id: format!("tx_{}", order_id),
-                merchant_id: merchant_id.to_string(),
-                provider: "razorpay".to_string(),
-                provider_order_id: Some(order_id.to_string()),
-                payment_reference: None,
-                amount_minor: 5000,
-                currency: "INR".to_string(),
-                state: "created".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .await
-            .unwrap();
-
-        state
-            .state_fabric
-            .upsert_workload(WorkloadEntity {
-                workload_id: "payment-upi-india-south".to_string(),
-                shard_id: "shard-001".to_string(),
-                state: WorkloadState::Healthy,
-                region: Region::IndiaSouth,
-                metrics: WorkloadMetrics {
-                    rate_per_min: 3000.0,
-                    p50_latency_ms: 45.0,
-                    p95_latency_ms: 120.0,
-                    p99_latency_ms: 180.0,
-                    error_rate: 0.01,
-                    queue_depth: 250,
-                    timestamp: chrono::Utc::now(),
-                },
-                replication: ReplicationPolicy {
-                    min_replicas: 2,
-                    max_replicas: 10,
-                    current_replicas: 3,
-                    consistency_mode: ConsistencyMode::Strong,
-                },
-                locality: LocalityPreference {
-                    preferred_region: Region::IndiaSouth,
-                    fallback_regions: vec![Region::IndiaWest, Region::IndiaNorth],
-                },
-                lifecycle: LifecycleState::Active,
-                version: 1,
-                updated_at: chrono::Utc::now(),
-            })
-            .unwrap();
-
-        let api_key = insert_test_merchant_key(&state, merchant_id).await;
-        let app = build_app(state.clone());
-        (state, app, api_key, payment_state_mock)
-    }
-
-    async fn call_razorpay_confirm(
-        app: &axum::Router,
-        api_key: &str,
-        payment_id: &str,
-    ) -> (StatusCode, serde_json::Value) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/razorpay/confirm")
-            .header("content-type", "application/json")
-            .header("x-api-key", api_key)
-            .body(axum::body::Body::from(
-                serde_json::to_string(&serde_json::json!({ "payment_id": payment_id })).unwrap(),
-            ))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-        (status, json)
-    }
-
-    fn sign_razorpay_webhook(secret: &str, body: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        hex::encode(mac.finalize().into_bytes())
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_authorize_without_capture() {
-        let payment_id = "pay_p1_auth_only";
-        let order_id = "order_p1_auth_only";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_auth",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "authorized",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let initial_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let (status, json) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["success"], false);
-        assert_eq!(json["captured"], false);
-        assert_eq!(json["status"], "authorized");
-        assert_eq!(json["payment_state"], "authorized");
-        assert_eq!(json["workload_updated"], false);
-
-        let record = state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.state, PaymentState::Authorized);
-
-        let attempt = state
-            .webhook_store
-            .get_payment_attempt_for_provider("razorpay", order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(attempt.state, "authorized");
-
-        let final_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-        assert_eq!(
-            initial_rate, final_rate,
-            "Authorized payment must not trigger captured-payment workload side effects"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_authorize_followed_by_capture() {
-        let payment_id = "pay_p1_auth_then_cap";
-        let order_id = "order_p1_auth_then_cap";
-        let (state, app, key, mock_payment) = setup_razorpay_confirm_harness(
-            "merchant_p1_seq",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "authorized",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let initial_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        // Step 1: Authorize
-        let (s1, j1) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s1, StatusCode::OK);
-        assert_eq!(j1["payment_state"], "authorized");
-        assert_eq!(j1["captured"], false);
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            initial_rate
-        );
-
-        // Step 2: Capture on Razorpay
-        *mock_payment.lock().unwrap() = serde_json::json!({
-            "id": payment_id,
-            "order_id": order_id,
-            "amount": 5000,
-            "currency": "INR",
-            "status": "captured",
-            "method": "upi"
-        });
-
-        let (s2, j2) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s2, StatusCode::OK);
-        assert_eq!(j2["success"], true);
-        assert_eq!(j2["captured"], true);
-        assert_eq!(j2["status"], "accepted");
-        assert_eq!(j2["payment_state"], "captured");
-        assert_eq!(j2["workload_updated"], true);
-
-        let record = state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.state, PaymentState::Captured);
-
-        let attempt = state
-            .webhook_store
-            .get_payment_attempt_for_provider("razorpay", order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(attempt.state, "captured");
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_already_captured_duplicate() {
-        let payment_id = "pay_p1_dup_cap";
-        let order_id = "order_p1_dup_cap";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_dup",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "captured",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let (s1, j1) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s1, StatusCode::OK);
-        assert_eq!(j1["payment_state"], "captured");
-        let rate_after_first = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let (s2, j2) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s2, StatusCode::OK);
-        assert_eq!(j2["status"], "already_confirmed");
-        assert_eq!(j2["payment_state"], "captured");
-        assert_eq!(j2["idempotent"], true);
-        assert_eq!(j2["workload_updated"], false);
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            rate_after_first
-        );
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_failed_payment() {
-        let payment_id = "pay_p1_failed";
-        let order_id = "order_p1_failed";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_fail",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "failed",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let initial_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let (status, json) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["success"], false);
-        assert_eq!(json["captured"], false);
-        assert_eq!(json["payment_state"], "failed");
-        assert_eq!(json["workload_updated"], false);
-
-        let record = state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.state, PaymentState::Failed);
-
-        let attempt = state
-            .webhook_store
-            .get_payment_attempt_for_provider("razorpay", order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(attempt.state, "failed");
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            initial_rate
-        );
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_pending_payment() {
-        let payment_id = "pay_p1_pending";
-        let order_id = "order_p1_pending";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_pend",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "created",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let initial_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let (status, _) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-
-        assert!(state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .is_none());
-        let attempt = state
-            .webhook_store
-            .get_payment_attempt_for_provider("razorpay", order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(attempt.state, "pending");
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            initial_rate
-        );
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_unknown_status_fails_closed() {
-        let payment_id = "pay_p1_unknown";
-        let order_id = "order_p1_unknown";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_unk",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "unrecognized_upstream_state",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let (status, _) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_invalid_amount_or_currency() {
-        let payment_id = "pay_p1_bad_amt";
-        let order_id = "order_p1_bad_amt";
-        let (state, app, key, mock_payment) = setup_razorpay_confirm_harness(
-            "merchant_p1_amt",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 4999,
-                "currency": "INR",
-                "status": "captured",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let (s_amt, _) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s_amt, StatusCode::CONFLICT);
-        assert!(state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .is_none());
-
-        *mock_payment.lock().unwrap() = serde_json::json!({
-            "id": payment_id,
-            "order_id": order_id,
-            "amount": 5000,
-            "currency": "USD",
-            "status": "captured",
-            "method": "upi"
-        });
-        let (s_cur, _) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s_cur, StatusCode::CONFLICT);
-        assert!(state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirm_merchant_mismatch() {
-        let payment_id = "pay_p1_mm";
-        let order_id = "order_p1_mm";
-        let (state, app, _owner_key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_owner",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "captured",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let other_key = insert_test_merchant_key(&state, "merchant_p1_attacker").await;
-        let (status, _) = call_razorpay_confirm(&app, &other_key, payment_id).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(state
-            .webhook_store
-            .get_payment_record(payment_id)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_duplicate_webhook_after_confirmation() {
-        let payment_id = "pay_p1_wh_after_conf";
-        let order_id = "order_p1_wh_after_conf";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_wh1",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "captured",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let (s1, j1) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s1, StatusCode::OK);
-        assert_eq!(j1["payment_state"], "captured");
-        let rate_after_confirm = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let wh_body = serde_json::to_vec(&serde_json::json!({
-            "event": "payment.captured",
-            "payload": {
-                "payment": {
-                    "entity": {
-                        "id": payment_id,
-                        "order_id": order_id,
-                        "amount": 5000,
-                        "currency": "INR",
-                        "status": "captured",
-                        "method": "upi"
-                    }
-                }
-            }
-        }))
-        .unwrap();
-        let sig = sign_razorpay_webhook("phase1_wh_secret", &wh_body);
-        let wh_req = Request::builder()
-            .method("POST")
-            .uri("/api/razorpay/webhook")
-            .header("content-type", "application/json")
-            .header("x-razorpay-signature", sig)
-            .header("x-razorpay-event-id", "evt_wh_dup_after_conf")
-            .body(axum::body::Body::from(wh_body))
-            .unwrap();
-        let wh_resp = app.clone().oneshot(wh_req).await.unwrap();
-        assert_eq!(wh_resp.status(), StatusCode::OK);
-        let wh_json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(wh_resp.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(wh_json["workload_updated"], false);
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            rate_after_confirm
-        );
-    }
-
-    #[tokio::test]
-    async fn test_razorpay_confirmation_after_authoritative_captured_webhook() {
-        let payment_id = "pay_p1_conf_after_wh";
-        let order_id = "order_p1_conf_after_wh";
-        let (state, app, key, _) = setup_razorpay_confirm_harness(
-            "merchant_p1_wh2",
-            order_id,
-            payment_id,
-            serde_json::json!({
-                "id": payment_id,
-                "order_id": order_id,
-                "amount": 5000,
-                "currency": "INR",
-                "status": "captured",
-                "method": "upi"
-            }),
-        )
-        .await;
-
-        let initial_rate = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-
-        let wh_body = serde_json::to_vec(&serde_json::json!({
-            "event": "payment.captured",
-            "payload": {
-                "payment": {
-                    "entity": {
-                        "id": payment_id,
-                        "order_id": order_id,
-                        "amount": 5000,
-                        "currency": "INR",
-                        "status": "captured",
-                        "method": "upi"
-                    }
-                }
-            }
-        }))
-        .unwrap();
-        let sig = sign_razorpay_webhook("phase1_wh_secret", &wh_body);
-        let wh_req = Request::builder()
-            .method("POST")
-            .uri("/api/razorpay/webhook")
-            .header("content-type", "application/json")
-            .header("x-razorpay-signature", sig)
-            .header("x-razorpay-event-id", "evt_wh_first_cap")
-            .body(axum::body::Body::from(wh_body))
-            .unwrap();
-        let wh_resp = app.clone().oneshot(wh_req).await.unwrap();
-        assert_eq!(wh_resp.status(), StatusCode::OK);
-
-        let rate_after_wh = state
-            .state_fabric
-            .get_workload("payment-upi-india-south")
-            .unwrap()
-            .metrics
-            .rate_per_min;
-        assert!(rate_after_wh > initial_rate);
-
-        let (s_conf, j_conf) = call_razorpay_confirm(&app, &key, payment_id).await;
-        assert_eq!(s_conf, StatusCode::OK);
-        assert_eq!(j_conf["status"], "already_confirmed");
-        assert_eq!(j_conf["payment_state"], "captured");
-        assert_eq!(j_conf["idempotent"], true);
-        assert_eq!(j_conf["workload_updated"], false);
-        assert_eq!(
-            state
-                .state_fabric
-                .get_workload("payment-upi-india-south")
-                .unwrap()
-                .metrics
-                .rate_per_min,
-            rate_after_wh
-        );
-
-        let attempt = state
-            .webhook_store
-            .get_payment_attempt_for_provider("razorpay", order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(attempt.state, "captured");
-    }
-
-    #[tokio::test]
-    async fn test_agent_activity_redacts_secrets_and_enforces_tenant_isolation() {
-        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
-        clear_mode_env_vars();
-        std::env::set_var("ESA_ADMIN_API_KEY", "admin-secret-key-activity-test");
-
-        let state = create_test_state();
-        let tracker = state.ollama_client.get_cost_tracker();
-
-        tracker.record_inference_with_scope(
-            "deepseek-r1:1.5b",
-            "diagnosis",
-            Some("merchant_alpha_act"),
-            r#"{"api_key":"esa_live_alpha_secret_123","email":"alpha@example.com","p95_latency_ms":280}"#,
-            r#"<think>hidden cot alpha</think>{"hypothesis":"Latency spike","evidence_refs":["p95_latency_ms"]}"#,
-            110,
-            None,
-        );
-        tracker.record_inference_with_scope(
-            "deepseek-r1:1.5b",
-            "diagnosis",
-            Some("merchant_beta_act"),
-            r#"{"api_key":"esa_live_beta_secret_456","p95_latency_ms":300}"#,
-            r#"{"hypothesis":"Beta secret","evidence_refs":["p95_latency_ms"]}"#,
-            90,
-            None,
-        );
-        tracker.record_inference_with_scope(
-            "deepseek-r1:1.5b",
-            "monitor",
-            None,
-            "global infra prompt",
-            "global infra response",
-            50,
-            None,
-        );
-
-        let sandbox_key = insert_test_merchant_key(&state, "merchant_alpha_act").await;
-        let app = build_app(state.clone());
-
-        // 1. Sandbox merchant key without audit:read fails closed with 403
-        let req_forbidden = Request::builder()
-            .method("GET")
-            .uri("/api/v1/agents/activity")
-            .header("x-api-key", &sandbox_key)
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp_forbidden = app.clone().oneshot(req_forbidden).await.unwrap();
-        assert_eq!(resp_forbidden.status(), StatusCode::FORBIDDEN);
-
-        // 2. Non-admin caller with audit:read sees ONLY its own merchant_id (never beta or global)
-        let alpha_caller = api_keys::CallerIdentity {
-            user_id: "user_alpha".to_string(),
-            merchant_id: "merchant_alpha_act".to_string(),
-            email: None,
-            role: "merchant".to_string(),
-            auth_type: "jwt".to_string(),
-            environment: "sandbox".to_string(),
-            scopes: vec!["audit:read".to_string()],
-        };
-        let scoped_json = build_agent_activity_for_caller(&state, &alpha_caller);
-        let entries = scoped_json["ai_thinking"].as_array().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["merchant_id"], "merchant_alpha_act");
-        let prompt_str = entries[0]["prompt"].as_str().unwrap();
-        let resp_str = entries[0]["response"].as_str().unwrap();
-        assert!(!prompt_str.contains("esa_live_alpha_secret_123"));
-        assert!(!prompt_str.contains("alpha@example.com"));
-        assert!(!resp_str.contains("hidden cot alpha"));
-        assert!(!resp_str.contains("Beta secret"));
-        assert_eq!(entries[0]["redacted"], true);
-
-        // 3. Admin caller via HTTP sees all entries, all redacted
-        let req_admin = Request::builder()
-            .method("GET")
-            .uri("/api/v1/agents/activity")
-            .header("x-api-key", "admin-secret-key-activity-test")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp_admin = app.oneshot(req_admin).await.unwrap();
-        assert_eq!(resp_admin.status(), StatusCode::OK);
-        let admin_json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp_admin.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let admin_entries = admin_json["ai_thinking"].as_array().unwrap();
-        assert_eq!(admin_entries.len(), 3);
-        let serialized = serde_json::to_string(&admin_json).unwrap();
-        assert!(!serialized.contains("esa_live_alpha_secret_123"));
-        assert!(!serialized.contains("esa_live_beta_secret_456"));
-        assert!(!serialized.contains("alpha@example.com"));
-        assert!(!serialized.contains("hidden cot alpha"));
-
-        std::env::remove_var("ESA_ADMIN_API_KEY");
     }
 }

@@ -41,19 +41,6 @@ impl RazorpayAdapter {
         }
     }
 
-    /// Build an adapter with system proxy discovery disabled (useful in sandboxed test environments).
-    pub fn with_config_no_proxy(config: RazorpayConfig) -> Self {
-        let webhook_limiter = RazorpayRateLimiter::per_second(config.webhook_rate_limit_per_sec);
-        let client = RazorpayClient::new_without_proxy(config.clone());
-
-        Self {
-            config,
-            client,
-            webhook_limiter,
-            deduper: EventDeduper::new(),
-        }
-    }
-
     pub fn try_from_env() -> Result<Self, RazorpayConfigError> {
         let config = RazorpayConfig::from_env()?;
         Ok(Self::with_config(config))
@@ -301,7 +288,6 @@ impl PaymentProvider for RazorpayAdapter {
             "captured" => ProviderPaymentStatus::Captured,
             "authorized" => ProviderPaymentStatus::Authorized,
             "failed" => ProviderPaymentStatus::Failed,
-            "created" | "pending" => ProviderPaymentStatus::Pending,
             "refunded" => ProviderPaymentStatus::Refunded,
             _ => ProviderPaymentStatus::Unknown,
         };
