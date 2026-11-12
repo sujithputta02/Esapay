@@ -7,4 +7,3 @@ pub use postgres::*;
 pub use retriever::*;
 pub use store::*;
 pub use types::*;
-
