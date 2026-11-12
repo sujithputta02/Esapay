@@ -310,6 +310,7 @@ pub struct OutcomeEvaluationRecord {
     pub promoted_memory_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub verified_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl OutcomeEvaluationRecord {
@@ -325,6 +326,7 @@ impl OutcomeEvaluationRecord {
         deterministic_fallback_used: bool,
         observed_authoritative_state: CanonicalPaymentState,
     ) -> Self {
+        let now = Utc::now();
         Self {
             evaluation_id: format!("eval_{}", Uuid::new_v4().simple()),
             investigation_id,
@@ -339,8 +341,13 @@ impl OutcomeEvaluationRecord {
             verified_outcome_state: None,
             accuracy: OutcomeAccuracy::Pending,
             promoted_memory_id: None,
-            created_at: Utc::now(),
+            created_at: now,
             verified_at: None,
+            expires_at: Some(now + Duration::days(90)),
         }
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|exp| exp <= now)
     }
 }

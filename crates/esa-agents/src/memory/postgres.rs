@@ -65,10 +65,13 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 accuracy VARCHAR(32) NOT NULL,
                 promoted_memory_id VARCHAR(128),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                verified_at TIMESTAMPTZ
+                verified_at TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ
             );
             "#,
+            "ALTER TABLE esa_experience_evaluations ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_merchant ON esa_experience_evaluations(merchant_id, created_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_esa_eval_expires ON esa_experience_evaluations(expires_at);",
         ];
 
         for stmt in stmts {
@@ -86,7 +89,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         let v = record.sanitize_and_validate()?;
         let source_refs_json = serde_json::to_value(&v.source_refs).unwrap_or_default();
 
-        sqlx::query(
+        let res = sqlx::query(
             r#"
             INSERT INTO esa_memory_records (
                 memory_id, memory_type, scope, merchant_id, provider,
@@ -105,7 +108,9 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 verification_status = EXCLUDED.verification_status,
                 version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at,
-                expires_at = EXCLUDED.expires_at;
+                expires_at = EXCLUDED.expires_at
+            WHERE esa_memory_records.scope = EXCLUDED.scope
+              AND esa_memory_records.merchant_id IS NOT DISTINCT FROM EXCLUDED.merchant_id;
             "#,
         )
         .bind(&v.memory_id)
@@ -132,6 +137,13 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 format!("Failed to persist memory record: {}", e),
             )
         })?;
+
+        if res.rows_affected() == 0 {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Cannot overwrite memory record owned by another scope or merchant",
+            ));
+        }
 
         Ok(v)
     }
@@ -223,7 +235,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
     }
 
     async fn purge_expired(&self) -> Result<usize, InferenceError> {
-        let res = sqlx::query(
+        let mem_res = sqlx::query(
             "DELETE FROM esa_memory_records WHERE expires_at IS NOT NULL AND expires_at <= NOW();",
         )
         .execute(&self.pool)
@@ -234,7 +246,20 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 format!("Failed to purge expired memories: {}", e),
             )
         })?;
-        Ok(res.rows_affected() as usize)
+
+        let eval_res = sqlx::query(
+            "DELETE FROM esa_experience_evaluations WHERE expires_at IS NOT NULL AND expires_at <= NOW();",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to purge expired evaluations: {}", e),
+            )
+        })?;
+
+        Ok((mem_res.rows_affected() + eval_res.rows_affected()) as usize)
     }
 
     async fn record_evaluation(
@@ -247,12 +272,12 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 evaluation_id, investigation_id, merchant_id, payment_reference, provider,
                 recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
                 observed_authoritative_state, verified_outcome_state, accuracy,
-                promoted_memory_id, created_at, verified_at
+                promoted_memory_id, created_at, verified_at, expires_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9,
                 $10, $11, $12,
-                $13, $14, $15
+                $13, $14, $15, $16
             );
             "#,
         )
@@ -271,6 +296,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         .bind(&eval.promoted_memory_id)
         .bind(eval.created_at)
         .bind(eval.verified_at)
+        .bind(eval.expires_at)
         .execute(&self.pool)
         .await
         .map_err(|e| {
@@ -287,15 +313,21 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         scope: &ExecutionScope,
         evaluation_id: &str,
     ) -> Result<Option<OutcomeEvaluationRecord>, InferenceError> {
-        let caller_mid = scope.normalized_merchant_id()?;
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot implicitly read merchant-scoped evaluations",
+            )
+        })?;
         let row = sqlx::query(
             r#"
             SELECT evaluation_id, investigation_id, merchant_id, payment_reference, provider,
                    recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
                    observed_authoritative_state, verified_outcome_state, accuracy,
-                   promoted_memory_id, created_at, verified_at
+                   promoted_memory_id, created_at, verified_at, expires_at
             FROM esa_experience_evaluations
-            WHERE evaluation_id = $1;
+            WHERE evaluation_id = $1
+              AND (expires_at IS NULL OR expires_at > NOW());
             "#,
         )
         .bind(evaluation_id)
@@ -310,13 +342,11 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
 
         if let Some(r) = row {
             let ev = row_to_evaluation(r);
-            if let Some(mid) = caller_mid {
-                if ev.merchant_id != mid {
-                    return Err(InferenceError::new(
-                        InferenceErrorCategory::Forbidden,
-                        "Evaluation does not belong to authenticated merchant",
-                    ));
-                }
+            if ev.merchant_id != caller_mid {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Evaluation does not belong to authenticated merchant",
+                ));
             }
             Ok(Some(ev))
         } else {
@@ -338,26 +368,117 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 "Cannot promote outcome with Pending accuracy",
             ));
         }
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot verify merchant-scoped evaluations",
+            )
+        })?;
 
-        let mut eval = self
-            .get_evaluation(scope, evaluation_id)
-            .await?
-            .ok_or_else(|| {
-                InferenceError::new(
-                    InferenceErrorCategory::NotFound,
-                    "Evaluation record not found",
-                )
-            })?;
-
-        let now = Utc::now();
-        eval.verified_outcome_state = Some(verified_outcome_state);
-        eval.accuracy = accuracy;
-        eval.verified_at = Some(now);
-
-        let promoted = if matches!(
+        let will_promote = matches!(
             accuracy,
             OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
-        ) {
+        );
+        if will_promote && verified_outcome_state == CanonicalPaymentState::Unknown {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome to verified episodic memory with Unknown authoritative state",
+            ));
+        }
+        if will_promote && verified_resolution.trim().is_empty() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome to verified episodic memory without a verified resolution",
+            ));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to begin verification transaction: {}", e),
+            )
+        })?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT evaluation_id, investigation_id, merchant_id, payment_reference, provider,
+                   recommended_root_cause, inference_provider, model_id, deterministic_fallback_used,
+                   observed_authoritative_state, verified_outcome_state, accuracy,
+                   promoted_memory_id, created_at, verified_at, expires_at
+            FROM esa_experience_evaluations
+            WHERE evaluation_id = $1
+            FOR UPDATE;
+            "#,
+        )
+        .bind(evaluation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to lock evaluation row: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Evaluation record not found",
+            )
+        })?;
+
+        let mut eval = row_to_evaluation(row);
+        if eval.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Evaluation does not belong to authenticated merchant",
+            ));
+        }
+
+        // Idempotent replay handling
+        if eval.verified_at.is_some() {
+            if eval.verified_outcome_state == Some(verified_outcome_state)
+                && eval.accuracy == accuracy
+            {
+                let existing_mem = if let Some(ref mem_id) = eval.promoted_memory_id {
+                    let mrow = sqlx::query(
+                        r#"
+                        SELECT memory_id, memory_type, scope, merchant_id, provider,
+                               incident_category, lifecycle_state, title, summary, resolution,
+                               source_refs, verification_status, version, created_at, updated_at, expires_at
+                        FROM esa_memory_records
+                        WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;
+                        "#,
+                    )
+                    .bind(mem_id)
+                    .bind(&eval.merchant_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        InferenceError::new(
+                            InferenceErrorCategory::UpstreamError,
+                            format!("Failed to load promoted memory: {}", e),
+                        )
+                    })?;
+                    mrow.and_then(row_to_memory_record)
+                } else {
+                    None
+                };
+                tx.commit().await.map_err(|e| {
+                    InferenceError::new(
+                        InferenceErrorCategory::UpstreamError,
+                        format!("Failed to commit idempotent verification read: {}", e),
+                    )
+                })?;
+                return Ok((eval, existing_mem));
+            }
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Evaluation was already verified with a different outcome",
+            ));
+        }
+
+        let now = Utc::now();
+        let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
             let record = MemoryRecord {
                 memory_id: mem_id.clone(),
@@ -389,13 +510,57 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 created_at: now,
                 updated_at: now,
                 expires_at: Some(now + chrono::Duration::days(180)),
-            };
-            let stored = self.store_memory(record).await?;
+            }
+            .sanitize_and_validate()?;
+
+            let source_refs_json = serde_json::to_value(&record.source_refs).unwrap_or_default();
+            sqlx::query(
+                r#"
+                INSERT INTO esa_memory_records (
+                    memory_id, memory_type, scope, merchant_id, provider,
+                    incident_category, lifecycle_state, title, summary, resolution,
+                    source_refs, verification_status, version, created_at, updated_at, expires_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16
+                );
+                "#,
+            )
+            .bind(&record.memory_id)
+            .bind(record.memory_type.as_str())
+            .bind(record.scope.as_str())
+            .bind(&record.merchant_id)
+            .bind(&record.provider)
+            .bind(&record.incident_category)
+            .bind(record.lifecycle_state.map(|s| s.as_str()))
+            .bind(&record.title)
+            .bind(&record.summary)
+            .bind(&record.resolution)
+            .bind(source_refs_json)
+            .bind(record.verification_status.as_str())
+            .bind(record.version as i32)
+            .bind(record.created_at)
+            .bind(record.updated_at)
+            .bind(record.expires_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to persist promoted episodic memory: {}", e),
+                )
+            })?;
+
             eval.promoted_memory_id = Some(mem_id);
-            Some(stored)
+            Some(record)
         } else {
             None
         };
+
+        eval.verified_outcome_state = Some(verified_outcome_state);
+        eval.accuracy = accuracy;
+        eval.verified_at = Some(now);
 
         sqlx::query(
             r#"
@@ -412,7 +577,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         .bind(accuracy.as_str())
         .bind(&eval.promoted_memory_id)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             InferenceError::new(
@@ -421,7 +586,37 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             )
         })?;
 
+        tx.commit().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to commit outcome verification transaction: {}", e),
+            )
+        })?;
+
         Ok((eval, promoted))
+    }
+
+    async fn delete_evaluations_for_merchant(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<usize, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot bulk-delete merchant evaluations",
+            )
+        })?;
+        let res = sqlx::query("DELETE FROM esa_experience_evaluations WHERE merchant_id = $1;")
+            .bind(caller_mid)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to delete merchant evaluations: {}", e),
+                )
+            })?;
+        Ok(res.rows_affected() as usize)
     }
 }
 
@@ -482,6 +677,7 @@ fn row_to_evaluation(r: sqlx::postgres::PgRow) -> OutcomeEvaluationRecord {
     let acc_str: String = r.get("accuracy");
     let created_at: DateTime<Utc> = r.get("created_at");
     let verified_at: Option<DateTime<Utc>> = r.get("verified_at");
+    let expires_at: Option<DateTime<Utc>> = r.get("expires_at");
 
     OutcomeEvaluationRecord {
         evaluation_id: r.get("evaluation_id"),
@@ -501,5 +697,167 @@ fn row_to_evaluation(r: sqlx::postgres::PgRow) -> OutcomeEvaluationRecord {
         promoted_memory_id: r.get("promoted_memory_id"),
         created_at,
         verified_at,
+        expires_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::seed_system_knowledge;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn test_postgres_memory_tenant_isolation_conflicts_and_atomic_promotion() {
+        let db_url = match std::env::var("DATABASE_URL") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => return, // PostgreSQL integration tests require DATABASE_URL (enabled in CI)
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&db_url)
+            .await
+            .expect("DATABASE_URL was set but connecting to PostgreSQL failed");
+
+        let store = PostgresPaymentMemoryStore::new(pool.clone());
+        store.init_schema().await.unwrap();
+        seed_system_knowledge(&store).await.unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let m_a = format!("pg_merchant_a_{}", &suffix[..8]);
+        let m_b = format!("pg_merchant_b_{}", &suffix[..8]);
+        let scope_a = ExecutionScope::MerchantScoped {
+            merchant_id: m_a.clone(),
+        };
+        let scope_b = ExecutionScope::MerchantScoped {
+            merchant_id: m_b.clone(),
+        };
+        let shared_mem_id = format!("pg_shared_{}", &suffix[..8]);
+
+        let now = Utc::now();
+        let rec_a = MemoryRecord {
+            memory_id: shared_mem_id.clone(),
+            memory_type: MemoryType::Episodic,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some(m_a.clone()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Authorized),
+            title: "PG Merchant A incident".to_string(),
+            summary: "Authorized without capture".to_string(),
+            resolution: Some("Verified capture".to_string()),
+            source_refs: vec!["payment:pay_pg_a".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+        };
+        store.store_memory(rec_a).await.unwrap();
+
+        // 1. Cross-merchant overwrite with same memory_id must fail with Forbidden
+        let rec_b_conflict = MemoryRecord {
+            memory_id: shared_mem_id.clone(),
+            memory_type: MemoryType::Episodic,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some(m_b.clone()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Failed),
+            title: "PG Merchant B overwrite attempt".to_string(),
+            summary: "Attempted overwrite".to_string(),
+            resolution: None,
+            source_refs: vec!["payment:pay_pg_b".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+        };
+        let conflict_err = store.store_memory(rec_b_conflict).await.unwrap_err();
+        assert_eq!(conflict_err.category, InferenceErrorCategory::Forbidden);
+
+        // 2. Tenant-isolated retrieval: Merchant B cannot read Merchant A's episodic memory
+        let res_b = store
+            .query_memories(&MemoryQuery {
+                scope: scope_b.clone(),
+                memory_types: vec![MemoryType::Episodic],
+                provider: None,
+                incident_category: None,
+                lifecycle_state: None,
+                since: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert!(!res_b.iter().any(|r| r.memory_id == shared_mem_id));
+
+        // 3. Evaluation ownership & System-scope access denial
+        let eval = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_{}", &suffix[..8]),
+            m_a.clone(),
+            "pay_pg_a".to_string(),
+            "razorpay".to_string(),
+            "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        let eval_id = eval.evaluation_id.clone();
+        store.record_evaluation(eval).await.unwrap();
+
+        assert_eq!(
+            store
+                .get_evaluation(&scope_b, &eval_id)
+                .await
+                .unwrap_err()
+                .category,
+            InferenceErrorCategory::Forbidden
+        );
+        assert_eq!(
+            store
+                .get_evaluation(&ExecutionScope::System, &eval_id)
+                .await
+                .unwrap_err()
+                .category,
+            InferenceErrorCategory::Forbidden
+        );
+
+        // 4. Atomic verified promotion & idempotency
+        let (ev1, mem1) = store
+            .verify_and_promote_outcome(
+                &scope_a,
+                &eval_id,
+                CanonicalPaymentState::Captured,
+                OutcomeAccuracy::Correct,
+                "Captured in gateway settlement",
+            )
+            .await
+            .unwrap();
+        let promoted_id = ev1.promoted_memory_id.clone().unwrap();
+        assert_eq!(mem1.unwrap().memory_id, promoted_id);
+
+        let (ev2, mem2) = store
+            .verify_and_promote_outcome(
+                &scope_a,
+                &eval_id,
+                CanonicalPaymentState::Captured,
+                OutcomeAccuracy::Correct,
+                "Captured in gateway settlement",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ev2.promoted_memory_id.as_deref(),
+            Some(promoted_id.as_str())
+        );
+        assert_eq!(mem2.unwrap().memory_id, promoted_id);
+
+        // Cleanup test records
+        let _ = store.delete_memory(&scope_a, &shared_mem_id).await;
+        let _ = store.delete_memory(&scope_a, &promoted_id).await;
+        let _ = store.delete_evaluations_for_merchant(&scope_a).await;
     }
 }

@@ -15,11 +15,13 @@
   2. `MemoryScope::Merchant` (`Episodic`) records **must** carry a valid non-empty `merchant_id`.
   3. Unverified diagnoses (`VerificationStatus::Unverified`) are rejected from persistent episodic memory.
   4. All text fields pass through `privacy::strip_chain_of_thought` and `privacy::redact_sensitive_text`.
-- Expired records (`expires_at <= now`) are filtered on query and removed via `purge_expired()`.
-- `delete_memory(scope, memory_id)` enforces tenant ownership and returns `Forbidden` on cross-tenant deletion attempts.
+- Expired records (`expires_at <= now`) in both `esa_memory_records` and `esa_experience_evaluations` are filtered on read and removed via `purge_expired()`.
+- `store_memory` rejects `memory_id` collisions across different scopes or merchants (`Forbidden`).
+- `delete_memory(scope, memory_id)` and `delete_evaluations_for_merchant(scope)` enforce tenant ownership and reject cross-tenant or implicit `System`-scope access (`Forbidden`).
 
-## Controlled Experience Learning Loop
-- Every investigation records a pending `OutcomeEvaluationRecord` in `esa_experience_evaluations` (`accuracy = pending`).
-- Only explicit post-hoc verification via `verify_and_promote_outcome(...)` promotes `Correct` or `PartiallyCorrect` outcomes into `VerificationStatus::Verified` episodic memory.
+## Controlled Experience Learning Loop & Retention
+- Every investigation records an internal pending `OutcomeEvaluationRecord` in `esa_experience_evaluations` (`accuracy = pending`, default `expires_at = created_at + 90 days`). Investigation never mutates payment state.
+- Evaluation reads (`get_evaluation`) and verification (`verify_and_promote_outcome`) require explicit `ExecutionScope::MerchantScoped` matching `eval.merchant_id`; `ExecutionScope::System` does not implicitly grant cross-merchant evaluation access.
+- `verify_and_promote_outcome(...)` executes atomically inside a PostgreSQL transaction (`SELECT ... FOR UPDATE`, `INSERT INTO esa_memory_records`, `UPDATE esa_experience_evaluations`), rejects `Pending` accuracy or `Unknown` authoritative outcomes, and is idempotent on repeated verification so duplicate episodic memories are never created.
 - No online RL or model weight fine-tuning occurs.
 

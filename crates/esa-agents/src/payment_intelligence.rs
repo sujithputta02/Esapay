@@ -204,14 +204,10 @@ impl PaymentOutputValidator {
                 ));
             }
         }
-        if is_contradictory_root_cause(root_cause, context.authoritative_state) {
+        if let Err(reason) = validate_root_cause_state_compatibility(root_cause, context) {
             return Err(InferenceError::new(
                 InferenceErrorCategory::InvalidResponse,
-                format!(
-                    "Root cause '{}' contradicts authoritative state '{}'",
-                    root_cause.as_str(),
-                    context.authoritative_state.as_str()
-                ),
+                reason,
             ));
         }
 
@@ -268,6 +264,13 @@ impl PaymentOutputValidator {
                     "Model recommended a non-read-only or executable financial action",
                 ));
             }
+        }
+
+        if let Err(reason) = validate_evidence_relevance(root_cause, context, &validated_refs) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                reason,
+            ));
         }
 
         // Enforce abstention when evidence is missing or confidence is below threshold
@@ -655,32 +658,216 @@ Respond ONLY with JSON matching this exact schema:
     )
 }
 
-fn is_contradictory_root_cause(rc: PaymentIncidentRootCause, auth: CanonicalPaymentState) -> bool {
-    matches!(
-        (rc, auth),
-        (
-            PaymentIncidentRootCause::HealthyCompleted,
-            CanonicalPaymentState::Failed
-        ) | (
-            PaymentIncidentRootCause::HealthyCompleted,
-            CanonicalPaymentState::PendingReconciliation,
-        ) | (
-            PaymentIncidentRootCause::HealthyCompleted,
-            CanonicalPaymentState::Authorized
-        ) | (
-            PaymentIncidentRootCause::HealthyCompleted,
-            CanonicalPaymentState::Pending
-        ) | (
-            PaymentIncidentRootCause::AuthorizationNotCaptured,
-            CanonicalPaymentState::Captured
-        ) | (
-            PaymentIncidentRootCause::AuthorizationNotCaptured,
-            CanonicalPaymentState::Refunded
-        ) | (
-            PaymentIncidentRootCause::PaymentFailedAtProvider,
-            CanonicalPaymentState::Captured
-        )
-    )
+fn validate_root_cause_state_compatibility(
+    rc: PaymentIncidentRootCause,
+    ctx: &PaymentIntelligenceContext,
+) -> Result<(), String> {
+    let auth = ctx.authoritative_state;
+    let obs = &ctx.provider_observation;
+    let refunds = &ctx.refund_summary;
+
+    match rc {
+        PaymentIncidentRootCause::DuplicateWebhookSuppressed => {
+            if obs.duplicate_webhook_count == 0 {
+                return Err(
+                    "DUPLICATE_WEBHOOK_SUPPRESSED requires duplicate_webhook_count > 0".into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::WebhookDelayedOrMissing => {
+            let has_missing_webhook = ctx.missing_data.iter().any(|m| m.contains("webhook"));
+            if !obs.delayed_webhook_detected && !has_missing_webhook {
+                return Err(
+                    "WEBHOOK_DELAYED_OR_MISSING requires delayed_webhook_detected or missing webhook data"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::ProviderDegradedOrTimeout => {
+            let degraded = obs.provider_healthy == Some(false)
+                || obs.p95_latency_ms.is_some_and(|ms| ms > 1500.0)
+                || obs.success_rate.is_some_and(|sr| sr < 0.90)
+                || ctx.events.iter().any(|e| {
+                    e.status.eq_ignore_ascii_case("failed")
+                        || e.summary.to_ascii_lowercase().contains("timeout")
+                });
+            if !degraded {
+                return Err(
+                    "PROVIDER_DEGRADED_OR_TIMEOUT requires degraded provider health, high latency, low success rate, or timeout event evidence"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::RefundReservationPending => {
+            if refunds.pending_reservations_minor == 0 {
+                return Err(
+                    "REFUND_RESERVATION_PENDING requires pending_reservations_minor > 0".into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::RefundExceedsRemainingBalance => {
+            let has_exceeding_refund = refunds.refund_records.iter().any(|r| {
+                !r.applied_to_balance && r.amount_minor > refunds.remaining_refundable_minor
+            }) || (refunds.remaining_refundable_minor == 0
+                && refunds
+                    .refund_records
+                    .iter()
+                    .any(|r| r.status.eq_ignore_ascii_case("failed")));
+            if !has_exceeding_refund {
+                return Err(
+                    "REFUND_EXCEEDS_REMAINING_BALANCE requires evidence of a requested refund exceeding remaining refundable balance"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::HealthyCompleted => {
+            if !matches!(
+                auth,
+                CanonicalPaymentState::Captured
+                    | CanonicalPaymentState::PartiallyRefunded
+                    | CanonicalPaymentState::Refunded
+            ) {
+                return Err(format!(
+                    "HEALTHY_COMPLETED is incompatible with non-terminal authoritative state '{}'",
+                    auth.as_str()
+                ));
+            }
+            if obs.discrepancy_detected || refunds.pending_reservations_minor > 0 {
+                return Err(
+                    "HEALTHY_COMPLETED cannot ignore unresolved discrepancies or pending refund reservations"
+                        .into(),
+                );
+            }
+            if ctx.events.iter().any(|e| {
+                e.status.eq_ignore_ascii_case("failed") || e.status.eq_ignore_ascii_case("pending")
+            }) {
+                return Err(
+                    "HEALTHY_COMPLETED cannot ignore failed or pending webhook events".into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::AuthorizationNotCaptured => {
+            if !matches!(
+                auth,
+                CanonicalPaymentState::Authorized | CanonicalPaymentState::Created
+            ) {
+                return Err(format!(
+                    "AUTHORIZATION_NOT_CAPTURED contradicts authoritative state '{}'",
+                    auth.as_str()
+                ));
+            }
+        }
+        PaymentIncidentRootCause::PaymentFailedAtProvider => {
+            let has_failed_signal = auth == CanonicalPaymentState::Failed
+                || obs
+                    .observed_status
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("failed"))
+                || ctx
+                    .events
+                    .iter()
+                    .any(|e| e.event_type.to_ascii_lowercase().contains("failed"));
+            if matches!(
+                auth,
+                CanonicalPaymentState::Captured
+                    | CanonicalPaymentState::PartiallyRefunded
+                    | CanonicalPaymentState::Refunded
+            ) || !has_failed_signal
+            {
+                return Err(format!(
+                    "PAYMENT_FAILED_AT_PROVIDER is incompatible with authoritative state '{}'",
+                    auth.as_str()
+                ));
+            }
+        }
+        PaymentIncidentRootCause::ProviderCapturePending => {
+            if !matches!(
+                auth,
+                CanonicalPaymentState::Authorized
+                    | CanonicalPaymentState::Pending
+                    | CanonicalPaymentState::PendingReconciliation
+            ) {
+                return Err(format!(
+                    "PROVIDER_CAPTURE_PENDING contradicts authoritative state '{}'",
+                    auth.as_str()
+                ));
+            }
+        }
+        PaymentIncidentRootCause::ProviderStateDiscrepancy => {
+            if !obs.discrepancy_detected {
+                return Err(
+                    "PROVIDER_STATE_DISCREPANCY requires discrepancy_detected == true".into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::ReconciliationRequired => {
+            let needs_recon = auth == CanonicalPaymentState::PendingReconciliation
+                || obs.discrepancy_detected
+                || (auth == CanonicalPaymentState::Pending && !ctx.missing_data.is_empty());
+            if !needs_recon {
+                return Err(format!(
+                    "RECONCILIATION_REQUIRED is unsupported for authoritative state '{}'",
+                    auth.as_str()
+                ));
+            }
+        }
+        PaymentIncidentRootCause::InsufficientEvidence => {}
+    }
+
+    Ok(())
+}
+
+fn validate_evidence_relevance(
+    rc: PaymentIncidentRootCause,
+    _ctx: &PaymentIntelligenceContext,
+    refs: &[String],
+) -> Result<(), String> {
+    if rc == PaymentIncidentRootCause::InsufficientEvidence {
+        return Ok(());
+    }
+    let has_prefix = |prefixes: &[&str]| {
+        refs.iter()
+            .any(|r| prefixes.iter().any(|p| r.starts_with(p)))
+    };
+
+    match rc {
+        PaymentIncidentRootCause::DuplicateWebhookSuppressed => {
+            if !has_prefix(&["webhook:"]) {
+                return Err(
+                    "DUPLICATE_WEBHOOK_SUPPRESSED requires at least one 'webhook:' evidence reference"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::RefundReservationPending
+        | PaymentIncidentRootCause::RefundExceedsRemainingBalance => {
+            if !has_prefix(&["refund:", "refund_summary:"]) {
+                return Err(format!(
+                    "{} requires at least one 'refund:' or 'refund_summary:' evidence reference",
+                    rc.as_str()
+                ));
+            }
+        }
+        PaymentIncidentRootCause::ProviderDegradedOrTimeout => {
+            if !has_prefix(&["provider_health:", "webhook:", "provider:"]) {
+                return Err(
+                    "PROVIDER_DEGRADED_OR_TIMEOUT requires a 'provider_health:', 'webhook:', or 'provider:' evidence reference"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::ProviderStateDiscrepancy
+            if !has_prefix(&["provider_observed:", "state:", "attempt_state:", "payment:"]) =>
+        {
+            return Err(
+                "PROVIDER_STATE_DISCREPANCY requires state or provider observation evidence references"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn sanitize_bounded_list(
@@ -1228,5 +1415,437 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.len(), 1);
+    }
+
+    #[test]
+    fn test_table_driven_root_cause_compatibility_and_evidence_relevance() {
+        use esa_state::webhook_store::{RefundRecord, WebhookInboxRecord, WebhookStatus};
+
+        let validator = PaymentOutputValidator::default();
+        let now = Utc::now();
+
+        let make_custom_ctx = |state: &str,
+                               entity_state: Option<PaymentState>,
+                               healthy: bool,
+                               observed: Option<&str>,
+                               webhooks: Vec<WebhookInboxRecord>,
+                               refunds: Vec<RefundRecord>| {
+            let attempt = PaymentAttemptRecord {
+                transaction_id: "tx_tbl_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_tbl_1".to_string()),
+                payment_reference: Some("pay_tbl_1".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: state.to_string(),
+                created_at: now - chrono::Duration::minutes(10),
+                updated_at: now,
+            };
+            let entity = entity_state.map(|s| PaymentEntity {
+                payment_id: "pay_tbl_1".to_string(),
+                state: s,
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                refunded_amount_minor: 0,
+                events_seen: vec!["evt_1".to_string()],
+                refunds: Vec::new(),
+                created_at: now - chrono::Duration::minutes(10),
+                updated_at: now,
+            });
+            let health = ProviderHealth {
+                gateway: PaymentGateway::Razorpay,
+                name: "Razorpay".to_string(),
+                is_configured: true,
+                is_healthy: healthy,
+                is_sandbox: true,
+                status: if healthy {
+                    WorkloadState::Healthy
+                } else {
+                    WorkloadState::Degraded
+                },
+                p95_latency_ms: if healthy { 150.0 } else { 2500.0 },
+                success_rate: if healthy { 0.99 } else { 0.65 },
+                active_traffic_pct: 50.0,
+                supported_methods: vec![PaymentMethodClass::Upi],
+                message: "status".to_string(),
+            };
+            build_payment_intelligence_context(
+                &scope_for("merchant_a"),
+                &attempt,
+                entity.as_ref(),
+                &webhooks,
+                &refunds,
+                Some(&health),
+                observed,
+            )
+            .unwrap()
+        };
+
+        let wh_dup = vec![
+            WebhookInboxRecord {
+                id: 1,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_dup".to_string(),
+                event_type: "payment.captured".to_string(),
+                payment_id: Some("pay_tbl_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(9),
+                processed_at: Some(now - chrono::Duration::minutes(9)),
+            },
+            WebhookInboxRecord {
+                id: 2,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_dup".to_string(),
+                event_type: "payment.captured".to_string(),
+                payment_id: Some("pay_tbl_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(9),
+                processed_at: Some(now - chrono::Duration::minutes(9)),
+            },
+        ];
+
+        let wh_delayed = vec![WebhookInboxRecord {
+            id: 3,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_del".to_string(),
+            event_type: "payment.captured".to_string(),
+            payment_id: Some("pay_tbl_1".to_string()),
+            refund_id: None,
+            payload: serde_json::json!({}),
+            status: WebhookStatus::Processed,
+            error_message: None,
+            received_at: now - chrono::Duration::minutes(1),
+            processed_at: Some(now),
+        }];
+
+        let rf_pending = vec![RefundRecord {
+            provider: "razorpay".to_string(),
+            refund_id: "rfnd_p1".to_string(),
+            payment_id: "pay_tbl_1".to_string(),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            status: "pending".to_string(),
+            applied_to_balance: false,
+        }];
+
+        let rf_exceeds = vec![RefundRecord {
+            provider: "razorpay".to_string(),
+            refund_id: "rfnd_ex1".to_string(),
+            payment_id: "pay_tbl_1".to_string(),
+            amount_minor: 90000,
+            currency: "INR".to_string(),
+            status: "failed".to_string(),
+            applied_to_balance: false,
+        }];
+
+        // (name, root_cause, context, refs, confidence, should_pass)
+        let cases = vec![
+            (
+                "DUPLICATE_WEBHOOK_SUPPRESSED_valid",
+                "DUPLICATE_WEBHOOK_SUPPRESSED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_dup.clone(),
+                    vec![],
+                ),
+                vec!["webhook:evt_dup"],
+                0.9,
+                true,
+            ),
+            (
+                "DUPLICATE_WEBHOOK_SUPPRESSED_missing_dup_count",
+                "DUPLICATE_WEBHOOK_SUPPRESSED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_delayed.clone(),
+                    vec![],
+                ),
+                vec!["webhook:evt_del"],
+                0.9,
+                false,
+            ),
+            (
+                "DUPLICATE_WEBHOOK_SUPPRESSED_irrelevant_ref_only",
+                "DUPLICATE_WEBHOOK_SUPPRESSED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_dup.clone(),
+                    vec![],
+                ),
+                vec!["attempt:tx_tbl_1"],
+                0.9,
+                false,
+            ),
+            (
+                "WEBHOOK_DELAYED_OR_MISSING_delayed_valid",
+                "WEBHOOK_DELAYED_OR_MISSING",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_delayed.clone(),
+                    vec![],
+                ),
+                vec!["webhook:evt_del"],
+                0.85,
+                true,
+            ),
+            (
+                "WEBHOOK_DELAYED_OR_MISSING_not_delayed_rejected",
+                "WEBHOOK_DELAYED_OR_MISSING",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_dup.clone(),
+                    vec![],
+                ),
+                vec!["webhook:evt_dup"],
+                0.85,
+                false,
+            ),
+            (
+                "PROVIDER_DEGRADED_OR_TIMEOUT_valid",
+                "PROVIDER_DEGRADED_OR_TIMEOUT",
+                make_custom_ctx("pending", None, false, None, vec![], vec![]),
+                vec!["provider_health:razorpay"],
+                0.8,
+                true,
+            ),
+            (
+                "PROVIDER_DEGRADED_OR_TIMEOUT_healthy_rejected",
+                "PROVIDER_DEGRADED_OR_TIMEOUT",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    wh_dup.clone(),
+                    vec![],
+                ),
+                vec!["provider_health:razorpay"],
+                0.8,
+                false,
+            ),
+            (
+                "REFUND_RESERVATION_PENDING_valid",
+                "REFUND_RESERVATION_PENDING",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    rf_pending.clone(),
+                ),
+                vec!["refund:rfnd_p1"],
+                0.88,
+                true,
+            ),
+            (
+                "REFUND_RESERVATION_PENDING_zero_reservations_rejected",
+                "REFUND_RESERVATION_PENDING",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                vec!["attempt:tx_tbl_1"],
+                0.88,
+                false,
+            ),
+            (
+                "REFUND_EXCEEDS_REMAINING_BALANCE_valid",
+                "REFUND_EXCEEDS_REMAINING_BALANCE",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    rf_exceeds,
+                ),
+                vec!["refund:rfnd_ex1"],
+                0.9,
+                true,
+            ),
+            (
+                "REFUND_EXCEEDS_REMAINING_BALANCE_no_exceeding_refund_rejected",
+                "REFUND_EXCEEDS_REMAINING_BALANCE",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    rf_pending.clone(),
+                ),
+                vec!["refund:rfnd_p1"],
+                0.9,
+                false,
+            ),
+            (
+                "HEALTHY_COMPLETED_ignores_pending_reservation_rejected",
+                "HEALTHY_COMPLETED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    rf_pending,
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.95,
+                false,
+            ),
+            (
+                "HEALTHY_COMPLETED_ignores_discrepancy_rejected",
+                "HEALTHY_COMPLETED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    Some("failed"),
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.95,
+                false,
+            ),
+            (
+                "PROVIDER_STATE_DISCREPANCY_valid",
+                "PROVIDER_STATE_DISCREPANCY",
+                make_custom_ctx(
+                    "authorized",
+                    Some(PaymentState::Authorized),
+                    true,
+                    Some("captured"),
+                    vec![],
+                    vec![],
+                ),
+                vec!["provider_observed:captured", "state:authorized"],
+                0.9,
+                true,
+            ),
+            (
+                "AUTHORIZATION_NOT_CAPTURED_contradicts_captured_rejected",
+                "AUTHORIZATION_NOT_CAPTURED",
+                make_custom_ctx(
+                    "captured",
+                    Some(PaymentState::Captured),
+                    true,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.85,
+                false,
+            ),
+            (
+                "PAYMENT_FAILED_AT_PROVIDER_valid",
+                "PAYMENT_FAILED_AT_PROVIDER",
+                make_custom_ctx(
+                    "failed",
+                    Some(PaymentState::Failed),
+                    true,
+                    Some("failed"),
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.9,
+                true,
+            ),
+            (
+                "PROVIDER_CAPTURE_PENDING_valid",
+                "PROVIDER_CAPTURE_PENDING",
+                make_custom_ctx(
+                    "authorized",
+                    Some(PaymentState::Authorized),
+                    true,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.8,
+                true,
+            ),
+            (
+                "RECONCILIATION_REQUIRED_valid",
+                "RECONCILIATION_REQUIRED",
+                make_custom_ctx(
+                    "pending_reconciliation",
+                    Some(PaymentState::PendingReconciliation),
+                    true,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.85,
+                true,
+            ),
+            (
+                "INSUFFICIENT_EVIDENCE_boundary_low_confidence_abstains",
+                "INSUFFICIENT_EVIDENCE",
+                make_custom_ctx(
+                    "authorized",
+                    Some(PaymentState::Authorized),
+                    true,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                vec!["payment:pay_tbl_1"],
+                0.39,
+                true,
+            ),
+        ];
+
+        let empty_mem = HashSet::new();
+        for (name, rc, ctx, refs, conf, should_pass) in cases {
+            let raw = serde_json::json!({
+                "issue_summary": format!("Case {}", name),
+                "probable_root_cause": rc,
+                "confidence": conf,
+                "supporting_evidence_refs": refs,
+                "recommended_next_investigation": ["Inspect read-only ledger"]
+            })
+            .to_string();
+            let res = validator.validate(&raw, &ctx, &empty_mem);
+            assert_eq!(
+                res.is_ok(),
+                should_pass,
+                "Case '{}' expected is_ok={}, got {:?}",
+                name,
+                should_pass,
+                res
+            );
+        }
     }
 }

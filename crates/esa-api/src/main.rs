@@ -6430,7 +6430,18 @@ async fn investigate_payment_intelligence(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<InvestigatePaymentRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> axum::response::Response {
+    match investigate_payment_intelligence_inner(state, headers, req).await {
+        Ok(resp) => resp,
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn investigate_payment_intelligence_inner(
+    state: AppState,
+    headers: HeaderMap,
+    req: InvestigatePaymentRequest,
+) -> Result<axum::response::Response, AppError> {
     let caller = api_keys::authenticate_caller(&headers).await.map_err(|e| {
         AppError::Unauthorized(format!(
             "Authentication required for payment investigation: {}",
@@ -6444,6 +6455,12 @@ async fn investigate_payment_intelligence(
     }
 
     let merchant_id = resolve_intelligence_merchant(&caller, req.merchant_id.as_deref())?;
+    if let Err(rate_limit_resp) = state
+        .rate_limiter
+        .check_payment_investigate(&caller.merchant_id)
+    {
+        return Ok(rate_limit_resp.into_response());
+    }
     let tx_id = req
         .transaction_id
         .as_deref()
@@ -6538,7 +6555,8 @@ async fn investigate_payment_intelligence(
         "context": context,
         "report": report,
         "read_only": true,
-    })))
+    }))
+    .into_response())
 }
 
 async fn get_intelligence_providers_health(
@@ -15415,5 +15433,116 @@ mod integration_tests {
 
         std::env::remove_var("ESA_ADMIN_API_KEY");
         std::env::remove_var("ESA_TEST_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_phase3_investigate_rate_limit_and_merchant_isolation() {
+        let _guard = api_keys::tests::TEST_ENV_MUTEX.lock();
+        std::env::set_var("ESA_TEST_API_KEY", "merchant-a-rl-key");
+        std::env::set_var("ESA_ADMIN_API_KEY", "admin-rl-key");
+
+        let mut state = create_test_state();
+        state.rate_limiter = rate_limiter::ApiRateLimiter::new().with_investigate_quota(2, 1);
+
+        state
+            .webhook_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_rl_a".to_string(),
+                merchant_id: "merchant_sandbox_01".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_rl_a".to_string()),
+                payment_reference: Some("pay_rl_a".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "authorized".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        state
+            .webhook_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_rl_admin".to_string(),
+                merchant_id: "admin_root".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_rl_admin".to_string()),
+                payment_reference: Some("pay_rl_admin".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "authorized".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let app = build_app(state);
+
+        // 1. First request for Merchant A succeeds (burst=1)
+        let r1 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-rl-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_rl_a" }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(r1).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // 2. Immediate second request for Merchant A is rate-limited (429)
+        let r2 = Request::builder()
+            .method("POST")
+            .uri("/api/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-rl-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_rl_a" }).to_string(),
+            ))
+            .unwrap();
+        let resp2 = app.clone().oneshot(r2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp2
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+
+        // 3. Another caller (admin_root) is NOT exhausted by Merchant A
+        let r_other = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "admin-rl-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_rl_admin" }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(r_other).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // 4. After waiting for replenish (>500ms for 2 rps), Merchant A can retry
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let r3 = Request::builder()
+            .method("POST")
+            .uri("/api/v1/intelligence/payments/investigate")
+            .header("x-api-key", "merchant-a-rl-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "transaction_id": "tx_rl_a" }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.oneshot(r3).await.unwrap().status(), StatusCode::OK);
+
+        std::env::remove_var("ESA_TEST_API_KEY");
+        std::env::remove_var("ESA_ADMIN_API_KEY");
     }
 }

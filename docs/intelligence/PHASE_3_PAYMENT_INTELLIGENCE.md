@@ -19,14 +19,15 @@ Phase 3 evolves ESAPay's Intelligence Core from infrastructure-level diagnostics
 ### 2. Payment Intelligence Agent (`crates/esa-agents/src/payment_intelligence.rs`)
 - Reuses `InferenceProvider` (`OllamaProvider` or `HfZeroGpuProvider`), `privacy::sanitize_prompt`, `privacy::redact_sensitive_text`, and `privacy::strip_chain_of_thought`.
 - Strict output validation (`PaymentOutputValidator`) with `#[serde(deny_unknown_fields)]`:
-  - Rejects unknown JSON fields, non-finite/out-of-bounds confidence, unsupported evidence references not present in `allowed_evidence_refs` or retrieved `memory:<id>` refs, contradictory payment states, and mutating commands.
+  - Rejects unknown JSON fields, non-finite/out-of-bounds confidence, unsupported or irrelevant evidence references, root causes incompatible with `PaymentIntelligenceContext` (e.g., `DUPLICATE_WEBHOOK_SUPPRESSED` without duplicate webhooks, `REFUND_RESERVATION_PENDING` without positive pending reservations, `HEALTHY_COMPLETED` with discrepancies), contradictory payment states, and mutating commands.
   - Abstains with `PaymentIncidentRootCause::InsufficientEvidence` when evidence or confidence is insufficient.
   - Falls back to `deterministic_payment_diagnosis(...)` on provider timeout, HTTP 429 ZeroGPU quota exhaustion, or validation failure.
 
 ### 3. Read-Only Merchant-Authorized API & Dashboard
 - `GET /api/v1/intelligence/payments/summary`
-- `POST /api/v1/intelligence/payments/investigate`
+- `POST /api/v1/intelligence/payments/investigate` (per-merchant rate-limited via `ApiRateLimiter::check_payment_investigate` using authenticated `caller.merchant_id`)
 - `GET /api/v1/intelligence/payments/providers/health`
 - `GET /api/v1/intelligence/memory/recent`
+- **Important persistence note:** Investigations never mutate payment, attempt, refund, or routing state; they do persist an internal `OutcomeEvaluationRecord` in `esa_experience_evaluations` (with 90-day retention) for post-hoc verification.
 - Frontend view: `frontend/src/pages/IntelligenceView.tsx` (`/intelligence`).
 

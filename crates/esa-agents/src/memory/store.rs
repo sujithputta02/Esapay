@@ -50,6 +50,11 @@ pub trait PaymentMemoryStore: Send + Sync {
         accuracy: OutcomeAccuracy,
         verified_resolution: &str,
     ) -> Result<(OutcomeEvaluationRecord, Option<MemoryRecord>), InferenceError>;
+
+    async fn delete_evaluations_for_merchant(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<usize, InferenceError>;
 }
 
 /// Thread-safe in-memory `PaymentMemoryStore` enforcing identical tenant isolation and retention rules.
@@ -78,6 +83,14 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
     async fn store_memory(&self, record: MemoryRecord) -> Result<MemoryRecord, InferenceError> {
         let validated = record.sanitize_and_validate()?;
         let mut guard = self.memories.lock().unwrap();
+        if let Some(existing) = guard.get(&validated.memory_id) {
+            if existing.scope != validated.scope || existing.merchant_id != validated.merchant_id {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Cannot overwrite memory record owned by another scope or merchant",
+                ));
+            }
+        }
         guard.insert(validated.memory_id.clone(), validated.clone());
         Ok(validated)
     }
@@ -170,10 +183,18 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
 
     async fn purge_expired(&self) -> Result<usize, InferenceError> {
         let now = Utc::now();
-        let mut guard = self.memories.lock().unwrap();
-        let before = guard.len();
-        guard.retain(|_, m| !m.is_expired(now));
-        Ok(before.saturating_sub(guard.len()))
+        let mut mem_guard = self.memories.lock().unwrap();
+        let mem_before = mem_guard.len();
+        mem_guard.retain(|_, m| !m.is_expired(now));
+        let mem_purged = mem_before.saturating_sub(mem_guard.len());
+        drop(mem_guard);
+
+        let mut eval_guard = self.evaluations.lock().unwrap();
+        let eval_before = eval_guard.len();
+        eval_guard.retain(|_, e| !e.is_expired(now));
+        let eval_purged = eval_before.saturating_sub(eval_guard.len());
+
+        Ok(mem_purged + eval_purged)
     }
 
     async fn record_evaluation(
@@ -190,17 +211,24 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
         scope: &ExecutionScope,
         evaluation_id: &str,
     ) -> Result<Option<OutcomeEvaluationRecord>, InferenceError> {
-        let caller_mid = scope.normalized_merchant_id()?;
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot implicitly read merchant-scoped evaluations",
+            )
+        })?;
+        let now = Utc::now();
         let guard = self.evaluations.lock().unwrap();
         match guard.get(evaluation_id) {
             Some(ev) => {
-                if let Some(mid) = caller_mid {
-                    if ev.merchant_id != mid {
-                        return Err(InferenceError::new(
-                            InferenceErrorCategory::Forbidden,
-                            "Evaluation does not belong to authenticated merchant",
-                        ));
-                    }
+                if ev.merchant_id != caller_mid {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::Forbidden,
+                        "Evaluation does not belong to authenticated merchant",
+                    ));
+                }
+                if ev.is_expired(now) {
+                    return Ok(None);
                 }
                 Ok(Some(ev.clone()))
             }
@@ -222,7 +250,13 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
                 "Cannot promote outcome with Pending accuracy",
             ));
         }
-        let caller_mid = scope.normalized_merchant_id()?;
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot verify merchant-scoped evaluations",
+            )
+        })?;
+
         let mut eval_guard = self.evaluations.lock().unwrap();
         let eval = eval_guard.get_mut(evaluation_id).ok_or_else(|| {
             InferenceError::new(
@@ -230,27 +264,52 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
                 "Evaluation record not found",
             )
         })?;
-        if let Some(mid) = caller_mid {
-            if eval.merchant_id != mid {
-                return Err(InferenceError::new(
-                    InferenceErrorCategory::Forbidden,
-                    "Evaluation does not belong to authenticated merchant",
-                ));
+        if eval.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Evaluation does not belong to authenticated merchant",
+            ));
+        }
+
+        // Idempotency: repeated verification with same outcome returns existing record without duplicating memory
+        if eval.verified_at.is_some() {
+            if eval.verified_outcome_state == Some(verified_outcome_state)
+                && eval.accuracy == accuracy
+            {
+                let existing_mem = eval.promoted_memory_id.as_ref().and_then(|mid| {
+                    let mem_guard = self.memories.lock().unwrap();
+                    mem_guard.get(mid).cloned()
+                });
+                return Ok((eval.clone(), existing_mem));
             }
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Evaluation was already verified with a different outcome",
+            ));
+        }
+
+        let will_promote = matches!(
+            accuracy,
+            OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
+        );
+        if will_promote && verified_outcome_state == CanonicalPaymentState::Unknown {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome to verified episodic memory with Unknown authoritative state",
+            ));
+        }
+        if will_promote && verified_resolution.trim().is_empty() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome to verified episodic memory without a verified resolution",
+            ));
         }
 
         let now = Utc::now();
-        eval.verified_outcome_state = Some(verified_outcome_state);
-        eval.accuracy = accuracy;
-        eval.verified_at = Some(now);
-
-        let promoted = if matches!(
-            accuracy,
-            OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
-        ) {
+        let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
             let record = MemoryRecord {
-                memory_id: mem_id.clone(),
+                memory_id: mem_id,
                 memory_type: MemoryType::Episodic,
                 scope: MemoryScope::Merchant,
                 merchant_id: Some(eval.merchant_id.clone()),
@@ -281,21 +340,40 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
                 expires_at: Some(now + chrono::Duration::days(180)),
             }
             .sanitize_and_validate()?;
-            eval.promoted_memory_id = Some(mem_id);
             Some(record)
         } else {
             None
         };
 
-        let updated_eval = eval.clone();
-        drop(eval_guard);
-
         if let Some(ref rec) = promoted {
             let mut mem_guard = self.memories.lock().unwrap();
             mem_guard.insert(rec.memory_id.clone(), rec.clone());
+            eval.promoted_memory_id = Some(rec.memory_id.clone());
         }
 
+        eval.verified_outcome_state = Some(verified_outcome_state);
+        eval.accuracy = accuracy;
+        eval.verified_at = Some(now);
+        let updated_eval = eval.clone();
+        drop(eval_guard);
+
         Ok((updated_eval, promoted))
+    }
+
+    async fn delete_evaluations_for_merchant(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<usize, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot bulk-delete merchant evaluations",
+            )
+        })?;
+        let mut guard = self.evaluations.lock().unwrap();
+        let before = guard.len();
+        guard.retain(|_, ev| ev.merchant_id != caller_mid);
+        Ok(before.saturating_sub(guard.len()))
     }
 }
 
@@ -577,5 +655,191 @@ mod tests {
             .iter()
             .any(|m| m.memory_type == MemoryType::Semantic
                 || m.memory_type == MemoryType::Procedural));
+    }
+
+    #[tokio::test]
+    async fn test_same_id_collision_and_cross_merchant_overwrite_rejected() {
+        let store = InMemoryPaymentMemoryStore::new();
+        let rec_a = make_episodic("shared_mem_id", "merchant_a", VerificationStatus::Verified);
+        store.store_memory(rec_a).await.unwrap();
+
+        // Merchant B trying to overwrite Merchant A's memory_id is rejected
+        let rec_b = make_episodic("shared_mem_id", "merchant_b", VerificationStatus::Verified);
+        let err = store.store_memory(rec_b).await.unwrap_err();
+        assert_eq!(err.category, InferenceErrorCategory::Forbidden);
+
+        // Merchant A's original record remains intact
+        let res_a = store
+            .query_memories(&MemoryQuery {
+                scope: scope_for("merchant_a"),
+                memory_types: vec![MemoryType::Episodic],
+                provider: None,
+                incident_category: None,
+                lifecycle_state: None,
+                since: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res_a.len(), 1);
+        assert_eq!(res_a[0].merchant_id.as_deref(), Some("merchant_a"));
+    }
+
+    #[tokio::test]
+    async fn test_evaluation_ownership_system_scope_denied_and_promotion_idempotency() {
+        let store = InMemoryPaymentMemoryStore::new();
+        let eval = OutcomeEvaluationRecord::new_pending(
+            "inv_1".to_string(),
+            "merchant_a".to_string(),
+            "pay_1".to_string(),
+            "razorpay".to_string(),
+            "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        let eval_id = eval.evaluation_id.clone();
+        store.record_evaluation(eval).await.unwrap();
+
+        // Cross-merchant read rejected
+        let err_b = store
+            .get_evaluation(&scope_for("merchant_b"), &eval_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err_b.category, InferenceErrorCategory::Forbidden);
+
+        // System scope does NOT implicitly grant cross-merchant evaluation access
+        let err_sys = store
+            .get_evaluation(&ExecutionScope::System, &eval_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err_sys.category, InferenceErrorCategory::Forbidden);
+
+        // Unknown outcome state cannot be promoted
+        let err_unk = store
+            .verify_and_promote_outcome(
+                &scope_for("merchant_a"),
+                &eval_id,
+                CanonicalPaymentState::Unknown,
+                OutcomeAccuracy::Correct,
+                "Captured",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_unk.category, InferenceErrorCategory::InvalidResponse);
+
+        // First verification succeeds and promotes 1 episodic memory
+        let (ev1, mem1) = store
+            .verify_and_promote_outcome(
+                &scope_for("merchant_a"),
+                &eval_id,
+                CanonicalPaymentState::Captured,
+                OutcomeAccuracy::Correct,
+                "Captured after gateway settlement",
+            )
+            .await
+            .unwrap();
+        assert!(mem1.is_some());
+        assert!(ev1.promoted_memory_id.is_some());
+
+        // Repeated verification with same outcome is idempotent and creates NO duplicate memory
+        let (ev2, mem2) = store
+            .verify_and_promote_outcome(
+                &scope_for("merchant_a"),
+                &eval_id,
+                CanonicalPaymentState::Captured,
+                OutcomeAccuracy::Correct,
+                "Captured after gateway settlement",
+            )
+            .await
+            .unwrap();
+        assert_eq!(ev2.promoted_memory_id, ev1.promoted_memory_id);
+        assert_eq!(mem2.unwrap().memory_id, mem1.unwrap().memory_id);
+
+        let all_a = store
+            .query_memories(&MemoryQuery {
+                scope: scope_for("merchant_a"),
+                memory_types: vec![MemoryType::Episodic],
+                provider: None,
+                incident_category: None,
+                lifecycle_state: None,
+                since: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(all_a.len(), 1);
+
+        // Conflicting re-verification is rejected
+        let err_conflict = store
+            .verify_and_promote_outcome(
+                &scope_for("merchant_a"),
+                &eval_id,
+                CanonicalPaymentState::Failed,
+                OutcomeAccuracy::Incorrect,
+                "Failed",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err_conflict.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+    }
+
+    #[tokio::test]
+    async fn test_evaluation_retention_purge_and_merchant_deletion() {
+        let store = InMemoryPaymentMemoryStore::new();
+        let mut expired_eval = OutcomeEvaluationRecord::new_pending(
+            "inv_exp".to_string(),
+            "merchant_a".to_string(),
+            "pay_exp".to_string(),
+            "razorpay".to_string(),
+            "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        expired_eval.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        let exp_id = expired_eval.evaluation_id.clone();
+        store.record_evaluation(expired_eval).await.unwrap();
+
+        // Expired evaluation is hidden on get and purged by purge_expired
+        assert!(store
+            .get_evaluation(&scope_for("merchant_a"), &exp_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(store.purge_expired().await.unwrap(), 1);
+
+        // Active evaluation deleted by merchant_a only
+        let active_eval = OutcomeEvaluationRecord::new_pending(
+            "inv_act".to_string(),
+            "merchant_a".to_string(),
+            "pay_act".to_string(),
+            "razorpay".to_string(),
+            "AUTHORIZATION_NOT_CAPTURED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        store.record_evaluation(active_eval).await.unwrap();
+        assert_eq!(
+            store
+                .delete_evaluations_for_merchant(&scope_for("merchant_b"))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .delete_evaluations_for_merchant(&scope_for("merchant_a"))
+                .await
+                .unwrap(),
+            1
+        );
     }
 }
