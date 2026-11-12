@@ -9,6 +9,7 @@ esa-state = { path = "../esa-state" }
 
 tokio.workspace = true
 async-trait = "0.1"
+sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
