@@ -43,6 +43,28 @@ impl OllamaClient {
         }
     }
 
+    /// Build an Ollama client with system proxy discovery disabled (useful in sandboxed test environments).
+    pub fn new_without_proxy(base_url: String, model: String) -> Self {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(25))
+            .build()
+            .expect("failed to build sandbox-safe Ollama HTTP client");
+
+        Self {
+            base_url,
+            model,
+            client,
+            token_counter: Arc::new(TokenCounter::new()),
+            cost_tracker: Arc::new(AICostTracker::new()),
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            consecutive_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_open_until: Arc::new(Mutex::new(None)),
+            response_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     pub fn with_cost_tracker(
         base_url: String,
         model: String,
@@ -76,8 +98,27 @@ impl OllamaClient {
         agent_id: &str,
         prompt: String,
     ) -> Result<OllamaResponse> {
+        self.generate_with_context(agent_id, None, prompt).await
+    }
+
+    pub async fn generate_with_context(
+        &self,
+        agent_id: &str,
+        merchant_id: Option<&str>,
+        prompt: String,
+    ) -> Result<OllamaResponse> {
+        // Scrub sensitive data before caching, prompting, or logging.
+        let sanitized_prompt = crate::privacy::sanitize_prompt(&prompt);
+
         // 1. Semantic / Deterministic Response Cache Check (Rule 10 & 20)
-        let cache_key = format!("{}:{}:{}", self.model, agent_id, prompt.trim());
+        let tenant_key = merchant_id.unwrap_or("__global__");
+        let cache_key = format!(
+            "{}:{}:{}:{}",
+            tenant_key,
+            self.model,
+            agent_id,
+            sanitized_prompt.trim()
+        );
         if let Ok(cache) = self.response_cache.lock() {
             if let Some((cached_res, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < std::time::Duration::from_secs(60) {
@@ -112,7 +153,7 @@ impl OllamaClient {
 
         let request = OllamaRequest {
             model: self.model.clone(),
-            prompt: prompt.clone(),
+            prompt: sanitized_prompt.clone(),
             stream: false,
             format: Some("json".to_string()),
             options: Some(OllamaOptions {
@@ -171,17 +212,18 @@ impl OllamaClient {
                         }
 
                         // Estimate token usage
-                        let input_tokens = self.estimate_tokens(&prompt);
+                        let input_tokens = self.estimate_tokens(&sanitized_prompt);
                         let output_tokens = self.estimate_tokens(&ollama_response.response);
 
                         // Update legacy token counter
                         self.token_counter.add_request(input_tokens, output_tokens);
 
-                        // Record comprehensive metrics
-                        self.cost_tracker.record_inference(
+                        // Record comprehensive redacted, tenant-scoped metrics
+                        self.cost_tracker.record_inference_with_scope(
                             &self.model,
                             agent_id,
-                            &prompt,
+                            merchant_id,
+                            &sanitized_prompt,
                             &ollama_response.response,
                             latency_ms,
                             None,
@@ -210,17 +252,22 @@ impl OllamaClient {
                         tokio::time::sleep(delay).await;
                         continue;
                     } else {
-                        last_error_text = response
+                        let raw_err = response
                             .text()
                             .await
                             .unwrap_or_else(|_| format!("HTTP {}", status));
+                        last_error_text = crate::privacy::redact_sensitive_text(&raw_err).redacted;
                         warn!("Ollama error response: {}", last_error_text);
                         break;
                     }
                 }
                 Err(e) => {
-                    last_error_text = e.to_string();
-                    warn!("Ollama request attempt {} failed: {}", attempts, e);
+                    last_error_text =
+                        crate::privacy::redact_sensitive_text(&e.to_string()).redacted;
+                    warn!(
+                        "Ollama request attempt {} failed: {}",
+                        attempts, last_error_text
+                    );
                     if attempts < max_attempts {
                         let delay = std::time::Duration::from_millis(250);
                         tokio::time::sleep(delay).await;
@@ -244,10 +291,11 @@ impl OllamaClient {
         }
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
-        self.cost_tracker.record_inference(
+        self.cost_tracker.record_inference_with_scope(
             &self.model,
             agent_id,
-            &prompt,
+            merchant_id,
+            &sanitized_prompt,
             "",
             latency_ms,
             Some(last_error_text.clone()),
@@ -283,20 +331,21 @@ impl OllamaClient {
         self.cost_tracker.get_recent_metrics(limit)
     }
 
+    pub fn get_recent_inference_metrics_for_merchant(
+        &self,
+        merchant_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<InferenceMetrics> {
+        self.cost_tracker
+            .get_recent_metrics_for_merchant(merchant_id, limit)
+    }
+
     pub fn clear_cache(&self) -> usize {
         self.cost_tracker.clear_cache()
     }
 
     pub fn cache_size(&self) -> usize {
         self.cost_tracker.cache_size()
-    }
-}
-
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_string()
-    } else {
-        format!("{}…", text.chars().take(max_len).collect::<String>())
     }
 }
 
@@ -394,12 +443,64 @@ impl TokenStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryRetentionConfig {
+    pub max_records: usize,
+    pub retain_redacted_summary: bool,
+    pub max_summary_chars: usize,
+    pub ttl_seconds: Option<u64>,
+}
+
+impl Default for TelemetryRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_records: 1000,
+            retain_redacted_summary: true,
+            max_summary_chars: 512,
+            ttl_seconds: None,
+        }
+    }
+}
+
+impl TelemetryRetentionConfig {
+    pub fn from_env() -> Self {
+        let max_records = std::env::var("ESA_AI_TELEMETRY_MAX_RECORDS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 10_000))
+            .unwrap_or(1000);
+        let retain_redacted_summary = std::env::var("ESA_AI_TELEMETRY_RETAIN_SUMMARY")
+            .ok()
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no"))
+            .unwrap_or(true);
+        let max_summary_chars = std::env::var("ESA_AI_TELEMETRY_MAX_SUMMARY_CHARS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.clamp(64, 1024))
+            .unwrap_or(512);
+        let ttl_seconds = std::env::var("ESA_AI_TELEMETRY_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0);
+        Self {
+            max_records,
+            retain_redacted_summary,
+            max_summary_chars,
+            ttl_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceMetrics {
     pub request_id: String,
+    pub merchant_id: Option<String>,
     pub model: String,
     pub agent_id: String,
-    pub prompt: String,
-    pub response: String,
+    pub prompt_hash: String,
+    pub redacted_prompt_summary: Option<String>,
+    pub redacted_response_summary: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub redaction_applied: bool,
     pub prompt_length: usize,
     pub response_length: usize,
     pub input_tokens: usize,
@@ -407,6 +508,7 @@ pub struct InferenceMetrics {
     pub latency_ms: u64,
     pub cache_hit: bool,
     pub timestamp: DateTime<Utc>,
+    pub error_category: Option<String>,
     pub error: Option<String>,
 }
 
@@ -435,19 +537,29 @@ pub struct AggregatedCostMetrics {
     pub time_window_end: DateTime<Utc>,
 }
 
-/// AI Cost Tracker - Comprehensive tracking of AI inference costs
+/// AI Cost Tracker - Comprehensive tracking of AI inference costs with privacy redaction
 pub struct AICostTracker {
     metrics: Arc<Mutex<Vec<InferenceMetrics>>>,
     #[allow(clippy::type_complexity)]
-    cache: Arc<Mutex<HashMap<String, (String, DateTime<Utc>)>>>, // prompt_hash -> (response, timestamp)
+    cache: Arc<Mutex<HashMap<String, (String, DateTime<Utc>)>>>, // (scope:prompt_hash) -> (redacted_response, timestamp)
+    retention: TelemetryRetentionConfig,
 }
 
 impl AICostTracker {
     pub fn new() -> Self {
+        Self::with_retention(TelemetryRetentionConfig::from_env())
+    }
+
+    pub fn with_retention(retention: TelemetryRetentionConfig) -> Self {
         Self {
             metrics: Arc::new(Mutex::new(Vec::new())),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            retention,
         }
+    }
+
+    pub fn retention_config(&self) -> &TelemetryRetentionConfig {
+        &self.retention
     }
 
     pub fn record_inference(
@@ -459,34 +571,91 @@ impl AICostTracker {
         latency_ms: u64,
         error: Option<String>,
     ) -> String {
+        self.record_inference_with_scope(model, agent_id, None, prompt, response, latency_ms, error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_inference_with_scope(
+        &self,
+        model: &str,
+        agent_id: &str,
+        merchant_id: Option<&str>,
+        prompt: &str,
+        response: &str,
+        latency_ms: u64,
+        error: Option<String>,
+    ) -> String {
         let request_id = Uuid::new_v4().to_string();
-        let prompt_hash = self.hash_prompt(prompt);
+        let prompt_redaction = crate::privacy::redact_sensitive_text(prompt);
+        let stripped_response = crate::privacy::strip_chain_of_thought(response);
+        let response_redaction = crate::privacy::redact_sensitive_text(&stripped_response);
+        let redaction_applied =
+            prompt_redaction.redaction_count > 0 || response_redaction.redaction_count > 0;
+
+        let prompt_hash = self.hash_prompt(&prompt_redaction.redacted);
+        let cache_scope_key = format!("{}:{}", merchant_id.unwrap_or("__global__"), prompt_hash);
 
         let cache_hit = if error.is_none() {
             let mut cache = self.cache.lock().unwrap();
-            if let Some((cached_response, _)) = cache.get(&prompt_hash) {
-                cached_response == response
+            if let Some((cached_response, _)) = cache.get(&cache_scope_key) {
+                cached_response == &response_redaction.redacted
             } else {
-                cache.insert(prompt_hash.clone(), (response.to_string(), Utc::now()));
+                cache.insert(
+                    cache_scope_key,
+                    (response_redaction.redacted.clone(), Utc::now()),
+                );
                 false
             }
         } else {
             false
         };
 
-        let input_tokens = self.estimate_tokens(prompt);
+        let input_tokens = self.estimate_tokens(&prompt_redaction.redacted);
         let output_tokens = if error.is_none() {
-            self.estimate_tokens(response)
+            self.estimate_tokens(&response_redaction.redacted)
         } else {
             0
         };
 
+        let redacted_prompt_summary = if self.retention.retain_redacted_summary {
+            Some(crate::privacy::truncate_utf8(
+                &prompt_redaction.redacted,
+                self.retention.max_summary_chars,
+            ))
+        } else {
+            None
+        };
+        let redacted_response_summary = if self.retention.retain_redacted_summary {
+            Some(crate::privacy::truncate_utf8(
+                &response_redaction.redacted,
+                self.retention.max_summary_chars,
+            ))
+        } else {
+            None
+        };
+
+        let evidence_refs = extract_safe_evidence_refs(&response_redaction.redacted);
+
+        let (error_category, sanitized_error) = match error {
+            Some(raw_err) => {
+                let cat = crate::privacy::categorize_error(&raw_err);
+                let scrubbed = crate::privacy::redact_sensitive_text(&raw_err).redacted;
+                let bounded = crate::privacy::truncate_utf8(&scrubbed, 256);
+                (Some(cat), Some(bounded))
+            }
+            None => (None, None),
+        };
+
         let metric = InferenceMetrics {
             request_id: request_id.clone(),
+            merchant_id: merchant_id.map(|s| s.to_string()),
             model: model.to_string(),
             agent_id: agent_id.to_string(),
-            prompt: truncate_text(prompt, 2000),
-            response: truncate_text(response, 2000),
+            prompt_hash,
+            redacted_prompt_summary,
+            redacted_response_summary,
+            evidence_refs,
+            redaction_applied,
             prompt_length: prompt.len(),
             response_length: response.len(),
             input_tokens,
@@ -494,15 +663,21 @@ impl AICostTracker {
             latency_ms,
             cache_hit,
             timestamp: Utc::now(),
-            error,
+            error_category,
+            error: sanitized_error,
         };
 
         let mut metrics = self.metrics.lock().unwrap();
+        let now = Utc::now();
+        if let Some(ttl_secs) = self.retention.ttl_seconds {
+            let cutoff = now - chrono::Duration::seconds(ttl_secs as i64);
+            metrics.retain(|m| m.timestamp >= cutoff);
+        }
         metrics.push(metric);
 
-        // Keep only last 1000 metrics to prevent unbounded growth
-        if metrics.len() > 1000 {
-            metrics.drain(0..100);
+        if metrics.len() > self.retention.max_records {
+            let excess = metrics.len() - self.retention.max_records;
+            metrics.drain(0..excess);
         }
 
         request_id
@@ -577,8 +752,29 @@ impl AICostTracker {
     }
 
     pub fn get_recent_metrics(&self, limit: usize) -> Vec<InferenceMetrics> {
-        let metrics = self.metrics.lock().unwrap();
-        metrics.iter().rev().take(limit).cloned().collect()
+        self.get_recent_metrics_for_merchant(None, limit)
+    }
+
+    pub fn get_recent_metrics_for_merchant(
+        &self,
+        merchant_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<InferenceMetrics> {
+        let mut metrics = self.metrics.lock().unwrap();
+        if let Some(ttl_secs) = self.retention.ttl_seconds {
+            let cutoff = Utc::now() - chrono::Duration::seconds(ttl_secs as i64);
+            metrics.retain(|m| m.timestamp >= cutoff);
+        }
+        metrics
+            .iter()
+            .rev()
+            .filter(|m| match merchant_id {
+                Some(mid) => m.merchant_id.as_deref() == Some(mid),
+                None => true,
+            })
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     pub fn clear_cache(&self) -> usize {
@@ -611,6 +807,24 @@ impl Default for AICostTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn extract_safe_evidence_refs(redacted_response: &str) -> Vec<String> {
+    let trimmed = redacted_response.trim();
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]) {
+            if let Some(arr) = val.get("evidence_refs").and_then(|v| v.as_array()) {
+                return arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| crate::privacy::truncate_utf8(s.trim(), 128))
+                    .filter(|s| !s.is_empty())
+                    .take(16)
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -720,10 +934,14 @@ mod tests {
     fn test_inference_metrics_cost() {
         let metric = InferenceMetrics {
             request_id: "test_123".to_string(),
+            merchant_id: Some("merchant_01".to_string()),
             model: "llama2".to_string(),
             agent_id: "monitor".to_string(),
-            prompt: "test prompt".to_string(),
-            response: "test response".to_string(),
+            prompt_hash: "abc123".to_string(),
+            redacted_prompt_summary: Some("test prompt".to_string()),
+            redacted_response_summary: Some("test response".to_string()),
+            evidence_refs: vec![],
+            redaction_applied: false,
             prompt_length: 100,
             response_length: 50,
             input_tokens: 25,
@@ -731,11 +949,72 @@ mod tests {
             latency_ms: 150,
             cache_hit: false,
             timestamp: Utc::now(),
+            error_category: None,
             error: None,
         };
 
         assert_eq!(metric.total_tokens(), 37);
         assert!(metric.estimated_cost_usd() > 0.0);
+    }
+
+    #[test]
+    fn test_cost_tracker_redacts_secrets_strips_cot_and_scopes_merchants() {
+        let tracker = AICostTracker::new();
+        tracker.record_inference_with_scope(
+            "llama2",
+            "diagnosis",
+            Some("merchant_alpha"),
+            r#"{"api_key":"esa_live_secret_99999","email":"bob@example.com","p95_latency_ms":250}"#,
+            r#"<think>secret chain of thought</think>{"hypothesis":"Latency spike","evidence_refs":["p95_latency_ms"]}"#,
+            120,
+            None,
+        );
+        tracker.record_inference_with_scope(
+            "llama2",
+            "diagnosis",
+            Some("merchant_beta"),
+            "beta prompt",
+            "beta response",
+            80,
+            None,
+        );
+
+        let alpha_only = tracker.get_recent_metrics_for_merchant(Some("merchant_alpha"), 10);
+        assert_eq!(alpha_only.len(), 1);
+        let p_sum = alpha_only[0].redacted_prompt_summary.as_deref().unwrap();
+        let r_sum = alpha_only[0].redacted_response_summary.as_deref().unwrap();
+        assert!(!p_sum.contains("esa_live_secret_99999"));
+        assert!(!p_sum.contains("bob@example.com"));
+        assert!(!r_sum.contains("secret chain of thought"));
+        assert!(alpha_only[0].redaction_applied);
+        assert_eq!(
+            alpha_only[0].evidence_refs,
+            vec!["p95_latency_ms".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cost_tracker_retention_config_omits_summary_and_bounds_records() {
+        let tracker = AICostTracker::with_retention(TelemetryRetentionConfig {
+            max_records: 2,
+            retain_redacted_summary: false,
+            max_summary_chars: 128,
+            ttl_seconds: None,
+        });
+        for i in 0..4 {
+            tracker.record_inference(
+                "llama2",
+                "monitor",
+                &format!("p{}", i),
+                &format!("r{}", i),
+                10,
+                None,
+            );
+        }
+        let recent = tracker.get_recent_metrics(10);
+        assert_eq!(recent.len(), 2);
+        assert!(recent[0].redacted_prompt_summary.is_none());
+        assert!(recent[0].redacted_response_summary.is_none());
     }
 
     #[test]
