@@ -1,7 +1,7 @@
 use crate::memory::store::PaymentMemoryStore;
 use crate::memory::types::{
-    MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy, OutcomeEvaluationRecord,
-    VerificationStatus,
+    AuthoritativeOutcomeProof, MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy,
+    OutcomeEvaluationRecord, VerificationStatus,
 };
 use crate::payment_context::CanonicalPaymentState;
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory, ProviderKind};
@@ -357,40 +357,34 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
     async fn verify_and_promote_outcome(
         &self,
         scope: &ExecutionScope,
-        evaluation_id: &str,
-        verified_outcome_state: CanonicalPaymentState,
-        accuracy: OutcomeAccuracy,
-        verified_resolution: &str,
+        proof: AuthoritativeOutcomeProof,
     ) -> Result<(OutcomeEvaluationRecord, Option<MemoryRecord>), InferenceError> {
-        if accuracy == OutcomeAccuracy::Pending {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome with Pending accuracy",
-            ));
-        }
         let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
             InferenceError::new(
                 InferenceErrorCategory::Forbidden,
                 "System scope cannot verify merchant-scoped evaluations",
             )
         })?;
+        if proof.merchant_id() != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Authoritative proof merchant_id does not match caller scope",
+            ));
+        }
+
+        let verified_outcome_state = proof.authoritative_state();
+        let accuracy = proof.accuracy();
+        if accuracy == OutcomeAccuracy::Pending {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome with Pending accuracy",
+            ));
+        }
 
         let will_promote = matches!(
             accuracy,
             OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
         );
-        if will_promote && verified_outcome_state == CanonicalPaymentState::Unknown {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome to verified episodic memory with Unknown authoritative state",
-            ));
-        }
-        if will_promote && verified_resolution.trim().is_empty() {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome to verified episodic memory without a verified resolution",
-            ));
-        }
 
         let mut tx = self.pool.begin().await.map_err(|e| {
             InferenceError::new(
@@ -410,7 +404,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             FOR UPDATE;
             "#,
         )
-        .bind(evaluation_id)
+        .bind(proof.evaluation_id())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
@@ -431,6 +425,19 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             return Err(InferenceError::new(
                 InferenceErrorCategory::Forbidden,
                 "Evaluation does not belong to authenticated merchant",
+            ));
+        }
+        let now = Utc::now();
+        if eval.is_expired(now) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot verify or promote expired evaluation record",
+            ));
+        }
+        if eval.payment_reference != proof.payment_reference() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Authoritative proof payment_reference does not match evaluation",
             ));
         }
 
@@ -500,7 +507,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                     accuracy.as_str(),
                     eval.model_id
                 ),
-                resolution: Some(verified_resolution.to_string()),
+                resolution: Some(proof.verified_resolution().to_string()),
                 source_refs: vec![
                     format!("payment:{}", eval.payment_reference),
                     format!("evaluation:{}", eval.evaluation_id),
@@ -825,28 +832,52 @@ mod tests {
             InferenceErrorCategory::Forbidden
         );
 
-        // 4. Atomic verified promotion & idempotency
+        // 4. Atomic verified promotion via AuthoritativeOutcomeProof & idempotency
+        let attempt_cap = esa_core::provider::PaymentAttemptRecord {
+            transaction_id: format!("tx_pg_{}", &suffix[..8]),
+            merchant_id: m_a.clone(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_pg_a".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "captured".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entity_cap = esa_core::payment_state::PaymentEntity {
+            payment_id: "pay_pg_a".to_string(),
+            state: esa_core::payment_state::PaymentState::Captured,
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec![],
+            refunds: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let eval_loaded = store
+            .get_evaluation(&scope_a, &eval_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let proof = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_a,
+            &eval_loaded,
+            &attempt_cap,
+            Some(&entity_cap),
+        )
+        .unwrap();
+
         let (ev1, mem1) = store
-            .verify_and_promote_outcome(
-                &scope_a,
-                &eval_id,
-                CanonicalPaymentState::Captured,
-                OutcomeAccuracy::Correct,
-                "Captured in gateway settlement",
-            )
+            .verify_and_promote_outcome(&scope_a, proof.clone())
             .await
             .unwrap();
         let promoted_id = ev1.promoted_memory_id.clone().unwrap();
         assert_eq!(mem1.unwrap().memory_id, promoted_id);
 
         let (ev2, mem2) = store
-            .verify_and_promote_outcome(
-                &scope_a,
-                &eval_id,
-                CanonicalPaymentState::Captured,
-                OutcomeAccuracy::Correct,
-                "Captured in gateway settlement",
-            )
+            .verify_and_promote_outcome(&scope_a, proof)
             .await
             .unwrap();
         assert_eq!(
@@ -854,6 +885,47 @@ mod tests {
             Some(promoted_id.as_str())
         );
         assert_eq!(mem2.unwrap().memory_id, promoted_id);
+
+        // 5. Expired evaluation verification rejection & physical purge
+        let mut exp_eval = OutcomeEvaluationRecord::new_pending(
+            format!("inv_pg_exp_{}", &suffix[..8]),
+            m_a.clone(),
+            "pay_pg_a".to_string(),
+            "razorpay".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        let exp_proof = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_a,
+            &exp_eval,
+            &attempt_cap,
+            Some(&entity_cap),
+        )
+        .unwrap();
+        exp_eval.expires_at = Some(Utc::now() - chrono::Duration::seconds(10));
+        let exp_eval_id = exp_eval.evaluation_id.clone();
+        store.record_evaluation(exp_eval).await.unwrap();
+
+        let exp_err = store
+            .verify_and_promote_outcome(&scope_a, exp_proof)
+            .await
+            .unwrap_err();
+        assert_eq!(exp_err.category, InferenceErrorCategory::InvalidResponse);
+
+        // Physical purge deletes expired evaluation row from PostgreSQL
+        let purged = store.purge_expired().await.unwrap();
+        assert!(purged >= 1);
+        let row_after_purge: Option<(String,)> = sqlx::query_as(
+            "SELECT evaluation_id FROM esa_experience_evaluations WHERE evaluation_id = $1;",
+        )
+        .bind(&exp_eval_id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(row_after_purge.is_none());
 
         // Cleanup test records
         let _ = store.delete_memory(&scope_a, &shared_mem_id).await;

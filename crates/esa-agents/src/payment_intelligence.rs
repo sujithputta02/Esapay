@@ -706,16 +706,13 @@ fn validate_root_cause_state_compatibility(
             }
         }
         PaymentIncidentRootCause::RefundExceedsRemainingBalance => {
-            let has_exceeding_refund = refunds.refund_records.iter().any(|r| {
-                !r.applied_to_balance && r.amount_minor > refunds.remaining_refundable_minor
-            }) || (refunds.remaining_refundable_minor == 0
-                && refunds
-                    .refund_records
-                    .iter()
-                    .any(|r| r.status.eq_ignore_ascii_case("failed")));
+            let has_exceeding_refund = refunds.captured_amount_minor > 0
+                && refunds.refund_records.iter().any(|r| {
+                    !r.applied_to_balance && r.amount_minor > refunds.remaining_refundable_minor
+                });
             if !has_exceeding_refund {
                 return Err(
-                    "REFUND_EXCEEDS_REMAINING_BALANCE requires evidence of a requested refund exceeding remaining refundable balance"
+                    "REFUND_EXCEEDS_REMAINING_BALANCE requires evidence of a requested refund amount strictly exceeding remaining refundable balance"
                         .into(),
                 );
             }
@@ -819,50 +816,139 @@ fn validate_root_cause_state_compatibility(
 
 fn validate_evidence_relevance(
     rc: PaymentIncidentRootCause,
-    _ctx: &PaymentIntelligenceContext,
+    ctx: &PaymentIntelligenceContext,
     refs: &[String],
 ) -> Result<(), String> {
     if rc == PaymentIncidentRootCause::InsufficientEvidence {
         return Ok(());
     }
-    let has_prefix = |prefixes: &[&str]| {
-        refs.iter()
-            .any(|r| prefixes.iter().any(|p| r.starts_with(p)))
-    };
 
     match rc {
         PaymentIncidentRootCause::DuplicateWebhookSuppressed => {
-            if !has_prefix(&["webhook:"]) {
+            let dup_ids: HashSet<String> = ctx
+                .provider_observation
+                .duplicate_webhook_event_ids
+                .iter()
+                .map(|id| format!("webhook:{}", id))
+                .collect();
+            if !refs.iter().any(|r| dup_ids.contains(r)) {
                 return Err(
-                    "DUPLICATE_WEBHOOK_SUPPRESSED requires at least one 'webhook:' evidence reference"
+                    "DUPLICATE_WEBHOOK_SUPPRESSED must cite a 'webhook:<event_id>' belonging to an actual duplicate webhook"
                         .into(),
                 );
             }
         }
-        PaymentIncidentRootCause::RefundReservationPending
-        | PaymentIncidentRootCause::RefundExceedsRemainingBalance => {
-            if !has_prefix(&["refund:", "refund_summary:"]) {
-                return Err(format!(
-                    "{} requires at least one 'refund:' or 'refund_summary:' evidence reference",
-                    rc.as_str()
-                ));
+        PaymentIncidentRootCause::WebhookDelayedOrMissing => {
+            if ctx.provider_observation.delayed_webhook_detected
+                && !ctx
+                    .provider_observation
+                    .delayed_webhook_event_ids
+                    .is_empty()
+            {
+                let delayed_ids: HashSet<String> = ctx
+                    .provider_observation
+                    .delayed_webhook_event_ids
+                    .iter()
+                    .map(|id| format!("webhook:{}", id))
+                    .collect();
+                if !refs.iter().any(|r| delayed_ids.contains(r)) {
+                    return Err(
+                        "WEBHOOK_DELAYED_OR_MISSING must cite the actual delayed 'webhook:<event_id>'"
+                            .into(),
+                    );
+                }
+            } else if ctx.missing_data.iter().any(|m| m.contains("webhook")) {
+                let has_attempt_or_state = refs
+                    .iter()
+                    .any(|r| r.starts_with("attempt:") || r.starts_with("state:"));
+                if !has_attempt_or_state {
+                    return Err(
+                        "WEBHOOK_DELAYED_OR_MISSING with missing webhook data must cite 'attempt:' or 'state:' evidence"
+                            .into(),
+                    );
+                }
             }
         }
         PaymentIncidentRootCause::ProviderDegradedOrTimeout => {
-            if !has_prefix(&["provider_health:", "webhook:", "provider:"]) {
+            let health_degraded = ctx.provider_observation.provider_healthy == Some(false)
+                || ctx
+                    .provider_observation
+                    .p95_latency_ms
+                    .is_some_and(|ms| ms > 1500.0)
+                || ctx
+                    .provider_observation
+                    .success_rate
+                    .is_some_and(|sr| sr < 0.90);
+            let expected_health_ref = format!("provider_health:{}", ctx.identity.provider);
+            let timeout_event_refs: HashSet<String> = ctx
+                .events
+                .iter()
+                .filter(|e| {
+                    e.status.eq_ignore_ascii_case("failed")
+                        || e.summary.to_ascii_lowercase().contains("timeout")
+                })
+                .map(|e| format!("webhook:{}", e.event_id))
+                .collect();
+
+            let cited_health = health_degraded && refs.iter().any(|r| r == &expected_health_ref);
+            let cited_timeout_event = refs.iter().any(|r| timeout_event_refs.contains(r));
+            if !cited_health && !cited_timeout_event {
                 return Err(
-                    "PROVIDER_DEGRADED_OR_TIMEOUT requires a 'provider_health:', 'webhook:', or 'provider:' evidence reference"
+                    "PROVIDER_DEGRADED_OR_TIMEOUT must cite the degraded 'provider_health:<provider>' snapshot or a failed/timeout 'webhook:<event_id>'"
                         .into(),
                 );
             }
         }
-        PaymentIncidentRootCause::ProviderStateDiscrepancy
-            if !has_prefix(&["provider_observed:", "state:", "attempt_state:", "payment:"]) =>
-        {
-            return Err(
-                "PROVIDER_STATE_DISCREPANCY requires state or provider observation evidence references"
-                    .into(),
-            );
+        PaymentIncidentRootCause::RefundReservationPending => {
+            let pending_refund_refs: HashSet<String> = ctx
+                .refund_summary
+                .refund_records
+                .iter()
+                .filter(|r| !r.applied_to_balance && r.status.eq_ignore_ascii_case("pending"))
+                .map(|r| format!("refund:{}", r.refund_id))
+                .collect();
+            let cited_pending = refs.iter().any(|r| pending_refund_refs.contains(r));
+            let cited_summary = refs
+                .iter()
+                .any(|r| r == "refund_summary:remaining_refundable_minor");
+            if !cited_pending && !cited_summary {
+                return Err(
+                    "REFUND_RESERVATION_PENDING must cite a pending 'refund:<refund_id>' or 'refund_summary:remaining_refundable_minor'"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::RefundExceedsRemainingBalance => {
+            let exceeding_refs: HashSet<String> = ctx
+                .refund_summary
+                .refund_records
+                .iter()
+                .filter(|r| {
+                    !r.applied_to_balance
+                        && r.amount_minor > ctx.refund_summary.remaining_refundable_minor
+                })
+                .map(|r| format!("refund:{}", r.refund_id))
+                .collect();
+            if !refs.iter().any(|r| exceeding_refs.contains(r)) {
+                return Err(
+                    "REFUND_EXCEEDS_REMAINING_BALANCE must cite the 'refund:<refund_id>' whose attempted amount exceeds remaining_refundable_minor"
+                        .into(),
+                );
+            }
+        }
+        PaymentIncidentRootCause::ProviderStateDiscrepancy => {
+            let has_authoritative_side = refs
+                .iter()
+                .any(|r| r.starts_with("state:") || r.starts_with("payment:"));
+            let has_conflicting_side = refs
+                .iter()
+                .any(|r| r.starts_with("provider_observed:") || r.starts_with("attempt_state:"));
+            if !has_authoritative_side || !has_conflicting_side {
+                return Err(
+                    "PROVIDER_STATE_DISCREPANCY must cite both authoritative ('state:'/'payment:') and conflicting ('provider_observed:'/'attempt_state:') evidence"
+                        .into(),
+                );
+            }
         }
         _ => {}
     }
@@ -1388,18 +1474,46 @@ mod tests {
             .unwrap();
         assert!(before.is_empty());
 
-        // Verify and promote outcome
+        // Verify and promote outcome using authoritative records
+        let now = Utc::now();
+        let attempt_cap = PaymentAttemptRecord {
+            transaction_id: "tx_intel_1".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: Some("order_intel_1".to_string()),
+            payment_reference: Some("pay_intel_1".to_string()),
+            amount_minor: 75000,
+            currency: "INR".to_string(),
+            state: "captured".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entity_cap = PaymentEntity {
+            payment_id: "pay_intel_1".to_string(),
+            state: PaymentState::Captured,
+            amount_minor: 75000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec!["evt_intel_1".to_string()],
+            refunds: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let proof = crate::memory::AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval_rec,
+            &attempt_cap,
+            Some(&entity_cap),
+        )
+        .unwrap();
         let (updated_eval, promoted) = store
-            .verify_and_promote_outcome(
-                &scope_for("merchant_a"),
-                &eval_id,
-                CanonicalPaymentState::Captured,
-                OutcomeAccuracy::Correct,
-                "Captured after gateway settlement delay",
-            )
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof)
             .await
             .unwrap();
-        assert_eq!(updated_eval.accuracy, OutcomeAccuracy::Correct);
+        assert_eq!(
+            updated_eval.verified_outcome_state,
+            Some(CanonicalPaymentState::Captured)
+        );
         assert!(promoted.is_some());
 
         let after = store
@@ -1847,5 +1961,266 @@ mod tests {
                 res
             );
         }
+    }
+
+    #[test]
+    fn test_semantic_evidence_specificity_and_refund_overage_rules() {
+        use esa_state::webhook_store::{RefundRecord, WebhookInboxRecord, WebhookStatus};
+
+        let validator = PaymentOutputValidator::default();
+        let now = Utc::now();
+        let empty_mem = HashSet::new();
+
+        let make_ctx = |refunded_minor: u64,
+                        webhooks: Vec<WebhookInboxRecord>,
+                        refunds: Vec<RefundRecord>,
+                        healthy: bool,
+                        observed: Option<&str>| {
+            let attempt = PaymentAttemptRecord {
+                transaction_id: "tx_sem_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_sem_1".to_string()),
+                payment_reference: Some("pay_sem_1".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now - chrono::Duration::minutes(10),
+                updated_at: now,
+            };
+            let entity = PaymentEntity {
+                payment_id: "pay_sem_1".to_string(),
+                state: if refunded_minor > 0 {
+                    PaymentState::PartiallyRefunded
+                } else {
+                    PaymentState::Captured
+                },
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                refunded_amount_minor: refunded_minor,
+                events_seen: vec!["evt_1".to_string()],
+                refunds: Vec::new(),
+                created_at: now - chrono::Duration::minutes(10),
+                updated_at: now,
+            };
+            let health = ProviderHealth {
+                gateway: PaymentGateway::Razorpay,
+                name: "Razorpay".to_string(),
+                is_configured: true,
+                is_healthy: healthy,
+                is_sandbox: true,
+                status: if healthy {
+                    WorkloadState::Healthy
+                } else {
+                    WorkloadState::Degraded
+                },
+                p95_latency_ms: if healthy { 150.0 } else { 2500.0 },
+                success_rate: if healthy { 0.99 } else { 0.65 },
+                active_traffic_pct: 50.0,
+                supported_methods: vec![PaymentMethodClass::Upi],
+                message: "status".to_string(),
+            };
+            build_payment_intelligence_context(
+                &scope_for("merchant_a"),
+                &attempt,
+                Some(&entity),
+                &webhooks,
+                &refunds,
+                Some(&health),
+                observed,
+            )
+            .unwrap()
+        };
+
+        let wh_mixed = vec![
+            WebhookInboxRecord {
+                id: 1,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_on_time".to_string(),
+                event_type: "payment.authorized".to_string(),
+                payment_id: Some("pay_sem_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(9),
+                processed_at: Some(now - chrono::Duration::minutes(9)),
+            },
+            WebhookInboxRecord {
+                id: 2,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_dup".to_string(),
+                event_type: "payment.captured".to_string(),
+                payment_id: Some("pay_sem_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(9),
+                processed_at: Some(now - chrono::Duration::minutes(9)),
+            },
+            WebhookInboxRecord {
+                id: 3,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_dup".to_string(),
+                event_type: "payment.captured".to_string(),
+                payment_id: Some("pay_sem_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(9),
+                processed_at: Some(now - chrono::Duration::minutes(9)),
+            },
+            WebhookInboxRecord {
+                id: 4,
+                provider: "razorpay".to_string(),
+                provider_event_id: "evt_delayed".to_string(),
+                event_type: "payment.captured".to_string(),
+                payment_id: Some("pay_sem_1".to_string()),
+                refund_id: None,
+                payload: serde_json::json!({}),
+                status: WebhookStatus::Processed,
+                error_message: None,
+                received_at: now - chrono::Duration::minutes(1),
+                processed_at: Some(now),
+            },
+        ];
+
+        // 1. Negative: citing unrelated 'webhook:evt_on_time' for DUPLICATE_WEBHOOK_SUPPRESSED must fail
+        let ctx_wh = make_ctx(0, wh_mixed, vec![], false, Some("failed"));
+        let dup_unrelated = serde_json::json!({
+            "issue_summary": "Duplicate webhook",
+            "probable_root_cause": "DUPLICATE_WEBHOOK_SUPPRESSED",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["webhook:evt_on_time"],
+            "recommended_next_investigation": ["Check webhook logs"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&dup_unrelated, &ctx_wh, &empty_mem)
+            .is_err());
+
+        // 2. Negative: citing unrelated 'webhook:evt_on_time' for WEBHOOK_DELAYED_OR_MISSING must fail
+        let delayed_unrelated = serde_json::json!({
+            "issue_summary": "Delayed webhook",
+            "probable_root_cause": "WEBHOOK_DELAYED_OR_MISSING",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["webhook:evt_on_time"],
+            "recommended_next_investigation": ["Check webhook logs"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&delayed_unrelated, &ctx_wh, &empty_mem)
+            .is_err());
+
+        // 3. Negative: citing generic 'provider:razorpay' instead of 'provider_health:razorpay' must fail
+        let degraded_generic = serde_json::json!({
+            "issue_summary": "Provider degraded",
+            "probable_root_cause": "PROVIDER_DEGRADED_OR_TIMEOUT",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["provider:razorpay"],
+            "recommended_next_investigation": ["Check gateway health"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&degraded_generic, &ctx_wh, &empty_mem)
+            .is_err());
+
+        // 4. Negative: discrepancy citing only 'payment:pay_sem_1' without conflicting observation must fail
+        let disc_one_sided = serde_json::json!({
+            "issue_summary": "State discrepancy",
+            "probable_root_cause": "PROVIDER_STATE_DISCREPANCY",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["payment:pay_sem_1"],
+            "recommended_next_investigation": ["Compare gateway status"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&disc_one_sided, &ctx_wh, &empty_mem)
+            .is_err());
+
+        // 5. Refund overage: actual over-balance attempt (remaining=10000, attempted=15000) -> accepted
+        let rf_over = vec![RefundRecord {
+            provider: "razorpay".to_string(),
+            refund_id: "rfnd_over".to_string(),
+            payment_id: "pay_sem_1".to_string(),
+            amount_minor: 15000,
+            currency: "INR".to_string(),
+            status: "failed".to_string(),
+            applied_to_balance: false,
+        }];
+        let ctx_rf_over = make_ctx(40000, vec![], rf_over, true, None);
+        let over_json = serde_json::json!({
+            "issue_summary": "Refund exceeds remaining balance",
+            "probable_root_cause": "REFUND_EXCEEDS_REMAINING_BALANCE",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["refund:rfnd_over"],
+            "recommended_next_investigation": ["Inspect refund ledger"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&over_json, &ctx_rf_over, &empty_mem)
+            .is_ok());
+
+        // 6. Refund overage: failed refund for unrelated reason (remaining=50000, attempted=10000) -> rejected
+        let rf_unrelated_fail = vec![RefundRecord {
+            provider: "razorpay".to_string(),
+            refund_id: "rfnd_fail_other".to_string(),
+            payment_id: "pay_sem_1".to_string(),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            status: "failed".to_string(),
+            applied_to_balance: false,
+        }];
+        let ctx_rf_unrelated = make_ctx(0, vec![], rf_unrelated_fail, true, None);
+        let fail_other_json = serde_json::json!({
+            "issue_summary": "Failed refund",
+            "probable_root_cause": "REFUND_EXCEEDS_REMAINING_BALANCE",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["refund:rfnd_fail_other"],
+            "recommended_next_investigation": ["Inspect refund ledger"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&fail_other_json, &ctx_rf_unrelated, &empty_mem)
+            .is_err());
+
+        // 7. Refund overage: exact boundary (remaining=10000, attempted=10000) -> rejected
+        let rf_equal = vec![RefundRecord {
+            provider: "razorpay".to_string(),
+            refund_id: "rfnd_eq".to_string(),
+            payment_id: "pay_sem_1".to_string(),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            status: "failed".to_string(),
+            applied_to_balance: false,
+        }];
+        let ctx_rf_equal = make_ctx(40000, vec![], rf_equal, true, None);
+        let equal_json = serde_json::json!({
+            "issue_summary": "Equal refund",
+            "probable_root_cause": "REFUND_EXCEEDS_REMAINING_BALANCE",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["refund:rfnd_eq"],
+            "recommended_next_investigation": ["Inspect refund ledger"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&equal_json, &ctx_rf_equal, &empty_mem)
+            .is_err());
+
+        // 8. Refund overage: missing refund records -> rejected
+        let ctx_rf_missing = make_ctx(40000, vec![], vec![], true, None);
+        let missing_rf_json = serde_json::json!({
+            "issue_summary": "Missing refund records",
+            "probable_root_cause": "REFUND_EXCEEDS_REMAINING_BALANCE",
+            "confidence": 0.9,
+            "supporting_evidence_refs": ["payment:pay_sem_1"],
+            "recommended_next_investigation": ["Inspect refund ledger"]
+        })
+        .to_string();
+        assert!(validator
+            .validate(&missing_rf_json, &ctx_rf_missing, &empty_mem)
+            .is_err());
     }
 }

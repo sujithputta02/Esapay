@@ -2,6 +2,8 @@ use crate::payment_context::{CanonicalPaymentState, PaymentIntelligenceContext};
 use crate::privacy;
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory, ProviderKind};
 use chrono::{DateTime, Duration, Utc};
+use esa_core::payment_state::PaymentEntity;
+use esa_core::provider::PaymentAttemptRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -349,5 +351,144 @@ impl OutcomeEvaluationRecord {
 
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|exp| exp <= now)
+    }
+}
+
+/// Sealed authoritative outcome proof derived strictly from ESAPay's durable payment records.
+/// Prevents callers from promoting episodic memory using arbitrary state or accuracy labels.
+#[derive(Debug, Clone)]
+pub struct AuthoritativeOutcomeProof {
+    evaluation_id: String,
+    merchant_id: String,
+    payment_reference: String,
+    authoritative_state: CanonicalPaymentState,
+    accuracy: OutcomeAccuracy,
+    verified_resolution: String,
+}
+
+impl AuthoritativeOutcomeProof {
+    pub fn from_authoritative_records(
+        scope: &ExecutionScope,
+        eval: &OutcomeEvaluationRecord,
+        attempt: &PaymentAttemptRecord,
+        payment_entity: Option<&PaymentEntity>,
+    ) -> Result<Self, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot verify merchant-scoped evaluations",
+            )
+        })?;
+        if eval.merchant_id != caller_mid || attempt.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Authoritative payment record or evaluation does not belong to authenticated merchant",
+            ));
+        }
+        if eval.is_expired(Utc::now()) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot verify expired evaluation record",
+            ));
+        }
+        let matches_ref = attempt.payment_reference.as_deref()
+            == Some(eval.payment_reference.as_str())
+            || attempt.transaction_id == eval.payment_reference;
+        if !matches_ref {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Authoritative payment attempt does not match evaluation payment_reference",
+            ));
+        }
+
+        let authoritative_state = match payment_entity {
+            Some(pe) => CanonicalPaymentState::from_payment_state(pe.state),
+            None => CanonicalPaymentState::from_attempt_state(&attempt.state),
+        };
+
+        // Non-terminal outcomes cannot be promoted; keep the evaluation pending
+        if !matches!(
+            authoritative_state,
+            CanonicalPaymentState::Captured
+                | CanonicalPaymentState::PartiallyRefunded
+                | CanonicalPaymentState::Refunded
+                | CanonicalPaymentState::Failed
+        ) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                format!(
+                    "Authoritative payment state '{}' is non-terminal; keeping evaluation pending",
+                    authoritative_state.as_str()
+                ),
+            ));
+        }
+
+        let rc = eval.recommended_root_cause.as_str();
+        let accuracy = match authoritative_state {
+            CanonicalPaymentState::Captured
+            | CanonicalPaymentState::PartiallyRefunded
+            | CanonicalPaymentState::Refunded => match rc {
+                "HEALTHY_COMPLETED"
+                | "REFUND_RESERVATION_PENDING"
+                | "REFUND_EXCEEDS_REMAINING_BALANCE"
+                | "DUPLICATE_WEBHOOK_SUPPRESSED"
+                | "WEBHOOK_DELAYED_OR_MISSING" => OutcomeAccuracy::Correct,
+                "PAYMENT_FAILED_AT_PROVIDER" => OutcomeAccuracy::Incorrect,
+                _ => OutcomeAccuracy::PartiallyCorrect,
+            },
+            CanonicalPaymentState::Failed => match rc {
+                "PAYMENT_FAILED_AT_PROVIDER" | "PROVIDER_DEGRADED_OR_TIMEOUT" => {
+                    OutcomeAccuracy::Correct
+                }
+                "HEALTHY_COMPLETED" => OutcomeAccuracy::Incorrect,
+                _ => OutcomeAccuracy::PartiallyCorrect,
+            },
+            _ => OutcomeAccuracy::Pending,
+        };
+
+        let verified_resolution = format!(
+            "Authoritative {} payment {} reached terminal state '{}' (source: {})",
+            attempt.provider,
+            eval.payment_reference,
+            authoritative_state.as_str(),
+            if payment_entity.is_some() {
+                "payment_records"
+            } else {
+                "payment_attempts"
+            }
+        );
+
+        Ok(Self {
+            evaluation_id: eval.evaluation_id.clone(),
+            merchant_id: caller_mid.to_string(),
+            payment_reference: eval.payment_reference.clone(),
+            authoritative_state,
+            accuracy,
+            verified_resolution,
+        })
+    }
+
+    pub fn evaluation_id(&self) -> &str {
+        &self.evaluation_id
+    }
+
+    pub fn merchant_id(&self) -> &str {
+        &self.merchant_id
+    }
+
+    pub fn payment_reference(&self) -> &str {
+        &self.payment_reference
+    }
+
+    pub fn authoritative_state(&self) -> CanonicalPaymentState {
+        self.authoritative_state
+    }
+
+    pub fn accuracy(&self) -> OutcomeAccuracy {
+        self.accuracy
+    }
+
+    pub fn verified_resolution(&self) -> &str {
+        &self.verified_resolution
     }
 }

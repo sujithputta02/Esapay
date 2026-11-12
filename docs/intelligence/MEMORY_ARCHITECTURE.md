@@ -15,13 +15,16 @@
   2. `MemoryScope::Merchant` (`Episodic`) records **must** carry a valid non-empty `merchant_id`.
   3. Unverified diagnoses (`VerificationStatus::Unverified`) are rejected from persistent episodic memory.
   4. All text fields pass through `privacy::strip_chain_of_thought` and `privacy::redact_sensitive_text`.
-- Expired records (`expires_at <= now`) in both `esa_memory_records` and `esa_experience_evaluations` are filtered on read and removed via `purge_expired()`.
+- **Logical expiry filtering vs. physical database cleanup:**
+  - *Logical filtering:* All read paths (`query_memories`, `get_evaluation`) filter out records where `expires_at <= NOW()`, and `verify_and_promote_outcome` explicitly rejects expired evaluations (`InvalidResponse`) before any promotion.
+  - *Physical cleanup:* `purge_expired()` physically deletes expired rows from both `esa_memory_records` and `esa_experience_evaluations`. In `esa-api`, a bounded hourly background task runs `purge_expired()` (never on per-investigation requests) and logs any deletion failures via `tracing::warn!`.
 - `store_memory` rejects `memory_id` collisions across different scopes or merchants (`Forbidden`).
 - `delete_memory(scope, memory_id)` and `delete_evaluations_for_merchant(scope)` enforce tenant ownership and reject cross-tenant or implicit `System`-scope access (`Forbidden`).
 
 ## Controlled Experience Learning Loop & Retention
 - Every investigation records an internal pending `OutcomeEvaluationRecord` in `esa_experience_evaluations` (`accuracy = pending`, default `expires_at = created_at + 90 days`). Investigation never mutates payment state.
 - Evaluation reads (`get_evaluation`) and verification (`verify_and_promote_outcome`) require explicit `ExecutionScope::MerchantScoped` matching `eval.merchant_id`; `ExecutionScope::System` does not implicitly grant cross-merchant evaluation access.
-- `verify_and_promote_outcome(...)` executes atomically inside a PostgreSQL transaction (`SELECT ... FOR UPDATE`, `INSERT INTO esa_memory_records`, `UPDATE esa_experience_evaluations`), rejects `Pending` accuracy or `Unknown` authoritative outcomes, and is idempotent on repeated verification so duplicate episodic memories are never created.
+- **Authoritative outcome verification:** `verify_and_promote_outcome(...)` requires a sealed `AuthoritativeOutcomeProof` constructed strictly from ESAPay's durable `WebhookStore` payment records (`verify_outcome_from_webhook_store`), not caller-supplied states or accuracy labels. Non-terminal payment states remain `Pending` and cannot be promoted.
+- `verify_and_promote_outcome(...)` executes atomically inside a PostgreSQL transaction (`SELECT ... FOR UPDATE`, `INSERT INTO esa_memory_records`, `UPDATE esa_experience_evaluations`) and is idempotent on repeated verification so duplicate episodic memories are never created.
 - No online RL or model weight fine-tuning occurs.
 

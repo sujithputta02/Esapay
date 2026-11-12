@@ -925,6 +925,32 @@ async fn main() -> anyhow::Result<()> {
     esa_agents::seed_system_knowledge(memory_store.as_ref())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to seed payment system knowledge: {}", e.message))?;
+
+    // Periodic bounded retention cleanup for expired payment memories and evaluations (hourly)
+    {
+        let cleanup_store = Arc::clone(&memory_store);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match cleanup_store.purge_expired().await {
+                    Ok(purged) if purged > 0 => {
+                        tracing::info!(purged, "Purged expired payment memory/evaluation records");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            category = ?e.category,
+                            error = %e.message,
+                            "Failed to purge expired payment memory/evaluation records"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     let payment_intelligence = Arc::new(esa_agents::PaymentIntelligenceAgent::new(
         Arc::clone(&inference_provider),
         esa_agents::MemoryRetriever::new(Arc::clone(&memory_store)),

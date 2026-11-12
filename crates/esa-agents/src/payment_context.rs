@@ -95,7 +95,11 @@ pub struct ProviderObservationContext {
     pub success_rate: Option<f64>,
     pub webhook_delivery_count: usize,
     pub duplicate_webhook_count: usize,
+    #[serde(default)]
+    pub duplicate_webhook_event_ids: Vec<String>,
     pub delayed_webhook_detected: bool,
+    #[serde(default)]
+    pub delayed_webhook_event_ids: Vec<String>,
     pub discrepancy_detected: bool,
     pub missing_fields: Vec<String>,
 }
@@ -198,11 +202,14 @@ pub fn build_payment_intelligence_context(
 
     let mut seen_event_ids = HashSet::new();
     let mut duplicate_webhook_count = 0usize;
+    let mut duplicate_webhook_event_ids = BTreeSet::new();
     let mut delayed_webhook_detected = false;
+    let mut delayed_webhook_event_ids = BTreeSet::new();
 
     for ev in inbox_events {
         if !seen_event_ids.insert(ev.provider_event_id.clone()) {
             duplicate_webhook_count += 1;
+            duplicate_webhook_event_ids.insert(ev.provider_event_id.clone());
         }
         if ev
             .received_at
@@ -211,6 +218,7 @@ pub fn build_payment_intelligence_context(
             > 300
         {
             delayed_webhook_detected = true;
+            delayed_webhook_event_ids.insert(ev.provider_event_id.clone());
         }
         let status_str = match ev.status {
             WebhookStatus::Processed => "processed",
@@ -339,7 +347,9 @@ pub fn build_payment_intelligence_context(
             success_rate: provider_health.map(|h| h.success_rate),
             webhook_delivery_count: inbox_events.len(),
             duplicate_webhook_count,
+            duplicate_webhook_event_ids: duplicate_webhook_event_ids.into_iter().collect(),
             delayed_webhook_detected,
+            delayed_webhook_event_ids: delayed_webhook_event_ids.into_iter().collect(),
             discrepancy_detected,
             missing_fields: obs_missing,
         },

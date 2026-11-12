@@ -1,11 +1,11 @@
 use crate::memory::types::{
-    MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy, OutcomeEvaluationRecord,
-    VerificationStatus,
+    AuthoritativeOutcomeProof, MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy,
+    OutcomeEvaluationRecord, VerificationStatus,
 };
-use crate::payment_context::CanonicalPaymentState;
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory};
 use async_trait::async_trait;
 use chrono::Utc;
+use esa_state::WebhookStore;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -45,16 +45,75 @@ pub trait PaymentMemoryStore: Send + Sync {
     async fn verify_and_promote_outcome(
         &self,
         scope: &ExecutionScope,
-        evaluation_id: &str,
-        verified_outcome_state: CanonicalPaymentState,
-        accuracy: OutcomeAccuracy,
-        verified_resolution: &str,
+        proof: AuthoritativeOutcomeProof,
     ) -> Result<(OutcomeEvaluationRecord, Option<MemoryRecord>), InferenceError>;
 
     async fn delete_evaluations_for_merchant(
         &self,
         scope: &ExecutionScope,
     ) -> Result<usize, InferenceError>;
+}
+
+/// Trusted verification boundary: fetches authoritative payment records from `WebhookStore`,
+/// verifies merchant ownership and terminal outcome, and promotes only if supported by records.
+pub async fn verify_outcome_from_webhook_store(
+    webhook_store: &dyn WebhookStore,
+    memory_store: &dyn PaymentMemoryStore,
+    scope: &ExecutionScope,
+    evaluation_id: &str,
+) -> Result<(OutcomeEvaluationRecord, Option<MemoryRecord>), InferenceError> {
+    let eval = memory_store
+        .get_evaluation(scope, evaluation_id)
+        .await?
+        .ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Evaluation record not found or expired",
+            )
+        })?;
+
+    let attempts = webhook_store
+        .list_payment_attempts_for_merchant(Some(&eval.merchant_id), 200)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to load authoritative payment attempts: {}", e),
+            )
+        })?;
+
+    let attempt = attempts
+        .into_iter()
+        .find(|a| {
+            a.payment_reference.as_deref() == Some(eval.payment_reference.as_str())
+                || a.transaction_id == eval.payment_reference
+        })
+        .ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Authoritative payment attempt not found for evaluation",
+            )
+        })?;
+
+    let payment_entity = if let Some(ref pref) = attempt.payment_reference {
+        webhook_store.get_payment_record(pref).await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to load authoritative payment record: {}", e),
+            )
+        })?
+    } else {
+        None
+    };
+
+    let proof = AuthoritativeOutcomeProof::from_authoritative_records(
+        scope,
+        &eval,
+        &attempt,
+        payment_entity.as_ref(),
+    )?;
+
+    memory_store.verify_and_promote_outcome(scope, proof).await
 }
 
 /// Thread-safe in-memory `PaymentMemoryStore` enforcing identical tenant isolation and retention rules.
@@ -239,26 +298,23 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
     async fn verify_and_promote_outcome(
         &self,
         scope: &ExecutionScope,
-        evaluation_id: &str,
-        verified_outcome_state: CanonicalPaymentState,
-        accuracy: OutcomeAccuracy,
-        verified_resolution: &str,
+        proof: AuthoritativeOutcomeProof,
     ) -> Result<(OutcomeEvaluationRecord, Option<MemoryRecord>), InferenceError> {
-        if accuracy == OutcomeAccuracy::Pending {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome with Pending accuracy",
-            ));
-        }
         let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
             InferenceError::new(
                 InferenceErrorCategory::Forbidden,
                 "System scope cannot verify merchant-scoped evaluations",
             )
         })?;
+        if proof.merchant_id() != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Authoritative proof merchant_id does not match caller scope",
+            ));
+        }
 
         let mut eval_guard = self.evaluations.lock().unwrap();
-        let eval = eval_guard.get_mut(evaluation_id).ok_or_else(|| {
+        let eval = eval_guard.get_mut(proof.evaluation_id()).ok_or_else(|| {
             InferenceError::new(
                 InferenceErrorCategory::NotFound,
                 "Evaluation record not found",
@@ -268,6 +324,29 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
             return Err(InferenceError::new(
                 InferenceErrorCategory::Forbidden,
                 "Evaluation does not belong to authenticated merchant",
+            ));
+        }
+
+        let now = Utc::now();
+        if eval.is_expired(now) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot verify or promote expired evaluation record",
+            ));
+        }
+        if eval.payment_reference != proof.payment_reference() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Authoritative proof payment_reference does not match evaluation",
+            ));
+        }
+
+        let verified_outcome_state = proof.authoritative_state();
+        let accuracy = proof.accuracy();
+        if accuracy == OutcomeAccuracy::Pending {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                "Cannot promote outcome with Pending accuracy",
             ));
         }
 
@@ -292,20 +371,6 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
             accuracy,
             OutcomeAccuracy::Correct | OutcomeAccuracy::PartiallyCorrect
         );
-        if will_promote && verified_outcome_state == CanonicalPaymentState::Unknown {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome to verified episodic memory with Unknown authoritative state",
-            ));
-        }
-        if will_promote && verified_resolution.trim().is_empty() {
-            return Err(InferenceError::new(
-                InferenceErrorCategory::InvalidResponse,
-                "Cannot promote outcome to verified episodic memory without a verified resolution",
-            ));
-        }
-
-        let now = Utc::now();
         let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
             let record = MemoryRecord {
@@ -328,7 +393,7 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
                     accuracy.as_str(),
                     eval.model_id
                 ),
-                resolution: Some(verified_resolution.to_string()),
+                resolution: Some(proof.verified_resolution().to_string()),
                 source_refs: vec![
                     format!("payment:{}", eval.payment_reference),
                     format!("evaluation:{}", eval.evaluation_id),
@@ -381,7 +446,7 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
 mod tests {
     use super::*;
     use crate::memory::{seed_system_knowledge, MemoryRetriever, WorkingMemory};
-    use crate::payment_context::build_payment_intelligence_context;
+    use crate::payment_context::{build_payment_intelligence_context, CanonicalPaymentState};
     use esa_core::provider::PaymentAttemptRecord;
     use std::sync::Arc;
 
@@ -687,7 +752,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluation_ownership_system_scope_denied_and_promotion_idempotency() {
+        use crate::payment_context::CanonicalPaymentState;
+        use esa_core::payment_state::{PaymentEntity, PaymentState};
+        use esa_state::InMemoryWebhookStore;
+
         let store = InMemoryPaymentMemoryStore::new();
+        let wh_store = InMemoryWebhookStore::new();
+        let now = Utc::now();
+
         let eval = OutcomeEvaluationRecord::new_pending(
             "inv_1".to_string(),
             "merchant_a".to_string(),
@@ -700,7 +772,24 @@ mod tests {
             CanonicalPaymentState::Authorized,
         );
         let eval_id = eval.evaluation_id.clone();
-        store.record_evaluation(eval).await.unwrap();
+        store.record_evaluation(eval.clone()).await.unwrap();
+
+        let pending_attempt = PaymentAttemptRecord {
+            transaction_id: "tx_1".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: Some("order_1".to_string()),
+            payment_reference: Some("pay_1".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "authorized".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        wh_store
+            .record_payment_attempt(&pending_attempt)
+            .await
+            .unwrap();
 
         // Cross-merchant read rejected
         let err_b = store
@@ -716,42 +805,55 @@ mod tests {
             .unwrap_err();
         assert_eq!(err_sys.category, InferenceErrorCategory::Forbidden);
 
-        // Unknown outcome state cannot be promoted
-        let err_unk = store
-            .verify_and_promote_outcome(
-                &scope_for("merchant_a"),
-                &eval_id,
-                CanonicalPaymentState::Unknown,
-                OutcomeAccuracy::Correct,
-                "Captured",
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err_unk.category, InferenceErrorCategory::InvalidResponse);
+        // Non-terminal authoritative payment state keeps evaluation pending (cannot promote)
+        let err_pending = verify_outcome_from_webhook_store(
+            &wh_store,
+            &store,
+            &scope_for("merchant_a"),
+            &eval_id,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err_pending.category,
+            InferenceErrorCategory::InvalidResponse
+        );
 
-        // First verification succeeds and promotes 1 episodic memory
+        // Authoritative attempt transitions to captured
+        let captured_attempt = PaymentAttemptRecord {
+            state: "captured".to_string(),
+            ..pending_attempt.clone()
+        };
+        let captured_entity = PaymentEntity {
+            payment_id: "pay_1".to_string(),
+            state: PaymentState::Captured,
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec![],
+            refunds: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+
+        // First verification via authoritative records succeeds and promotes 1 episodic memory
+        let proof1 = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval,
+            &captured_attempt,
+            Some(&captured_entity),
+        )
+        .unwrap();
         let (ev1, mem1) = store
-            .verify_and_promote_outcome(
-                &scope_for("merchant_a"),
-                &eval_id,
-                CanonicalPaymentState::Captured,
-                OutcomeAccuracy::Correct,
-                "Captured after gateway settlement",
-            )
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof1.clone())
             .await
             .unwrap();
         assert!(mem1.is_some());
         assert!(ev1.promoted_memory_id.is_some());
 
-        // Repeated verification with same outcome is idempotent and creates NO duplicate memory
+        // Repeated verification with same authoritative outcome is idempotent and creates NO duplicate memory
         let (ev2, mem2) = store
-            .verify_and_promote_outcome(
-                &scope_for("merchant_a"),
-                &eval_id,
-                CanonicalPaymentState::Captured,
-                OutcomeAccuracy::Correct,
-                "Captured after gateway settlement",
-            )
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof1)
             .await
             .unwrap();
         assert_eq!(ev2.promoted_memory_id, ev1.promoted_memory_id);
@@ -771,21 +873,86 @@ mod tests {
             .unwrap();
         assert_eq!(all_a.len(), 1);
 
-        // Conflicting re-verification is rejected
+        // Conflicting authoritative outcome re-verification is rejected
+        let failed_entity = PaymentEntity {
+            state: PaymentState::Failed,
+            ..captured_entity
+        };
+        let proof_conflict = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval,
+            &captured_attempt,
+            Some(&failed_entity),
+        )
+        .unwrap();
         let err_conflict = store
-            .verify_and_promote_outcome(
-                &scope_for("merchant_a"),
-                &eval_id,
-                CanonicalPaymentState::Failed,
-                OutcomeAccuracy::Incorrect,
-                "Failed",
-            )
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof_conflict)
             .await
             .unwrap_err();
         assert_eq!(
             err_conflict.category,
             InferenceErrorCategory::InvalidResponse
         );
+    }
+
+    #[tokio::test]
+    async fn test_expired_evaluation_cannot_be_verified_even_directly() {
+        use crate::payment_context::CanonicalPaymentState;
+        use esa_core::payment_state::{PaymentEntity, PaymentState};
+
+        let store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+        let mut eval = OutcomeEvaluationRecord::new_pending(
+            "inv_exp_dir".to_string(),
+            "merchant_a".to_string(),
+            "pay_exp_dir".to_string(),
+            "razorpay".to_string(),
+            "HEALTHY_COMPLETED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            true,
+            CanonicalPaymentState::Authorized,
+        );
+        let attempt = PaymentAttemptRecord {
+            transaction_id: "tx_exp_dir".to_string(),
+            merchant_id: "merchant_a".to_string(),
+            provider: "razorpay".to_string(),
+            provider_order_id: None,
+            payment_reference: Some("pay_exp_dir".to_string()),
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            state: "captured".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entity = PaymentEntity {
+            payment_id: "pay_exp_dir".to_string(),
+            state: PaymentState::Captured,
+            amount_minor: 10000,
+            currency: "INR".to_string(),
+            refunded_amount_minor: 0,
+            events_seen: vec![],
+            refunds: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        // Construct proof before expiry, then store an already-expired evaluation
+        let proof = AuthoritativeOutcomeProof::from_authoritative_records(
+            &scope_for("merchant_a"),
+            &eval,
+            &attempt,
+            Some(&entity),
+        )
+        .unwrap();
+        eval.expires_at = Some(now - chrono::Duration::seconds(5));
+        store.record_evaluation(eval).await.unwrap();
+
+        // Direct verify_and_promote_outcome rejects expired evaluation before any promotion
+        let err = store
+            .verify_and_promote_outcome(&scope_for("merchant_a"), proof)
+            .await
+            .unwrap_err();
+        assert_eq!(err.category, InferenceErrorCategory::InvalidResponse);
     }
 
     #[tokio::test]
