@@ -14,6 +14,7 @@ pinned: false
 This private Hugging Face Space provides experimental remote inference capacity for **ESAPay** via **Hugging Face ZeroGPU** and **Gradio 5.20.0**.
 
 - **Compute Model**: Hugging Face ZeroGPU (shared, dynamically allocated GPU time subject to account quota and queue wait times — not a dedicated A10G or 24/7 guaranteed endpoint)
+- **Runtime**: Gradio `5.20.0` with ZeroGPU-provided PyTorch (`>=2.8.0`) and module-level `.to("cuda")` placement
 - **Model**: `Qwen/Qwen2.5-0.5B-Instruct`
 - **Pinned Revision**: `7ae557604adf67be50417f59c2c2f167def9a775`
 - **License**: Apache License 2.0 (`apache-2.0`)

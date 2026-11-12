@@ -44,12 +44,13 @@ else:
         MODEL_ID,
         revision=MODEL_REVISION,
     )
+    # ZeroGPU recommends loading at module scope and placing directly on "cuda"
+    # (avoiding device_map="auto" which can miscalculate emulated ZeroGPU memory).
     model = transformers.AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         revision=MODEL_REVISION,
         torch_dtype=torch.float16,
-        device_map="auto",
-    )
+    ).to("cuda")
 
 
 def _gpu_decorator(duration: int = 60):
@@ -77,7 +78,7 @@ def generate_text(prompt: str) -> str:
         tokenize=False,
         add_generation_prompt=True,
     )
-    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    inputs = tokenizer([text], return_tensors="pt").to("cuda")
 
     with torch.inference_mode():
         outputs = model.generate(
