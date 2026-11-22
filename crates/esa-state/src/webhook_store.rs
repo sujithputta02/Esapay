@@ -1207,21 +1207,20 @@ impl PostgresWebhookStore {
 
                             if check_payment.is_none() {
                                 let _ = tx.rollback().await;
-                                let _ = self
-                                    .record_delivery_audit_on_pool(
-                                        None,
-                                        provider,
-                                        provider_event_id,
-                                        Some(pid.as_str()),
-                                        Some(id),
-                                        true,
-                                        "unapplied",
-                                        "duplicate_suppressed",
-                                        true,
-                                        "unapplied_pending",
-                                        None,
-                                    )
-                                    .await;
+                                self.record_delivery_audit_on_pool(
+                                    None,
+                                    provider,
+                                    provider_event_id,
+                                    Some(pid.as_str()),
+                                    Some(id),
+                                    true,
+                                    "unapplied",
+                                    "duplicate_suppressed",
+                                    true,
+                                    "unapplied_pending",
+                                    None,
+                                )
+                                .await?;
                                 return Ok(WebhookProcessingResult::Unapplied {
                                     inbox_id: id,
                                     provider: provider.to_string(),
@@ -1862,7 +1861,7 @@ impl WebhookStore for PostgresWebhookStore {
                 payment_id,
                 ..
             }) => {
-                let _ = self
+                if let Err(audit_err) = self
                     .record_delivery_audit_on_pool(
                         None,
                         params.provider,
@@ -1876,10 +1875,17 @@ impl WebhookStore for PostgresWebhookStore {
                         "deduplicated_noop",
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to persist webhook delivery audit on AlreadyProcessed: {}",
+                        audit_err
+                    );
+                    return Err(audit_err);
+                }
             }
             Ok(WebhookProcessingResult::InFlight { inbox_id, .. }) => {
-                let _ = self
+                if let Err(audit_err) = self
                     .record_delivery_audit_on_pool(
                         None,
                         params.provider,
@@ -1893,11 +1899,18 @@ impl WebhookStore for PostgresWebhookStore {
                         "in_flight_deferred",
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to persist webhook delivery audit on InFlight: {}",
+                        audit_err
+                    );
+                    return Err(audit_err);
+                }
             }
             Err(err) => {
                 let err_str = err.to_string();
-                let _ = self
+                if let Err(audit_err) = self
                     .record_delivery_audit_on_pool(
                         None,
                         params.provider,
@@ -1911,7 +1924,13 @@ impl WebhookStore for PostgresWebhookStore {
                         "failed",
                         Some(&err_str),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to persist webhook delivery audit on error: {}",
+                        audit_err
+                    );
+                }
             }
             _ => {}
         }

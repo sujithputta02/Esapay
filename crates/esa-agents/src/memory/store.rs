@@ -320,12 +320,26 @@ impl InMemoryPaymentMemoryStore {
             resolution_audits: Mutex::new(HashMap::new()),
         }
     }
+
+    #[cfg(test)]
+    pub fn insert_test_memory(&self, record: MemoryRecord) {
+        self.memories
+            .lock()
+            .unwrap()
+            .insert(record.memory_id.clone(), record);
+    }
 }
 
 #[async_trait]
 impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
     async fn store_memory(&self, record: MemoryRecord) -> Result<MemoryRecord, InferenceError> {
         let validated = record.sanitize_and_validate()?;
+        if validated.memory_type == MemoryType::Episodic {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Episodic memories cannot be created or modified directly through generic store_memory(); must be promoted through deterministic verification",
+            ));
+        }
         let mut guard = self.memories.lock().unwrap();
         if let Some(existing) = guard.get(&validated.memory_id) {
             if existing.scope != validated.scope || existing.merchant_id != validated.merchant_id {
@@ -965,9 +979,12 @@ mod tests {
     #[tokio::test]
     async fn test_episodic_persistence_and_unverified_rejected() {
         let store = InMemoryPaymentMemoryStore::new();
+        // 1. Generic store_memory strictly rejects Episodic memory creation even if marked Verified
         let valid = make_episodic("mem_ep_1", "merchant_a", VerificationStatus::Verified);
-        store.store_memory(valid).await.unwrap();
+        let err_valid = store.store_memory(valid).await.unwrap_err();
+        assert_eq!(err_valid.category, InferenceErrorCategory::Forbidden);
 
+        // 2. Unverified episodic memory is rejected by sanitize_and_validate
         let unverified = make_episodic("mem_ep_2", "merchant_a", VerificationStatus::Unverified);
         let err = store.store_memory(unverified).await.unwrap_err();
         assert_eq!(err.category, InferenceErrorCategory::InvalidResponse);
@@ -1010,22 +1027,16 @@ mod tests {
     #[tokio::test]
     async fn test_merchant_a_vs_merchant_b_isolation() {
         let store = InMemoryPaymentMemoryStore::new();
-        store
-            .store_memory(make_episodic(
-                "mem_a",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_b",
-                "merchant_b",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_a",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
+        store.insert_test_memory(make_episodic(
+            "mem_b",
+            "merchant_b",
+            VerificationStatus::Verified,
+        ));
 
         let q_a = store
             .query_memories(&MemoryQuery {
@@ -1084,7 +1095,7 @@ mod tests {
         let store = InMemoryPaymentMemoryStore::new();
         let mut expired = make_episodic("mem_exp", "merchant_a", VerificationStatus::Verified);
         expired.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
-        store.store_memory(expired).await.unwrap();
+        store.insert_test_memory(expired);
 
         let q = store
             .query_memories(&MemoryQuery {
@@ -1107,14 +1118,11 @@ mod tests {
     #[tokio::test]
     async fn test_deletion_and_retention() {
         let store = InMemoryPaymentMemoryStore::new();
-        store
-            .store_memory(make_episodic(
-                "mem_del_1",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_del_1",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
 
         // Merchant B cannot delete Merchant A's memory
         let err_b = store
@@ -1172,22 +1180,16 @@ mod tests {
     async fn test_retriever_uses_merchant_episodic_and_system_knowledge() {
         let store = Arc::new(InMemoryPaymentMemoryStore::new());
         seed_system_knowledge(store.as_ref()).await.unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_ret_a",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_ret_b",
-                "merchant_b",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_ret_a",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
+        store.insert_test_memory(make_episodic(
+            "mem_ret_b",
+            "merchant_b",
+            VerificationStatus::Verified,
+        ));
 
         let retriever = MemoryRetriever::new(store);
         let ctx_a = sample_context("merchant_a");
@@ -1204,7 +1206,7 @@ mod tests {
     async fn test_same_id_collision_and_cross_merchant_overwrite_rejected() {
         let store = InMemoryPaymentMemoryStore::new();
         let rec_a = make_episodic("shared_mem_id", "merchant_a", VerificationStatus::Verified);
-        store.store_memory(rec_a).await.unwrap();
+        store.insert_test_memory(rec_a);
 
         // Merchant B trying to overwrite Merchant A's memory_id is rejected
         let rec_b = make_episodic("shared_mem_id", "merchant_b", VerificationStatus::Verified);
@@ -2316,10 +2318,10 @@ mod tests {
             id: 12,
             provider: "razorpay".to_string(),
             provider_event_id: "evt_prov_to".to_string(),
-            event_type: "gateway_timeout".to_string(),
+            event_type: "payment.failed".to_string(),
             payment_id: Some("pay_ent_ts".to_string()),
             refund_id: None,
-            payload: serde_json::json!({"reason": "gateway_timeout"}),
+            payload: serde_json::json!({"error": {"code": "GATEWAY_TIMEOUT"}}),
             status: WebhookStatus::Processed,
             error_message: None,
             received_at: now,
@@ -2956,6 +2958,234 @@ mod tests {
         assert_eq!(promoted.verification_status, VerificationStatus::Verified);
     }
 
+    #[test]
+    fn test_strict_provider_timeout_error_code_allow_list() {
+        use crate::memory::types::is_strict_provider_timeout_event;
+        use esa_state::{WebhookInboxRecord, WebhookStatus};
+
+        let make_inbox = |provider: &str,
+                          event_type: &str,
+                          payload: serde_json::Value,
+                          status: WebhookStatus| {
+            WebhookInboxRecord {
+                id: 1,
+                provider: provider.to_string(),
+                provider_event_id: "evt_1".to_string(),
+                event_type: event_type.to_string(),
+                payment_id: Some("pay_1".to_string()),
+                refund_id: None,
+                status,
+                error_message: None,
+                received_at: Utc::now(),
+                processed_at: Some(Utc::now()),
+                payload,
+            }
+        };
+
+        let failed_ev_type = esa_core::PaymentEventType::PaymentFailed;
+
+        // 1. Razorpay allow-list
+        for code in [
+            "BAD_GATEWAY",
+            "GATEWAY_ERROR",
+            "GATEWAY_TIMEOUT",
+            "SERVER_ERROR",
+        ] {
+            let ev = make_inbox(
+                "razorpay",
+                "payment.failed",
+                serde_json::json!({ "error": { "code": code } }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "razorpay", false, Some(&failed_ev_type)),
+                "Razorpay code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 2. Cashfree allow-list
+        for code in [
+            "GATEWAY_ERROR",
+            "GATEWAY_TIMEOUT",
+            "BANK_COMMUNICATION_ERROR",
+            "SYSTEM_ERROR",
+        ] {
+            let ev = make_inbox(
+                "cashfree",
+                "payment.failed",
+                serde_json::json!({ "data": { "payment": { "error_code": code } } }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "cashfree", false, Some(&failed_ev_type)),
+                "Cashfree code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 3. PayU allow-list
+        for code in ["E1601", "E1602", "E205", "GATEWAY_TIMEOUT", "BANK_TIMEOUT"] {
+            let ev = make_inbox(
+                "payu",
+                "payment_failed",
+                serde_json::json!({ "error_code": code }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "payu", false, Some(&failed_ev_type)),
+                "PayU code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 4. Free-text descriptions and /error/reason are strictly rejected
+        let ev_reason = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "error": { "reason": "gateway_timeout occurred" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_reason,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+
+        // 5. Customer notes with timeout text are rejected
+        let ev_notes = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "notes": { "desc": "gateway_timeout" }, "error": { "code": "BAD_REQUEST" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_notes,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+
+        // 6. Non-timeout error codes are rejected
+        for bad_code in [
+            "BAD_REQUEST",
+            "AUTHENTICATION_FAILED",
+            "PAYMENT_CANCELLED",
+            "NOT_A_TIMEOUT",
+            "timeout_not_supported",
+        ] {
+            let ev_bad = make_inbox(
+                "razorpay",
+                "payment.failed",
+                serde_json::json!({ "error": { "code": bad_code } }),
+                WebhookStatus::Processed,
+            );
+            assert!(!is_strict_provider_timeout_event(
+                &ev_bad,
+                "razorpay",
+                false,
+                Some(&failed_ev_type)
+            ));
+        }
+
+        // 7. Refund event with timeout-like error code is rejected
+        let refund_failed_type = esa_core::PaymentEventType::RefundFailed;
+        let ev_refund = make_inbox(
+            "razorpay",
+            "refund.failed",
+            serde_json::json!({ "error": { "code": "GATEWAY_TIMEOUT" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_refund,
+            "razorpay",
+            true,
+            Some(&refund_failed_type)
+        ));
+
+        // 8. Unprocessed webhook status is rejected
+        let ev_unproc = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "error": { "code": "GATEWAY_TIMEOUT" } }),
+            WebhookStatus::Pending,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_unproc,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_generic_store_memory_rejects_fabricated_provenance_and_episodic_creation() {
+        let store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+
+        // 1. Caller supplies episodic memory with Verified status, fabricated provenance claiming verification
+        let fabricated = MemoryRecord {
+            memory_id: "mem_fabricated_1".to_string(),
+            memory_type: MemoryType::Episodic,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some("merchant_a".to_string()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Failed),
+            title: "Fabricated incident".to_string(),
+            summary: "Fabricated summary".to_string(),
+            resolution: Some("Fabricated resolution".to_string()),
+            source_refs: vec!["payment:pay_fake".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+            provenance: Some(MemoryProvenance {
+                evaluation_id: "eval_fake_999".to_string(),
+                resolution_id: "res_fake_999".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                payment_reference: "pay_fake".to_string(),
+                provider: "razorpay".to_string(),
+                verified_at: now,
+                verification_method: "fabricated_bypass".to_string(),
+                supporting_evidence_refs: vec!["arbitrary_ref".to_string()],
+                evidence_provenance: vec!["fake_source".to_string()],
+                promotion_decision: "promoted_verified_correct".to_string(),
+            }),
+        };
+
+        let err = store.store_memory(fabricated).await.unwrap_err();
+        assert_eq!(err.category, InferenceErrorCategory::Forbidden);
+        assert!(err
+            .message
+            .contains("Episodic memories cannot be created or modified directly"));
+
+        // 2. Working, Semantic, and Procedural memory can legitimately be stored
+        let working = MemoryRecord {
+            memory_id: "mem_wm_1".to_string(),
+            memory_type: MemoryType::Working,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some("merchant_a".to_string()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "PAYMENT_ANALYSIS".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Authorized),
+            title: "Working memory title".to_string(),
+            summary: "Working notes".to_string(),
+            resolution: None,
+            source_refs: vec!["payment:pay_wm".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::hours(2)),
+            provenance: None,
+        };
+        let stored_wm = store.store_memory(working).await.unwrap();
+        assert_eq!(stored_wm.memory_id, "mem_wm_1");
+    }
+
     #[tokio::test]
     async fn test_phase4_untrusted_webhook_audit_regressions() {
         use esa_state::{InMemoryWebhookStore, WebhookDeliveryAuditRecord};
@@ -3135,10 +3365,15 @@ mod tests {
                 promotion_decision: "promoted_verified_correct".to_string(),
             }),
         };
-        mem_store
+        // 1. Direct store_memory with verified episodic memory must return Forbidden (Finding 1)
+        let create_err = mem_store
             .store_memory(verified_memory.clone())
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(create_err.category, InferenceErrorCategory::Forbidden);
+
+        // Insert legitimate record directly via test helper for immutability testing
+        mem_store.insert_test_memory(verified_memory.clone());
 
         // 2. Modifying via store_memory must return Forbidden
         let mut tampered = verified_memory.clone();

@@ -523,6 +523,81 @@ pub struct ResolutionAuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// Determines strictly whether an authoritative webhook inbox record represents a genuine
+/// provider-originated timeout or upstream gateway degradation.
+/// Substring matching, free-text descriptions, and `/error/reason` are strictly rejected.
+pub fn is_strict_provider_timeout_event(
+    ev: &WebhookInboxRecord,
+    provider: &str,
+    is_refund_event: bool,
+    parsed_event: Option<&esa_core::events::PaymentEventType>,
+) -> bool {
+    if ev.status != esa_state::WebhookStatus::Processed || is_refund_event {
+        return false;
+    }
+
+    // Must be recognized PaymentFailed event type or explicit provider timeout event type
+    let et = ev.event_type.to_ascii_lowercase();
+    let is_timeout_event_type = matches!(
+        et.as_str(),
+        "payment.failed"
+            | "payment.timeout"
+            | "gateway_error"
+            | "provider_timeout"
+            | "payment_failed"
+    ) || parsed_event
+        == Some(&esa_core::events::PaymentEventType::PaymentFailed);
+
+    if !is_timeout_event_type {
+        return false;
+    }
+
+    let p = provider.trim().to_ascii_lowercase();
+    match p.as_str() {
+        "razorpay" => {
+            let code = ev
+                .payload
+                .pointer("/error/code")
+                .or_else(|| ev.payload.pointer("/payload/payment/entity/error_code"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim());
+            matches!(
+                code,
+                Some("BAD_GATEWAY" | "GATEWAY_ERROR" | "GATEWAY_TIMEOUT" | "SERVER_ERROR")
+            )
+        }
+        "cashfree" => {
+            let code = ev
+                .payload
+                .pointer("/data/payment/error_code")
+                .or_else(|| ev.payload.pointer("/error_code"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim());
+            matches!(
+                code,
+                Some(
+                    "GATEWAY_ERROR"
+                        | "GATEWAY_TIMEOUT"
+                        | "BANK_COMMUNICATION_ERROR"
+                        | "SYSTEM_ERROR"
+                )
+            )
+        }
+        "payu" => {
+            let code = ev
+                .payload
+                .pointer("/error_code")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim());
+            matches!(
+                code,
+                Some("E1601" | "E1602" | "E205" | "GATEWAY_TIMEOUT" | "BANK_TIMEOUT")
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Sealed authoritative outcome proof derived strictly inside `memory` from ESAPay's
 /// durable `WebhookStore` payment, webhook, and refund records.
 /// External callers cannot construct this proof using arbitrary payment records.
@@ -537,6 +612,7 @@ pub struct AuthoritativeOutcomeProof {
     evidence_refs: Vec<String>,
     evidence_provenance: Vec<String>,
     verification_method: String,
+    evidence_fingerprint: String,
 }
 
 impl AuthoritativeOutcomeProof {
@@ -677,34 +753,15 @@ impl AuthoritativeOutcomeProof {
                 }
             }
 
-            let et = ev.event_type.to_ascii_lowercase();
             // Authoritative provider timeout/outage evidence: must be a processed non-refund event
-            // with explicit provider timeout/gateway_error event type or structured error code.
-            // Generic unstructured substring matching (e.g. on customer notes or error descriptions) is rejected.
-            let is_provider_timeout_or_outage = ev.status == esa_state::WebhookStatus::Processed
-                && !is_refund_event
-                && (et.contains("timeout")
-                    || et.contains("gateway_error")
-                    || et.contains("provider_timeout")
-                    || (parsed_event == Some(esa_core::events::PaymentEventType::PaymentFailed)
-                        && {
-                            let err_code = ev
-                                .payload
-                                .pointer("/error/code")
-                                .or_else(|| ev.payload.pointer("/error_code"))
-                                .or_else(|| {
-                                    ev.payload.pointer("/payload/payment/entity/error_code")
-                                })
-                                .or_else(|| ev.payload.pointer("/error/reason"))
-                                .or_else(|| ev.payload.pointer("/data/payment/error_code"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let ec = err_code.to_ascii_lowercase();
-                            ec.contains("timeout")
-                                || ec.contains("gateway_error")
-                                || ec.contains("provider_timeout")
-                                || ec.contains("network_error")
-                        }));
+            // with machine-readable allow-listed provider error code. Substring matching,
+            // `/error/reason`, and free text are strictly rejected.
+            let is_provider_timeout_or_outage = is_strict_provider_timeout_event(
+                ev,
+                &attempt.provider,
+                is_refund_event,
+                parsed_event.as_ref(),
+            );
             if is_provider_timeout_or_outage {
                 provider_timeout_event_ids.insert(ev.provider_event_id.clone());
             }
@@ -968,6 +1025,29 @@ impl AuthoritativeOutcomeProof {
             provenance_sources.join("+")
         );
 
+        let pe_sig = payment_entity
+            .map(|pe| {
+                format!(
+                    "{}:{}:{}:{}",
+                    pe.state as u8,
+                    pe.amount_minor,
+                    pe.refunded_amount_minor,
+                    pe.updated_at.timestamp()
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
+        let evidence_fingerprint = format!(
+            "pref:{}:att_st:{}:att_up:{}:pe:{}:p_ref_min:{}:inbox_n:{}:dlv_n:{}",
+            eval.payment_reference,
+            attempt.state,
+            attempt.updated_at.timestamp(),
+            pe_sig,
+            pending_reservations_minor,
+            inbox_events.len(),
+            delivery_audits.len()
+        );
+        provenance_sources.push(format!("evidence_snapshot:{}", evidence_fingerprint));
+
         Ok(Self {
             evaluation_id: eval.evaluation_id.clone(),
             merchant_id: caller_mid.to_string(),
@@ -978,6 +1058,7 @@ impl AuthoritativeOutcomeProof {
             evidence_refs: eval.supporting_evidence_refs.clone(),
             evidence_provenance: provenance_sources,
             verification_method: "deterministic_webhook_store_v1".to_string(),
+            evidence_fingerprint,
         })
     }
 
@@ -1015,6 +1096,10 @@ impl AuthoritativeOutcomeProof {
 
     pub fn verification_method(&self) -> &str {
         &self.verification_method
+    }
+
+    pub fn evidence_fingerprint(&self) -> &str {
+        &self.evidence_fingerprint
     }
 }
 

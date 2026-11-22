@@ -94,6 +94,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             "ALTER TABLE esa_memory_records ADD COLUMN IF NOT EXISTS provenance JSONB;",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_merchant ON esa_experience_evaluations(merchant_id, created_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_expires ON esa_experience_evaluations(expires_at);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_esa_eval_promoted_memory ON esa_experience_evaluations(promoted_memory_id) WHERE promoted_memory_id IS NOT NULL;",
             r#"
             CREATE TABLE IF NOT EXISTS esa_trusted_resolutions (
                 resolution_id VARCHAR(128) PRIMARY KEY,
@@ -166,6 +167,12 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
 
     async fn store_memory(&self, record: MemoryRecord) -> Result<MemoryRecord, InferenceError> {
         let v = record.sanitize_and_validate()?;
+        if v.memory_type == MemoryType::Episodic {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Episodic memories cannot be created or modified directly through generic store_memory(); must be promoted through deterministic verification",
+            ));
+        }
         let source_refs_json = serde_json::to_value(&v.source_refs).unwrap_or_default();
         let provenance_json = v
             .provenance
@@ -564,6 +571,42 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 InferenceErrorCategory::InvalidResponse,
                 "Authoritative proof payment_reference does not match evaluation",
             ));
+        }
+
+        // Re-validate authoritative payment state snapshot if payment_records exists in database
+        let has_payment_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'payment_records');",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(false);
+
+        if has_payment_table {
+            let p_row =
+                sqlx::query("SELECT state FROM payment_records WHERE payment_id = $1 FOR SHARE;")
+                    .bind(proof.payment_reference())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        InferenceError::new(
+                            InferenceErrorCategory::UpstreamError,
+                            format!("Failed to verify payment state snapshot consistency: {}", e),
+                        )
+                    })?;
+
+            if let Some(r) = p_row {
+                let st_str: String = r.get("state");
+                let db_canon = CanonicalPaymentState::from_attempt_state(&st_str);
+                if db_canon != verified_outcome_state {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        format!(
+                            "Authoritative payment state diverged to '{}' during verification; failing closed",
+                            st_str
+                        ),
+                    ));
+                }
+            }
         }
 
         // Idempotent replay handling
@@ -1514,7 +1557,43 @@ mod tests {
             expires_at: Some(now + chrono::Duration::days(30)),
             provenance: None,
         };
-        store.store_memory(rec_a).await.unwrap();
+        // Generic store_memory must reject Episodic records (Finding 1)
+        let create_err = store.store_memory(rec_a.clone()).await.unwrap_err();
+        assert_eq!(create_err.category, InferenceErrorCategory::Forbidden);
+
+        // Seed record directly into database for query isolation testing
+        sqlx::query(
+            r#"
+            INSERT INTO esa_memory_records (
+                memory_id, memory_type, scope, merchant_id, provider,
+                incident_category, lifecycle_state, title, summary, resolution,
+                source_refs, verification_status, version, created_at, updated_at, expires_at
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16
+            );
+            "#,
+        )
+        .bind(&rec_a.memory_id)
+        .bind(rec_a.memory_type.as_str())
+        .bind(rec_a.scope.as_str())
+        .bind(&rec_a.merchant_id)
+        .bind(&rec_a.provider)
+        .bind(&rec_a.incident_category)
+        .bind(rec_a.lifecycle_state.map(|s| s.as_str()))
+        .bind(&rec_a.title)
+        .bind(&rec_a.summary)
+        .bind(&rec_a.resolution)
+        .bind(serde_json::to_value(&rec_a.source_refs).unwrap_or_default())
+        .bind(rec_a.verification_status.as_str())
+        .bind(rec_a.version as i32)
+        .bind(rec_a.created_at)
+        .bind(rec_a.updated_at)
+        .bind(rec_a.expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // 1. Cross-merchant overwrite with same memory_id must fail with Forbidden
         let rec_b_conflict = MemoryRecord {
@@ -1989,6 +2068,226 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(del_err.category, InferenceErrorCategory::Forbidden);
+
+        let _ = mem_store.delete_evaluations_for_merchant(&scope_a).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_verification_atomic_concurrency_and_snapshot_consistency() {
+        use esa_core::provider::PaymentAttemptRecord;
+        use esa_state::{PostgresWebhookStore, WebhookStore};
+
+        let db_url = match std::env::var("DATABASE_URL") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => return,
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&db_url)
+            .await
+            .expect("DATABASE_URL was set but connecting to PostgreSQL failed");
+
+        PostgresWebhookStore::init_schema(&pool).await.unwrap();
+        let wh_store = PostgresWebhookStore::new(pool.clone());
+        let mem_store = PostgresPaymentMemoryStore::new(pool.clone());
+        mem_store.init_schema().await.unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let m_a = format!("pg_conc_{}", &suffix[..8]);
+        let scope_a = ExecutionScope::MerchantScoped {
+            merchant_id: m_a.clone(),
+        };
+        let p_ref = format!("pay_conc_{}", &suffix[..8]);
+        let now = Utc::now();
+
+        // 1. Setup payment attempt and duplicate webhooks
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: format!("tx_conc_{}", &suffix[..8]),
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_conc".to_string()),
+                payment_reference: Some(p_ref.clone()),
+                amount_minor: 15000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({
+            "event": "payment.captured",
+            "created_at": now.timestamp()
+        });
+        let params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_conc_{}", &suffix[..8]),
+            event_type: esa_core::PaymentEventType::PaymentCaptured,
+            payment_id: &p_ref,
+            amount_minor: 15000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        wh_store.process_webhook_event(&params).await.unwrap();
+        wh_store.process_webhook_event(&params).await.unwrap(); // duplicate suppressed
+
+        let audits = wh_store
+            .list_webhook_delivery_audits_for_payment(&m_a, &p_ref, 50)
+            .await
+            .unwrap();
+        let dup_audit = audits.iter().find(|a| a.is_duplicate).unwrap();
+
+        // Record evaluation and resolution with durable duplicate delivery audit reference
+        let eval = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    format!("inv_conc_{}", &suffix[..8]),
+                    m_a.clone(),
+                    p_ref.clone(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec![format!("delivery:{}", dup_audit.delivery_id)]),
+            )
+            .await
+            .unwrap();
+
+        let res = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval),
+                ResolutionAuditEvent {
+                    audit_id: format!("raud_conc_init_{}", &suffix[..8]),
+                    resolution_id: format!("res_conc_{}", &suffix[..8]),
+                    evaluation_id: eval.evaluation_id.clone(),
+                    merchant_id: m_a.clone(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 2. Concurrency test: Spawn 5 concurrent tasks verifying the exact same resolution simultaneously
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let wh_ref = PostgresWebhookStore::new(pool.clone());
+            let mem_ref = PostgresPaymentMemoryStore::new(pool.clone());
+            let sc = scope_a.clone();
+            let rid = res.resolution_id.clone();
+            handles.push(tokio::spawn(async move {
+                crate::memory::verify_resolution_from_webhook_store(&wh_ref, &mem_ref, &sc, &rid)
+                    .await
+            }));
+        }
+
+        let mut promoted_memory_ids = Vec::new();
+        for handle in handles {
+            let result = handle.await.unwrap();
+            let (verified_res, _, mem_opt) =
+                result.expect("All concurrent verification attempts must complete safely");
+            assert_eq!(verified_res.status, ResolutionStatus::Verified);
+            assert_eq!(verified_res.accuracy, OutcomeAccuracy::Correct);
+            if let Some(m) = mem_opt {
+                promoted_memory_ids.push(m.memory_id);
+            }
+        }
+
+        // Exactly one memory must be promoted, and all returned the same memory_id
+        assert!(!promoted_memory_ids.is_empty());
+        let first_id = &promoted_memory_ids[0];
+        assert!(promoted_memory_ids.iter().all(|id| id == first_id));
+
+        // In database, exactly one memory record exists for this resolution
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM esa_memory_records WHERE scope = 'merchant' AND merchant_id = $1;",
+        )
+        .bind(&m_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            count.0, 1,
+            "Exactly one promoted memory must exist in database"
+        );
+
+        // 3. Stale snapshot / state divergence test:
+        // Update payment_records to 'refunded'
+        sqlx::query("UPDATE payment_records SET state = 'refunded' WHERE payment_id = $1;")
+            .bind(&p_ref)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create a new evaluation claiming 'Captured'
+        let eval_stale = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    format!("inv_stale_{}", &suffix[..8]),
+                    m_a.clone(),
+                    p_ref.clone(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec![format!("delivery:{}", dup_audit.delivery_id)]),
+            )
+            .await
+            .unwrap();
+
+        // Construct a proof that claims authoritative state is Captured
+        // But the database payment_records has diverged to 'refunded'
+        let stale_proof = crate::memory::types::AuthoritativeOutcomeProof::from_authoritative_records_with_deliveries(
+            &scope_a,
+            &eval_stale,
+            &PaymentAttemptRecord {
+                transaction_id: format!("tx_conc_{}", &suffix[..8]),
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_conc".to_string()),
+                payment_reference: Some(p_ref.clone()),
+                amount_minor: 15000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            std::slice::from_ref(dup_audit),
+            &[],
+        )
+        .unwrap();
+
+        // Verification must fail closed because DB payment state has diverged!
+        let diverge_err = mem_store
+            .verify_and_promote_outcome(&scope_a, stale_proof)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            diverge_err.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+        assert!(diverge_err.message.contains("diverged"));
 
         let _ = mem_store.delete_evaluations_for_merchant(&scope_a).await;
     }

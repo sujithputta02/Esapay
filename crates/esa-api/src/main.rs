@@ -1742,7 +1742,7 @@ async fn razorpay_webhook(
             | WebhookError::MissingWebhookSecret,
         ) => {
             let now = chrono::Utc::now();
-            let _ = state
+            if let Err(audit_err) = state
                 .webhook_store
                 .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
                     delivery_id: String::new(),
@@ -1765,7 +1765,13 @@ async fn razorpay_webhook(
                     final_disposition: "rejected_signature".to_string(),
                     error_message: Some("invalid webhook signature".to_string()),
                 })
-                .await;
+                .await
+            {
+                error!(
+                    "Failed to persist untrusted Razorpay delivery audit: {}",
+                    audit_err
+                );
+            }
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "invalid webhook signature" })),
@@ -2729,7 +2735,7 @@ async fn cashfree_webhook(
         Err(err) => {
             warn!("Cashfree webhook verification rejected: {}", err);
             let now = chrono::Utc::now();
-            let _ = state
+            if let Err(audit_err) = state
                 .webhook_store
                 .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
                     delivery_id: String::new(),
@@ -2754,7 +2760,13 @@ async fn cashfree_webhook(
                         esa_agents::privacy::redact_sensitive_text(&err.to_string()).redacted,
                     ),
                 })
-                .await;
+                .await
+            {
+                error!(
+                    "Failed to persist untrusted Cashfree delivery audit: {}",
+                    audit_err
+                );
+            }
             let status = match &err {
                 esa_core::provider::ProviderError::InvalidSignature { .. }
                 | esa_core::provider::ProviderError::AuthenticationFailed { .. } => {
@@ -3370,7 +3382,7 @@ async fn payu_webhook(
         Err(err) => {
             warn!("PayU webhook verification failed: {}", err);
             let now = chrono::Utc::now();
-            let _ = state
+            if let Err(audit_err) = state
                 .webhook_store
                 .record_webhook_delivery_attempt(&esa_state::WebhookDeliveryAuditRecord {
                     delivery_id: String::new(),
@@ -3392,7 +3404,13 @@ async fn payu_webhook(
                         esa_agents::privacy::redact_sensitive_text(&err.to_string()).redacted,
                     ),
                 })
-                .await;
+                .await
+            {
+                error!(
+                    "Failed to persist untrusted PayU delivery audit: {}",
+                    audit_err
+                );
+            }
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": err.to_string() })),
