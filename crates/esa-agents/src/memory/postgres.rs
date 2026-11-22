@@ -25,6 +25,24 @@ impl PostgresPaymentMemoryStore {
 #[async_trait]
 impl PaymentMemoryStore for PostgresPaymentMemoryStore {
     async fn init_schema(&self) -> Result<(), InferenceError> {
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!(
+                    "Failed to begin memory schema initialization transaction: {}",
+                    e
+                ),
+            )
+        })?;
+        sqlx::query("SELECT pg_advisory_xact_lock(123456789);")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to acquire memory schema advisory lock: {}", e),
+                )
+            })?;
         let stmts = [
             r#"
             CREATE TABLE IF NOT EXISTS esa_memory_records (
@@ -125,13 +143,24 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         ];
 
         for stmt in stmts {
-            sqlx::query(stmt).execute(&self.pool).await.map_err(|e| {
+            sqlx::query(stmt).execute(&mut *tx).await.map_err(|e| {
                 InferenceError::new(
                     InferenceErrorCategory::UpstreamError,
                     format!("Memory schema initialization error: {}", e),
                 )
             })?;
         }
+
+        tx.commit().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!(
+                    "Failed to commit memory schema initialization transaction: {}",
+                    e
+                ),
+            )
+        })?;
+
         Ok(())
     }
 
