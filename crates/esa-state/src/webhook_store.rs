@@ -923,55 +923,71 @@ impl PostgresWebhookStore {
             .await
             .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
 
+        // For unverified delivery records (invalid/missing signature), untrusted payload/header fields
+        // must never establish authoritative merchant identity via payment lookup.
         let merchant_id = match merchant_id_override {
             Some(mid) if !mid.trim().is_empty() => Some(mid.trim().to_string()),
-            _ => match payment_id {
-                Some(pid) if !pid.trim().is_empty() => {
-                    Self::resolve_merchant_id_in_tx(tx, provider, pid).await?
+            _ => {
+                if signature_verified {
+                    match payment_id {
+                        Some(pid) if !pid.trim().is_empty() => {
+                            Self::resolve_merchant_id_in_tx(tx, provider, pid).await?
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
-                _ => None,
-            },
+            }
         };
-
-        let first_row = sqlx::query(
-            r#"
-            SELECT delivery_id, first_received_at
-            FROM webhook_delivery_audit
-            WHERE provider = $1 AND provider_event_id = $2
-            ORDER BY attempt_number ASC
-            LIMIT 1;
-            "#,
-        )
-        .bind(provider)
-        .bind(provider_event_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
-
-        let max_attempt: i32 = sqlx::query_scalar(
-            r#"
-            SELECT COALESCE(MAX(attempt_number), 0)
-            FROM webhook_delivery_audit
-            WHERE provider = $1 AND provider_event_id = $2;
-            "#,
-        )
-        .bind(provider)
-        .bind(provider_event_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+        let payment_id = payment_id.map(str::to_string);
 
         let now = Utc::now();
-        let (original_delivery_id, first_received_at) = match first_row {
-            Some(r) => (
-                Some(r.get::<String, _>("delivery_id")),
-                r.get::<DateTime<Utc>, _>("first_received_at"),
-            ),
-            None => (None, now),
-        };
-        let attempt_number = (max_attempt + 1) as u32;
+        let (original_delivery_id, first_received_at, attempt_number, is_dup) =
+            if signature_verified {
+                let first_row = sqlx::query(
+                    r#"
+                SELECT delivery_id, first_received_at
+                FROM webhook_delivery_audit
+                WHERE provider = $1 AND provider_event_id = $2 AND signature_verified = TRUE
+                ORDER BY attempt_number ASC
+                LIMIT 1;
+                "#,
+                )
+                .bind(provider)
+                .bind(provider_event_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                let max_attempt: i32 = sqlx::query_scalar(
+                    r#"
+                SELECT COALESCE(MAX(attempt_number), 0)
+                FROM webhook_delivery_audit
+                WHERE provider = $1 AND provider_event_id = $2 AND signature_verified = TRUE;
+                "#,
+                )
+                .bind(provider)
+                .bind(provider_event_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| WebhookStoreError::Database(e.to_string()))?;
+
+                let (orig_id, first_rx) = match first_row {
+                    Some(r) => (
+                        Some(r.get::<String, _>("delivery_id")),
+                        r.get::<DateTime<Utc>, _>("first_received_at"),
+                    ),
+                    None => (None, now),
+                };
+                let att_num = (max_attempt + 1) as u32;
+                let dup = is_duplicate || att_num > 1;
+                (orig_id, first_rx, att_num, dup)
+            } else {
+                // Unverified delivery records must not participate in duplicate chains or front-run legitimate deliveries
+                (None, now, 1, false)
+            };
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4().simple());
-        let is_dup = is_duplicate || attempt_number > 1;
 
         sqlx::query(
             r#"
@@ -992,7 +1008,7 @@ impl PostgresWebhookStore {
         .bind(&merchant_id)
         .bind(provider)
         .bind(provider_event_id)
-        .bind(payment_id)
+        .bind(&payment_id)
         .bind(inbox_id)
         .bind(&original_delivery_id)
         .bind(attempt_number as i32)
@@ -1013,7 +1029,7 @@ impl PostgresWebhookStore {
             merchant_id,
             provider: provider.to_string(),
             provider_event_id: provider_event_id.to_string(),
-            payment_id: payment_id.map(str::to_string),
+            payment_id,
             inbox_id,
             original_delivery_id,
             attempt_number,
@@ -2710,40 +2726,56 @@ impl InMemoryWebhookStore {
         final_disposition: &str,
         error_message: Option<&str>,
     ) {
+        // For unverified delivery records, untrusted payment lookup must never establish merchant identity
         let merchant_id = match merchant_id_override {
             Some(mid) if !mid.trim().is_empty() => Some(mid.trim().to_string()),
-            _ => payment_id.and_then(|pid| self.resolve_in_memory_merchant_id(provider, pid)),
+            _ => {
+                if signature_verified {
+                    payment_id.and_then(|pid| self.resolve_in_memory_merchant_id(provider, pid))
+                } else {
+                    None
+                }
+            }
         };
+        let payment_id = payment_id.map(str::to_string);
 
         let mut guard = self.delivery_audits.lock();
-        let existing_for_event: Vec<&WebhookDeliveryAuditRecord> = guard
-            .iter()
-            .filter(|r| r.provider == provider && r.provider_event_id == provider_event_id)
-            .collect();
         let now = Utc::now();
-        let (original_delivery_id, first_received_at, attempt_number) =
-            if let Some(first) = existing_for_event.first() {
-                let max_attempt = existing_for_event
+        let (original_delivery_id, first_received_at, attempt_number, is_dup) =
+            if signature_verified {
+                let existing_for_event: Vec<&WebhookDeliveryAuditRecord> = guard
                     .iter()
-                    .map(|r| r.attempt_number)
-                    .max()
-                    .unwrap_or(1);
-                (
-                    Some(first.delivery_id.clone()),
-                    first.first_received_at,
-                    max_attempt + 1,
-                )
+                    .filter(|r| {
+                        r.provider == provider
+                            && r.provider_event_id == provider_event_id
+                            && r.signature_verified
+                    })
+                    .collect();
+                if let Some(first) = existing_for_event.first() {
+                    let max_attempt = existing_for_event
+                        .iter()
+                        .map(|r| r.attempt_number)
+                        .max()
+                        .unwrap_or(1);
+                    (
+                        Some(first.delivery_id.clone()),
+                        first.first_received_at,
+                        max_attempt + 1,
+                        is_duplicate || (max_attempt + 1) > 1,
+                    )
+                } else {
+                    (None, now, 1, is_duplicate)
+                }
             } else {
-                (None, now, 1)
+                // Unverified delivery records must not participate in duplicate chains or front-run legitimate deliveries
+                (None, now, 1, false)
             };
-
-        let is_dup = is_duplicate || attempt_number > 1;
         guard.push(WebhookDeliveryAuditRecord {
             delivery_id: format!("dlv_{}", uuid::Uuid::new_v4().simple()),
             merchant_id,
             provider: provider.to_string(),
             provider_event_id: provider_event_id.to_string(),
-            payment_id: payment_id.map(str::to_string),
+            payment_id,
             inbox_id,
             original_delivery_id,
             attempt_number,

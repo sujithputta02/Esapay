@@ -262,10 +262,47 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         memory_id: &str,
     ) -> Result<bool, InferenceError> {
         let caller_mid = scope.normalized_merchant_id()?;
+        let existing = match &caller_mid {
+            Some(mid) => {
+                sqlx::query(
+                    "SELECT memory_type, verification_status FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;",
+                )
+                .bind(memory_id)
+                .bind(mid)
+                .fetch_optional(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT memory_type, verification_status FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system';",
+                )
+                .bind(memory_id)
+                .fetch_optional(&self.pool)
+                .await
+            }
+        }
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to query memory before delete: {}", e),
+            )
+        })?;
+
+        if let Some(row) = existing {
+            let m_type: String = row.get("memory_type");
+            let v_stat: String = row.get("verification_status");
+            if m_type.eq_ignore_ascii_case("episodic") && v_stat.eq_ignore_ascii_case("verified") {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Verified episodic memories are immutable and cannot be deleted",
+                ));
+            }
+        }
+
         let res = match caller_mid {
             Some(mid) => {
                 sqlx::query(
-                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;",
+                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2 AND NOT (memory_type = 'episodic' AND verification_status = 'verified');",
                 )
                 .bind(memory_id)
                 .bind(mid)
@@ -274,7 +311,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             }
             None => {
                 sqlx::query(
-                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system';",
+                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system' AND NOT (memory_type = 'episodic' AND verification_status = 'verified');",
                 )
                 .bind(memory_id)
                 .execute(&self.pool)
@@ -1917,7 +1954,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(cross_err.category, InferenceErrorCategory::Forbidden);
 
-        let _ = mem_store.delete_memory(&scope_a, &mem.memory_id).await;
+        // 6. Promoted verified episodic memory cannot be deleted in PostgreSQL
+        let del_err = mem_store
+            .delete_memory(&scope_a, &mem.memory_id)
+            .await
+            .unwrap_err();
+        assert_eq!(del_err.category, InferenceErrorCategory::Forbidden);
+
         let _ = mem_store.delete_evaluations_for_merchant(&scope_a).await;
     }
 }

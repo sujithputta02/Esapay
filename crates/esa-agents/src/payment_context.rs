@@ -287,9 +287,15 @@ pub fn build_payment_intelligence_context_with_deliveries(
         if !matches_provider || !matches_payment || !matches_merchant {
             continue;
         }
+        if !dlv.signature_verified {
+            continue;
+        }
         allowed_refs.insert(format!("delivery:{}", dlv.delivery_id));
         allowed_refs.insert(format!("webhook:{}", dlv.provider_event_id));
-        if dlv.is_duplicate && dlv.deduplication_result == "duplicate_suppressed" {
+        if dlv.is_duplicate
+            && dlv.deduplication_result == "duplicate_suppressed"
+            && dlv.final_disposition == "deduplicated_noop"
+        {
             duplicate_webhook_count += 1;
             duplicate_webhook_event_ids.insert(dlv.provider_event_id.clone());
             events.push(PaymentEventTimelineItem {

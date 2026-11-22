@@ -609,7 +609,15 @@ impl AuthoritativeOutcomeProof {
         }
 
         let authoritative_state = match payment_entity {
-            Some(pe) => CanonicalPaymentState::from_payment_state(pe.state),
+            Some(pe) => {
+                if pe.payment_id != eval.payment_reference {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        "Authoritative payment entity does not match evaluation payment_reference",
+                    ));
+                }
+                CanonicalPaymentState::from_payment_state(pe.state)
+            }
             None => CanonicalPaymentState::from_attempt_state(&attempt.state),
         };
 
@@ -670,11 +678,33 @@ impl AuthoritativeOutcomeProof {
             }
 
             let et = ev.event_type.to_ascii_lowercase();
-            let payload_str = ev.payload.to_string().to_ascii_lowercase();
+            // Authoritative provider timeout/outage evidence: must be a processed non-refund event
+            // with explicit provider timeout/gateway_error event type or structured error code.
+            // Generic unstructured substring matching (e.g. on customer notes or error descriptions) is rejected.
             let is_provider_timeout_or_outage = ev.status == esa_state::WebhookStatus::Processed
+                && !is_refund_event
                 && (et.contains("timeout")
                     || et.contains("gateway_error")
-                    || payload_str.contains("gateway_timeout"));
+                    || et.contains("provider_timeout")
+                    || (parsed_event == Some(esa_core::events::PaymentEventType::PaymentFailed)
+                        && {
+                            let err_code = ev
+                                .payload
+                                .pointer("/error/code")
+                                .or_else(|| ev.payload.pointer("/error_code"))
+                                .or_else(|| {
+                                    ev.payload.pointer("/payload/payment/entity/error_code")
+                                })
+                                .or_else(|| ev.payload.pointer("/error/reason"))
+                                .or_else(|| ev.payload.pointer("/data/payment/error_code"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let ec = err_code.to_ascii_lowercase();
+                            ec.contains("timeout")
+                                || ec.contains("gateway_error")
+                                || ec.contains("provider_timeout")
+                                || ec.contains("network_error")
+                        }));
             if is_provider_timeout_or_outage {
                 provider_timeout_event_ids.insert(ev.provider_event_id.clone());
             }
@@ -730,6 +760,10 @@ impl AuthoritativeOutcomeProof {
         let mut duplicate_delivery_ids = HashSet::new();
         let mut duplicate_event_ids = HashSet::new();
         for dlv in delivery_audits {
+            // Unverified delivery records cannot be used as trusted evidence
+            if !dlv.signature_verified {
+                continue;
+            }
             let belongs_to_payment = dlv.provider.eq_ignore_ascii_case(&attempt.provider)
                 && dlv.payment_id.as_deref() == Some(eval.payment_reference.as_str())
                 && dlv
@@ -792,15 +826,14 @@ impl AuthoritativeOutcomeProof {
                 OutcomeAccuracy::Correct
             }
             "PROVIDER_DEGRADED_OR_TIMEOUT" => {
-                let attempt_ref = format!("attempt:{}", attempt.transaction_id);
-                let has_provider_timeout = has_cited_match("webhook:", &provider_timeout_event_ids)
-                    || (authoritative_state == CanonicalPaymentState::Failed
-                        && attempt.state.eq_ignore_ascii_case("timeout")
-                        && cited.iter().any(|r| r == &attempt_ref));
+                // Authoritative provider timeout requires processed, cited provider-originated evidence.
+                // An internal gateway/transport timeout (attempt.state == "timeout") or generic failed attempt
+                // cannot independently prove provider-side failure.
+                let has_provider_timeout = has_cited_match("webhook:", &provider_timeout_event_ids);
                 if !has_provider_timeout {
                     return Err(InferenceError::new(
                         InferenceErrorCategory::InvalidResponse,
-                        "PROVIDER_DEGRADED_OR_TIMEOUT lacks processed, cited provider timeout/degradation evidence; keeping evaluation pending",
+                        "PROVIDER_DEGRADED_OR_TIMEOUT lacks processed, cited authoritative provider timeout/degradation evidence; keeping evaluation pending",
                     ));
                 }
                 OutcomeAccuracy::Correct
