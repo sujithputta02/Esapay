@@ -57,6 +57,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "sem_razorpay_auth_capture_v1".to_string(),
@@ -76,6 +77,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "sem_cashfree_webhook_delay_v1".to_string(),
@@ -95,6 +97,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "sem_payu_hash_verify_v1".to_string(),
@@ -114,6 +117,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "sem_refund_reservation_v1".to_string(),
@@ -133,6 +137,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "proc_investigate_pending_v1".to_string(),
@@ -152,6 +157,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "proc_check_webhook_v1".to_string(),
@@ -171,6 +177,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
         MemoryRecord {
             memory_id: "proc_investigate_refund_v1".to_string(),
@@ -190,6 +197,7 @@ pub async fn seed_system_knowledge(
             created_at: now,
             updated_at: now,
             expires_at: None,
+            provenance: None,
         },
     ];
 

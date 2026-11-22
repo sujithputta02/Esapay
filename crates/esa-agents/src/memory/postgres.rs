@@ -1,7 +1,8 @@
 use crate::memory::store::PaymentMemoryStore;
 use crate::memory::types::{
-    AuthoritativeOutcomeProof, MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy,
-    OutcomeEvaluationRecord, VerificationStatus,
+    AuthoritativeOutcomeProof, MemoryProvenance, MemoryQuery, MemoryRecord, MemoryScope,
+    MemoryType, OutcomeAccuracy, OutcomeEvaluationRecord, ResolutionAuditEvent, ResolutionStatus,
+    TrustedResolutionRecord, VerificationStatus,
 };
 use crate::payment_context::CanonicalPaymentState;
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory, ProviderKind};
@@ -24,6 +25,24 @@ impl PostgresPaymentMemoryStore {
 #[async_trait]
 impl PaymentMemoryStore for PostgresPaymentMemoryStore {
     async fn init_schema(&self) -> Result<(), InferenceError> {
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!(
+                    "Failed to begin memory schema initialization transaction: {}",
+                    e
+                ),
+            )
+        })?;
+        sqlx::query("SELECT pg_advisory_xact_lock(123456789);")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!("Failed to acquire memory schema advisory lock: {}", e),
+                )
+            })?;
         let stmts = [
             r#"
             CREATE TABLE IF NOT EXISTS esa_memory_records (
@@ -72,35 +91,104 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             "#,
             "ALTER TABLE esa_experience_evaluations ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;",
             "ALTER TABLE esa_experience_evaluations ADD COLUMN IF NOT EXISTS supporting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb;",
+            "ALTER TABLE esa_memory_records ADD COLUMN IF NOT EXISTS provenance JSONB;",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_merchant ON esa_experience_evaluations(merchant_id, created_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_esa_eval_expires ON esa_experience_evaluations(expires_at);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_esa_eval_promoted_memory ON esa_experience_evaluations(promoted_memory_id) WHERE promoted_memory_id IS NOT NULL;",
+            r#"
+            CREATE TABLE IF NOT EXISTS esa_trusted_resolutions (
+                resolution_id VARCHAR(128) PRIMARY KEY,
+                investigation_id VARCHAR(128) NOT NULL,
+                evaluation_id VARCHAR(128) NOT NULL UNIQUE,
+                merchant_id VARCHAR(255) NOT NULL,
+                payment_reference VARCHAR(255) NOT NULL,
+                provider VARCHAR(64) NOT NULL,
+                proposed_root_cause VARCHAR(128) NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                accuracy VARCHAR(32) NOT NULL,
+                authoritative_state VARCHAR(64),
+                verification_method VARCHAR(64),
+                evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                evidence_provenance JSONB NOT NULL DEFAULT '[]'::jsonb,
+                missing_evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+                verification_summary TEXT,
+                rejection_reason TEXT,
+                promoted_memory_id VARCHAR(128),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                verified_at TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_esa_res_merchant_status ON esa_trusted_resolutions(merchant_id, status, updated_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_esa_res_payment ON esa_trusted_resolutions(merchant_id, payment_reference);",
+            r#"
+            CREATE TABLE IF NOT EXISTS esa_resolution_audit_log (
+                audit_id VARCHAR(128) PRIMARY KEY,
+                resolution_id VARCHAR(128) NOT NULL,
+                evaluation_id VARCHAR(128) NOT NULL,
+                merchant_id VARCHAR(255) NOT NULL,
+                from_status VARCHAR(32),
+                to_status VARCHAR(32) NOT NULL,
+                actor VARCHAR(128) NOT NULL,
+                verification_method VARCHAR(64) NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                evidence_provenance JSONB NOT NULL DEFAULT '[]'::jsonb,
+                promoted_memory_id VARCHAR(128),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_esa_res_audit_res ON esa_resolution_audit_log(resolution_id, created_at ASC);",
+            "CREATE INDEX IF NOT EXISTS idx_esa_res_audit_merchant ON esa_resolution_audit_log(merchant_id, created_at DESC);",
         ];
 
         for stmt in stmts {
-            sqlx::query(stmt).execute(&self.pool).await.map_err(|e| {
+            sqlx::query(stmt).execute(&mut *tx).await.map_err(|e| {
                 InferenceError::new(
                     InferenceErrorCategory::UpstreamError,
                     format!("Memory schema initialization error: {}", e),
                 )
             })?;
         }
+
+        tx.commit().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!(
+                    "Failed to commit memory schema initialization transaction: {}",
+                    e
+                ),
+            )
+        })?;
+
         Ok(())
     }
 
     async fn store_memory(&self, record: MemoryRecord) -> Result<MemoryRecord, InferenceError> {
         let v = record.sanitize_and_validate()?;
+        if v.memory_type == MemoryType::Episodic {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Episodic memories cannot be created or modified directly through generic store_memory(); must be promoted through deterministic verification",
+            ));
+        }
         let source_refs_json = serde_json::to_value(&v.source_refs).unwrap_or_default();
+        let provenance_json = v
+            .provenance
+            .as_ref()
+            .and_then(|p| serde_json::to_value(p).ok());
 
         let res = sqlx::query(
             r#"
             INSERT INTO esa_memory_records (
                 memory_id, memory_type, scope, merchant_id, provider,
                 incident_category, lifecycle_state, title, summary, resolution,
-                source_refs, verification_status, version, created_at, updated_at, expires_at
+                source_refs, verification_status, version, created_at, updated_at, expires_at, provenance
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16
+                $11, $12, $13, $14, $15, $16, $17
             )
             ON CONFLICT (memory_id) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -110,9 +198,11 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 verification_status = EXCLUDED.verification_status,
                 version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at,
-                expires_at = EXCLUDED.expires_at
+                expires_at = EXCLUDED.expires_at,
+                provenance = COALESCE(esa_memory_records.provenance, EXCLUDED.provenance)
             WHERE esa_memory_records.scope = EXCLUDED.scope
-              AND esa_memory_records.merchant_id IS NOT DISTINCT FROM EXCLUDED.merchant_id;
+              AND esa_memory_records.merchant_id IS NOT DISTINCT FROM EXCLUDED.merchant_id
+              AND NOT (esa_memory_records.memory_type = 'episodic' AND esa_memory_records.verification_status = 'verified');
             "#,
         )
         .bind(&v.memory_id)
@@ -131,6 +221,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         .bind(v.created_at)
         .bind(v.updated_at)
         .bind(v.expires_at)
+        .bind(provenance_json)
         .execute(&self.pool)
         .await
         .map_err(|e| {
@@ -143,7 +234,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         if res.rows_affected() == 0 {
             return Err(InferenceError::new(
                 InferenceErrorCategory::Forbidden,
-                "Cannot overwrite memory record owned by another scope or merchant",
+                "Cannot overwrite memory record owned by another scope/merchant or immutable verified episodic memory",
             ));
         }
 
@@ -166,7 +257,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             r#"
             SELECT memory_id, memory_type, scope, merchant_id, provider,
                    incident_category, lifecycle_state, title, summary, resolution,
-                   source_refs, verification_status, version, created_at, updated_at, expires_at
+                   source_refs, verification_status, version, created_at, updated_at, expires_at, provenance
             FROM esa_memory_records
             WHERE (expires_at IS NULL OR expires_at > NOW())
               AND (
@@ -207,10 +298,47 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         memory_id: &str,
     ) -> Result<bool, InferenceError> {
         let caller_mid = scope.normalized_merchant_id()?;
+        let existing = match &caller_mid {
+            Some(mid) => {
+                sqlx::query(
+                    "SELECT memory_type, verification_status FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;",
+                )
+                .bind(memory_id)
+                .bind(mid)
+                .fetch_optional(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT memory_type, verification_status FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system';",
+                )
+                .bind(memory_id)
+                .fetch_optional(&self.pool)
+                .await
+            }
+        }
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to query memory before delete: {}", e),
+            )
+        })?;
+
+        if let Some(row) = existing {
+            let m_type: String = row.get("memory_type");
+            let v_stat: String = row.get("verification_status");
+            if m_type.eq_ignore_ascii_case("episodic") && v_stat.eq_ignore_ascii_case("verified") {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Verified episodic memories are immutable and cannot be deleted",
+                ));
+            }
+        }
+
         let res = match caller_mid {
             Some(mid) => {
                 sqlx::query(
-                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;",
+                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2 AND NOT (memory_type = 'episodic' AND verification_status = 'verified');",
                 )
                 .bind(memory_id)
                 .bind(mid)
@@ -219,7 +347,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             }
             None => {
                 sqlx::query(
-                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system';",
+                    "DELETE FROM esa_memory_records WHERE memory_id = $1 AND scope = 'system' AND NOT (memory_type = 'episodic' AND verification_status = 'verified');",
                 )
                 .bind(memory_id)
                 .execute(&self.pool)
@@ -445,6 +573,42 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             ));
         }
 
+        // Re-validate authoritative payment state snapshot if payment_records exists in database
+        let has_payment_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'payment_records');",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(false);
+
+        if has_payment_table {
+            let p_row =
+                sqlx::query("SELECT state FROM payment_records WHERE payment_id = $1 FOR SHARE;")
+                    .bind(proof.payment_reference())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        InferenceError::new(
+                            InferenceErrorCategory::UpstreamError,
+                            format!("Failed to verify payment state snapshot consistency: {}", e),
+                        )
+                    })?;
+
+            if let Some(r) = p_row {
+                let st_str: String = r.get("state");
+                let db_canon = CanonicalPaymentState::from_attempt_state(&st_str);
+                if db_canon != verified_outcome_state {
+                    return Err(InferenceError::new(
+                        InferenceErrorCategory::InvalidResponse,
+                        format!(
+                            "Authoritative payment state diverged to '{}' during verification; failing closed",
+                            st_str
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Idempotent replay handling
         if eval.verified_at.is_some() {
             if eval.verified_outcome_state == Some(verified_outcome_state)
@@ -455,7 +619,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                         r#"
                         SELECT memory_id, memory_type, scope, merchant_id, provider,
                                incident_category, lifecycle_state, title, summary, resolution,
-                               source_refs, verification_status, version, created_at, updated_at, expires_at
+                               source_refs, verification_status, version, created_at, updated_at, expires_at, provenance
                         FROM esa_memory_records
                         WHERE memory_id = $1 AND scope = 'merchant' AND merchant_id = $2;
                         "#,
@@ -489,6 +653,36 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
         }
 
         let now = Utc::now();
+        let existing_res_row = sqlx::query(
+            r#"
+            SELECT resolution_id, status
+            FROM esa_trusted_resolutions
+            WHERE evaluation_id = $1 AND merchant_id = $2
+            FOR UPDATE;
+            "#,
+        )
+        .bind(&eval.evaluation_id)
+        .bind(&eval.merchant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to query trusted resolution: {}", e),
+            )
+        })?;
+        let (resolution_id, prev_status) = match existing_res_row {
+            Some(ref r) => (
+                r.get::<String, _>("resolution_id"),
+                ResolutionStatus::parse(r.get::<String, _>("status").as_str())
+                    .unwrap_or(ResolutionStatus::Pending),
+            ),
+            None => (
+                format!("res_{}", Uuid::new_v4().simple()),
+                ResolutionStatus::Pending,
+            ),
+        };
+
         let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
             let record = MemoryRecord {
@@ -515,26 +709,43 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
                 source_refs: vec![
                     format!("payment:{}", eval.payment_reference),
                     format!("evaluation:{}", eval.evaluation_id),
+                    format!("resolution:{}", resolution_id),
                 ],
                 verification_status: VerificationStatus::Verified,
                 version: 1,
                 created_at: now,
                 updated_at: now,
                 expires_at: Some(now + chrono::Duration::days(180)),
+                provenance: Some(MemoryProvenance {
+                    evaluation_id: eval.evaluation_id.clone(),
+                    resolution_id: resolution_id.clone(),
+                    merchant_id: eval.merchant_id.clone(),
+                    payment_reference: eval.payment_reference.clone(),
+                    provider: eval.provider.clone(),
+                    verified_at: now,
+                    verification_method: proof.verification_method().to_string(),
+                    supporting_evidence_refs: proof.evidence_refs().to_vec(),
+                    evidence_provenance: proof.evidence_provenance().to_vec(),
+                    promotion_decision: "promoted_verified_correct".to_string(),
+                }),
             }
             .sanitize_and_validate()?;
 
             let source_refs_json = serde_json::to_value(&record.source_refs).unwrap_or_default();
+            let provenance_json = record
+                .provenance
+                .as_ref()
+                .and_then(|p| serde_json::to_value(p).ok());
             sqlx::query(
                 r#"
                 INSERT INTO esa_memory_records (
                     memory_id, memory_type, scope, merchant_id, provider,
                     incident_category, lifecycle_state, title, summary, resolution,
-                    source_refs, verification_status, version, created_at, updated_at, expires_at
+                    source_refs, verification_status, version, created_at, updated_at, expires_at, provenance
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16
+                    $11, $12, $13, $14, $15, $16, $17
                 );
                 "#,
             )
@@ -554,6 +765,7 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             .bind(record.created_at)
             .bind(record.updated_at)
             .bind(record.expires_at)
+            .bind(provenance_json)
             .execute(&mut *tx)
             .await
             .map_err(|e| {
@@ -597,6 +809,115 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             )
         })?;
 
+        let target_status = if accuracy == OutcomeAccuracy::Incorrect {
+            ResolutionStatus::Rejected
+        } else {
+            ResolutionStatus::Verified
+        };
+        let ev_refs_json = serde_json::to_value(proof.evidence_refs()).unwrap_or_default();
+        let ev_prov_json = serde_json::to_value(proof.evidence_provenance()).unwrap_or_default();
+        let empty_json = serde_json::json!([]);
+        let rejection_reason: Option<&str> = if target_status == ResolutionStatus::Rejected {
+            Some(proof.verified_resolution())
+        } else {
+            None
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO esa_trusted_resolutions (
+                resolution_id, investigation_id, evaluation_id, merchant_id,
+                payment_reference, provider, proposed_root_cause, status, accuracy,
+                authoritative_state, verification_method, evidence_refs, evidence_provenance,
+                missing_evidence, verification_summary, rejection_reason, promoted_memory_id,
+                created_at, updated_at, verified_at, expires_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, $15, $16, $17,
+                $18, $19, $20, $21
+            )
+            ON CONFLICT (evaluation_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                accuracy = EXCLUDED.accuracy,
+                authoritative_state = EXCLUDED.authoritative_state,
+                verification_method = EXCLUDED.verification_method,
+                evidence_refs = EXCLUDED.evidence_refs,
+                evidence_provenance = EXCLUDED.evidence_provenance,
+                missing_evidence = EXCLUDED.missing_evidence,
+                verification_summary = EXCLUDED.verification_summary,
+                rejection_reason = EXCLUDED.rejection_reason,
+                promoted_memory_id = EXCLUDED.promoted_memory_id,
+                updated_at = EXCLUDED.updated_at,
+                verified_at = EXCLUDED.verified_at;
+            "#,
+        )
+        .bind(&resolution_id)
+        .bind(&eval.investigation_id)
+        .bind(&eval.evaluation_id)
+        .bind(&eval.merchant_id)
+        .bind(&eval.payment_reference)
+        .bind(&eval.provider)
+        .bind(&eval.recommended_root_cause)
+        .bind(target_status.as_str())
+        .bind(accuracy.as_str())
+        .bind(verified_outcome_state.as_str())
+        .bind(proof.verification_method())
+        .bind(&ev_refs_json)
+        .bind(&ev_prov_json)
+        .bind(&empty_json)
+        .bind(proof.verified_resolution())
+        .bind(rejection_reason)
+        .bind(&eval.promoted_memory_id)
+        .bind(eval.created_at)
+        .bind(now)
+        .bind(now)
+        .bind(eval.expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to persist verified trusted resolution: {}", e),
+            )
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO esa_resolution_audit_log (
+                audit_id, resolution_id, evaluation_id, merchant_id,
+                from_status, to_status, actor, verification_method, reason,
+                evidence_refs, evidence_provenance, promoted_memory_id, created_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13
+            );
+            "#,
+        )
+        .bind(format!("raud_{}", Uuid::new_v4().simple()))
+        .bind(&resolution_id)
+        .bind(&eval.evaluation_id)
+        .bind(&eval.merchant_id)
+        .bind(prev_status.as_str())
+        .bind(target_status.as_str())
+        .bind("system:deterministic_verifier")
+        .bind(proof.verification_method())
+        .bind(proof.verified_resolution())
+        .bind(&ev_refs_json)
+        .bind(&ev_prov_json)
+        .bind(&eval.promoted_memory_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to persist resolution audit event: {}", e),
+            )
+        })?;
+
         tx.commit().await.map_err(|e| {
             InferenceError::new(
                 InferenceErrorCategory::UpstreamError,
@@ -629,6 +950,384 @@ impl PaymentMemoryStore for PostgresPaymentMemoryStore {
             })?;
         Ok(res.rows_affected() as usize)
     }
+
+    async fn record_resolution(
+        &self,
+        resolution: TrustedResolutionRecord,
+        initial_audit: ResolutionAuditEvent,
+    ) -> Result<TrustedResolutionRecord, InferenceError> {
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to begin resolution transaction: {}", e),
+            )
+        })?;
+
+        let ev_refs = serde_json::to_value(&resolution.evidence_refs).unwrap_or_default();
+        let ev_prov = serde_json::to_value(&resolution.evidence_provenance).unwrap_or_default();
+        let missing_ev = serde_json::to_value(&resolution.missing_evidence).unwrap_or_default();
+
+        sqlx::query(
+            r#"
+            INSERT INTO esa_trusted_resolutions (
+                resolution_id, investigation_id, evaluation_id, merchant_id,
+                payment_reference, provider, proposed_root_cause, status, accuracy,
+                authoritative_state, verification_method, evidence_refs, evidence_provenance,
+                missing_evidence, verification_summary, rejection_reason, promoted_memory_id,
+                created_at, updated_at, verified_at, expires_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, $15, $16, $17,
+                $18, $19, $20, $21
+            );
+            "#,
+        )
+        .bind(&resolution.resolution_id)
+        .bind(&resolution.investigation_id)
+        .bind(&resolution.evaluation_id)
+        .bind(&resolution.merchant_id)
+        .bind(&resolution.payment_reference)
+        .bind(&resolution.provider)
+        .bind(&resolution.proposed_root_cause)
+        .bind(resolution.status.as_str())
+        .bind(resolution.accuracy.as_str())
+        .bind(resolution.authoritative_state.map(|s| s.as_str()))
+        .bind(&resolution.verification_method)
+        .bind(ev_refs)
+        .bind(ev_prov)
+        .bind(missing_ev)
+        .bind(&resolution.verification_summary)
+        .bind(&resolution.rejection_reason)
+        .bind(&resolution.promoted_memory_id)
+        .bind(resolution.created_at)
+        .bind(resolution.updated_at)
+        .bind(resolution.verified_at)
+        .bind(resolution.expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to record trusted resolution: {}", e),
+            )
+        })?;
+
+        let audit_refs = serde_json::to_value(&initial_audit.evidence_refs).unwrap_or_default();
+        let audit_prov =
+            serde_json::to_value(&initial_audit.evidence_provenance).unwrap_or_default();
+        sqlx::query(
+            r#"
+            INSERT INTO esa_resolution_audit_log (
+                audit_id, resolution_id, evaluation_id, merchant_id,
+                from_status, to_status, actor, verification_method, reason,
+                evidence_refs, evidence_provenance, promoted_memory_id, created_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13
+            );
+            "#,
+        )
+        .bind(&initial_audit.audit_id)
+        .bind(&initial_audit.resolution_id)
+        .bind(&initial_audit.evaluation_id)
+        .bind(&initial_audit.merchant_id)
+        .bind(initial_audit.from_status.map(|s| s.as_str()))
+        .bind(initial_audit.to_status.as_str())
+        .bind(&initial_audit.actor)
+        .bind(&initial_audit.verification_method)
+        .bind(&initial_audit.reason)
+        .bind(audit_refs)
+        .bind(audit_prov)
+        .bind(&initial_audit.promoted_memory_id)
+        .bind(initial_audit.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to record initial resolution audit: {}", e),
+            )
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to commit resolution creation: {}", e),
+            )
+        })?;
+
+        Ok(resolution)
+    }
+
+    async fn get_resolution(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+    ) -> Result<Option<(TrustedResolutionRecord, Vec<ResolutionAuditEvent>)>, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot read merchant-scoped resolutions",
+            )
+        })?;
+        let row = sqlx::query(
+            r#"
+            SELECT resolution_id, investigation_id, evaluation_id, merchant_id,
+                   payment_reference, provider, proposed_root_cause, status, accuracy,
+                   authoritative_state, verification_method, evidence_refs, evidence_provenance,
+                   missing_evidence, verification_summary, rejection_reason, promoted_memory_id,
+                   created_at, updated_at, verified_at, expires_at
+            FROM esa_trusted_resolutions
+            WHERE resolution_id = $1;
+            "#,
+        )
+        .bind(resolution_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to load trusted resolution: {}", e),
+            )
+        })?;
+
+        let Some(r) = row else {
+            return Ok(None);
+        };
+        let res = row_to_resolution(r);
+        if res.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Trusted resolution does not belong to authenticated merchant",
+            ));
+        }
+
+        let audit_rows = sqlx::query(
+            r#"
+            SELECT audit_id, resolution_id, evaluation_id, merchant_id,
+                   from_status, to_status, actor, verification_method, reason,
+                   evidence_refs, evidence_provenance, promoted_memory_id, created_at
+            FROM esa_resolution_audit_log
+            WHERE resolution_id = $1 AND merchant_id = $2
+            ORDER BY created_at ASC;
+            "#,
+        )
+        .bind(resolution_id)
+        .bind(caller_mid)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to load resolution audit log: {}", e),
+            )
+        })?;
+
+        let audits = audit_rows
+            .into_iter()
+            .map(row_to_resolution_audit)
+            .collect();
+        Ok(Some((res, audits)))
+    }
+
+    async fn list_resolutions(
+        &self,
+        scope: &ExecutionScope,
+        status: Option<ResolutionStatus>,
+        payment_reference: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TrustedResolutionRecord>, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot list merchant-scoped resolutions",
+            )
+        })?;
+        let lim = limit.clamp(1, 100) as i64;
+        let clean_pref = payment_reference.map(str::trim).filter(|s| !s.is_empty());
+        let rows = sqlx::query(
+            r#"
+            SELECT resolution_id, investigation_id, evaluation_id, merchant_id,
+                   payment_reference, provider, proposed_root_cause, status, accuracy,
+                   authoritative_state, verification_method, evidence_refs, evidence_provenance,
+                   missing_evidence, verification_summary, rejection_reason, promoted_memory_id,
+                   created_at, updated_at, verified_at, expires_at
+            FROM esa_trusted_resolutions
+            WHERE merchant_id = $1
+              AND ($2::text IS NULL OR status = $2)
+              AND ($3::text IS NULL OR payment_reference = $3)
+            ORDER BY updated_at DESC
+            LIMIT $4;
+            "#,
+        )
+        .bind(caller_mid)
+        .bind(status.map(|s| s.as_str()))
+        .bind(clean_pref)
+        .bind(lim)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to list trusted resolutions: {}", e),
+            )
+        })?;
+        Ok(rows.into_iter().map(row_to_resolution).collect())
+    }
+
+    async fn record_resolution_pending_or_expired(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+        new_status: ResolutionStatus,
+        reason: &str,
+        missing_evidence: Vec<String>,
+    ) -> Result<TrustedResolutionRecord, InferenceError> {
+        if !matches!(
+            new_status,
+            ResolutionStatus::Pending | ResolutionStatus::UnderReview | ResolutionStatus::Expired
+        ) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Non-proof transition cannot mark a resolution as Verified or Rejected",
+            ));
+        }
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot update merchant-scoped resolutions",
+            )
+        })?;
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to begin resolution update transaction: {}", e),
+            )
+        })?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT resolution_id, investigation_id, evaluation_id, merchant_id,
+                   payment_reference, provider, proposed_root_cause, status, accuracy,
+                   authoritative_state, verification_method, evidence_refs, evidence_provenance,
+                   missing_evidence, verification_summary, rejection_reason, promoted_memory_id,
+                   created_at, updated_at, verified_at, expires_at
+            FROM esa_trusted_resolutions
+            WHERE resolution_id = $1
+            FOR UPDATE;
+            "#,
+        )
+        .bind(resolution_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to lock trusted resolution: {}", e),
+            )
+        })?;
+
+        let Some(r) = row else {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Trusted resolution record not found",
+            ));
+        };
+        let mut res = row_to_resolution(r);
+        if res.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Trusted resolution does not belong to authenticated merchant",
+            ));
+        }
+        if res.status.is_terminal() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                format!(
+                    "Cannot transition terminal resolution '{}' from '{}'",
+                    resolution_id,
+                    res.status.as_str()
+                ),
+            ));
+        }
+
+        let prev_status = res.status;
+        let now = Utc::now();
+        res.status = new_status;
+        res.missing_evidence = missing_evidence.clone();
+        res.updated_at = now;
+        let missing_json = serde_json::to_value(&missing_evidence).unwrap_or_default();
+
+        sqlx::query(
+            r#"
+            UPDATE esa_trusted_resolutions
+            SET status = $2, missing_evidence = $3, updated_at = $4
+            WHERE resolution_id = $1;
+            "#,
+        )
+        .bind(resolution_id)
+        .bind(new_status.as_str())
+        .bind(missing_json)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to update trusted resolution: {}", e),
+            )
+        })?;
+
+        let ev_refs_json = serde_json::to_value(&res.evidence_refs).unwrap_or_default();
+        let ev_prov_json = serde_json::to_value(&res.evidence_provenance).unwrap_or_default();
+        sqlx::query(
+            r#"
+            INSERT INTO esa_resolution_audit_log (
+                audit_id, resolution_id, evaluation_id, merchant_id,
+                from_status, to_status, actor, verification_method, reason,
+                evidence_refs, evidence_provenance, promoted_memory_id, created_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13
+            );
+            "#,
+        )
+        .bind(format!("raud_{}", Uuid::new_v4().simple()))
+        .bind(resolution_id)
+        .bind(&res.evaluation_id)
+        .bind(&res.merchant_id)
+        .bind(prev_status.as_str())
+        .bind(new_status.as_str())
+        .bind("system:deterministic_verifier")
+        .bind("deterministic_webhook_store_v1")
+        .bind(reason)
+        .bind(ev_refs_json)
+        .bind(ev_prov_json)
+        .bind(Option::<String>::None)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to persist resolution audit event: {}", e),
+            )
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            InferenceError::new(
+                InferenceErrorCategory::UpstreamError,
+                format!("Failed to commit resolution update: {}", e),
+            )
+        })?;
+
+        Ok(res)
+    }
 }
 
 fn parse_canonical_state(raw: &str) -> CanonicalPaymentState {
@@ -656,6 +1355,11 @@ fn row_to_memory_record(r: sqlx::postgres::PgRow) -> Option<MemoryRecord> {
     let lifecycle_opt: Option<String> = r.get("lifecycle_state");
     let source_refs_val: serde_json::Value = r.get("source_refs");
     let source_refs = serde_json::from_value(source_refs_val).unwrap_or_default();
+    let provenance: Option<MemoryProvenance> = r
+        .try_get::<Option<serde_json::Value>, _>("provenance")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok());
     let version: i32 = r.get("version");
 
     Some(MemoryRecord {
@@ -675,7 +1379,87 @@ fn row_to_memory_record(r: sqlx::postgres::PgRow) -> Option<MemoryRecord> {
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
         expires_at: r.get("expires_at"),
+        provenance,
     })
+}
+
+fn row_to_resolution(r: sqlx::postgres::PgRow) -> TrustedResolutionRecord {
+    let status = ResolutionStatus::parse(r.get::<String, _>("status").as_str())
+        .unwrap_or(ResolutionStatus::Pending);
+    let accuracy = OutcomeAccuracy::parse(r.get::<String, _>("accuracy").as_str())
+        .unwrap_or(OutcomeAccuracy::Pending);
+    let auth_state: Option<String> = r.get("authoritative_state");
+    let evidence_refs: Vec<String> = r
+        .try_get::<serde_json::Value, _>("evidence_refs")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let evidence_provenance: Vec<String> = r
+        .try_get::<serde_json::Value, _>("evidence_provenance")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let missing_evidence: Vec<String> = r
+        .try_get::<serde_json::Value, _>("missing_evidence")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    TrustedResolutionRecord {
+        resolution_id: r.get("resolution_id"),
+        investigation_id: r.get("investigation_id"),
+        evaluation_id: r.get("evaluation_id"),
+        merchant_id: r.get("merchant_id"),
+        payment_reference: r.get("payment_reference"),
+        provider: r.get("provider"),
+        proposed_root_cause: r.get("proposed_root_cause"),
+        status,
+        accuracy,
+        authoritative_state: auth_state.as_deref().map(parse_canonical_state),
+        verification_method: r.get("verification_method"),
+        evidence_refs,
+        evidence_provenance,
+        missing_evidence,
+        verification_summary: r.get("verification_summary"),
+        rejection_reason: r.get("rejection_reason"),
+        promoted_memory_id: r.get("promoted_memory_id"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+        verified_at: r.get("verified_at"),
+        expires_at: r.get("expires_at"),
+    }
+}
+
+fn row_to_resolution_audit(r: sqlx::postgres::PgRow) -> ResolutionAuditEvent {
+    let from_status: Option<String> = r.get("from_status");
+    let to_status = ResolutionStatus::parse(r.get::<String, _>("to_status").as_str())
+        .unwrap_or(ResolutionStatus::Pending);
+    let evidence_refs: Vec<String> = r
+        .try_get::<serde_json::Value, _>("evidence_refs")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let evidence_provenance: Vec<String> = r
+        .try_get::<serde_json::Value, _>("evidence_provenance")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    ResolutionAuditEvent {
+        audit_id: r.get("audit_id"),
+        resolution_id: r.get("resolution_id"),
+        evaluation_id: r.get("evaluation_id"),
+        merchant_id: r.get("merchant_id"),
+        from_status: from_status.as_deref().and_then(ResolutionStatus::parse),
+        to_status,
+        actor: r.get("actor"),
+        verification_method: r.get("verification_method"),
+        reason: r.get("reason"),
+        evidence_refs,
+        evidence_provenance,
+        promoted_memory_id: r.get("promoted_memory_id"),
+        created_at: r.get("created_at"),
+    }
 }
 
 fn row_to_evaluation(r: sqlx::postgres::PgRow) -> OutcomeEvaluationRecord {
@@ -771,8 +1555,45 @@ mod tests {
             created_at: now,
             updated_at: now,
             expires_at: Some(now + chrono::Duration::days(30)),
+            provenance: None,
         };
-        store.store_memory(rec_a).await.unwrap();
+        // Generic store_memory must reject Episodic records (Finding 1)
+        let create_err = store.store_memory(rec_a.clone()).await.unwrap_err();
+        assert_eq!(create_err.category, InferenceErrorCategory::Forbidden);
+
+        // Seed record directly into database for query isolation testing
+        sqlx::query(
+            r#"
+            INSERT INTO esa_memory_records (
+                memory_id, memory_type, scope, merchant_id, provider,
+                incident_category, lifecycle_state, title, summary, resolution,
+                source_refs, verification_status, version, created_at, updated_at, expires_at
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16
+            );
+            "#,
+        )
+        .bind(&rec_a.memory_id)
+        .bind(rec_a.memory_type.as_str())
+        .bind(rec_a.scope.as_str())
+        .bind(&rec_a.merchant_id)
+        .bind(&rec_a.provider)
+        .bind(&rec_a.incident_category)
+        .bind(rec_a.lifecycle_state.map(|s| s.as_str()))
+        .bind(&rec_a.title)
+        .bind(&rec_a.summary)
+        .bind(&rec_a.resolution)
+        .bind(serde_json::to_value(&rec_a.source_refs).unwrap_or_default())
+        .bind(rec_a.verification_status.as_str())
+        .bind(rec_a.version as i32)
+        .bind(rec_a.created_at)
+        .bind(rec_a.updated_at)
+        .bind(rec_a.expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // 1. Cross-merchant overwrite with same memory_id must fail with Forbidden
         let rec_b_conflict = MemoryRecord {
@@ -792,6 +1613,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             expires_at: Some(now + chrono::Duration::days(30)),
+            provenance: None,
         };
         let conflict_err = store.store_memory(rec_b_conflict).await.unwrap_err();
         assert_eq!(conflict_err.category, InferenceErrorCategory::Forbidden);
@@ -1083,5 +1905,390 @@ mod tests {
         let _ = store.delete_memory(&scope_a, &shared_mem_id).await;
         let _ = store.delete_memory(&scope_a, &promoted_id).await;
         let _ = store.delete_evaluations_for_merchant(&scope_a).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_trusted_resolution_atomic_promotion_immutability_and_isolation() {
+        use esa_state::WebhookStore;
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&db_url).await.unwrap();
+        esa_state::PostgresWebhookStore::init_schema(&pool)
+            .await
+            .unwrap();
+        let wh_store = esa_state::PostgresWebhookStore::new(pool.clone());
+        let mem_store = PostgresPaymentMemoryStore::new(pool.clone());
+        mem_store.init_schema().await.unwrap();
+
+        let suffix = &Uuid::new_v4().simple().to_string()[..10];
+        let m_a = format!("merch_p4_pg_a_{}", suffix);
+        let m_b = format!("merch_p4_pg_b_{}", suffix);
+        let scope_a = ExecutionScope::MerchantScoped {
+            merchant_id: m_a.clone(),
+        };
+        let scope_b = ExecutionScope::MerchantScoped {
+            merchant_id: m_b.clone(),
+        };
+        let tx_id = format!("tx_p4_pg_{}", suffix);
+        let pay_id = format!("pay_p4_pg_{}", suffix);
+        let evt_id = format!("evt_p4_pg_{}", suffix);
+        let now = Utc::now();
+
+        wh_store
+            .record_payment_attempt(&esa_core::provider::PaymentAttemptRecord {
+                transaction_id: tx_id,
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: None,
+                payment_reference: Some(pay_id.clone()),
+                amount_minor: 45000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({ "event": "payment.captured" });
+        let params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &evt_id,
+            event_type: esa_core::PaymentEventType::PaymentCaptured,
+            payment_id: &pay_id,
+            amount_minor: 45000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        wh_store.process_webhook_event(&params).await.unwrap();
+
+        let eval = OutcomeEvaluationRecord::new_pending(
+            format!("inv_p4_pg_{}", suffix),
+            m_a.clone(),
+            pay_id.clone(),
+            "razorpay".to_string(),
+            "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+            ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec![format!("webhook:{}", evt_id)]);
+        let eval = mem_store.record_evaluation(eval).await.unwrap();
+        let res = TrustedResolutionRecord::from_evaluation(&eval);
+        let res = mem_store
+            .record_resolution(
+                res.clone(),
+                ResolutionAuditEvent {
+                    audit_id: format!("raud_pg_{}", Uuid::new_v4().simple()),
+                    resolution_id: res.resolution_id.clone(),
+                    evaluation_id: eval.evaluation_id.clone(),
+                    merchant_id: m_a.clone(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system:payment_intelligence".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "Initial pending resolution".to_string(),
+                    evidence_refs: eval.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 1. Fail closed before duplicate delivery
+        let (pending_res, _, pending_mem) = crate::memory::verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending_res.status, ResolutionStatus::Pending);
+        assert!(pending_mem.is_none());
+
+        // 2. Deliver duplicate webhook -> durable audit proves duplicate suppression
+        wh_store.process_webhook_event(&params).await.unwrap();
+
+        let (verified_res, audits, promoted_mem) =
+            crate::memory::verify_resolution_from_webhook_store(
+                &wh_store,
+                &mem_store,
+                &scope_a,
+                &res.resolution_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(verified_res.status, ResolutionStatus::Verified);
+        assert_eq!(verified_res.accuracy, OutcomeAccuracy::Correct);
+        assert!(audits.len() >= 3);
+        let mem = promoted_mem.expect("Verified Correct outcome must promote atomically");
+        let prov = mem
+            .provenance
+            .clone()
+            .expect("Provenance must be persisted");
+        assert_eq!(prov.resolution_id, res.resolution_id);
+        assert_eq!(prov.evaluation_id, eval.evaluation_id);
+
+        // 3. Idempotent re-verification returns same result without duplicating memory
+        let (idem_res, _, idem_mem) = crate::memory::verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(idem_res.promoted_memory_id, verified_res.promoted_memory_id);
+        assert_eq!(idem_mem.unwrap().memory_id, mem.memory_id);
+
+        // 4. Promoted verified episodic memory is immutable in PostgreSQL
+        let mut tampered = mem.clone();
+        tampered.summary = "Tampered summary".to_string();
+        let immut_err = mem_store.store_memory(tampered).await.unwrap_err();
+        assert_eq!(immut_err.category, InferenceErrorCategory::Forbidden);
+
+        // 5. Cross-merchant resolution access is Forbidden
+        let cross_err = mem_store
+            .get_resolution(&scope_b, &res.resolution_id)
+            .await
+            .unwrap_err();
+        assert_eq!(cross_err.category, InferenceErrorCategory::Forbidden);
+
+        // 6. Promoted verified episodic memory cannot be deleted in PostgreSQL
+        let del_err = mem_store
+            .delete_memory(&scope_a, &mem.memory_id)
+            .await
+            .unwrap_err();
+        assert_eq!(del_err.category, InferenceErrorCategory::Forbidden);
+
+        let _ = mem_store.delete_evaluations_for_merchant(&scope_a).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_verification_atomic_concurrency_and_snapshot_consistency() {
+        use esa_core::provider::PaymentAttemptRecord;
+        use esa_state::{PostgresWebhookStore, WebhookStore};
+
+        let db_url = match std::env::var("DATABASE_URL") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => return,
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&db_url)
+            .await
+            .expect("DATABASE_URL was set but connecting to PostgreSQL failed");
+
+        PostgresWebhookStore::init_schema(&pool).await.unwrap();
+        let wh_store = PostgresWebhookStore::new(pool.clone());
+        let mem_store = PostgresPaymentMemoryStore::new(pool.clone());
+        mem_store.init_schema().await.unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let m_a = format!("pg_conc_{}", &suffix[..8]);
+        let scope_a = ExecutionScope::MerchantScoped {
+            merchant_id: m_a.clone(),
+        };
+        let p_ref = format!("pay_conc_{}", &suffix[..8]);
+        let now = Utc::now();
+
+        // 1. Setup payment attempt and duplicate webhooks
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: format!("tx_conc_{}", &suffix[..8]),
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_conc".to_string()),
+                payment_reference: Some(p_ref.clone()),
+                amount_minor: 15000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({
+            "event": "payment.captured",
+            "created_at": now.timestamp()
+        });
+        let params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: &format!("evt_conc_{}", &suffix[..8]),
+            event_type: esa_core::PaymentEventType::PaymentCaptured,
+            payment_id: &p_ref,
+            amount_minor: 15000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        wh_store.process_webhook_event(&params).await.unwrap();
+        wh_store.process_webhook_event(&params).await.unwrap(); // duplicate suppressed
+
+        let audits = wh_store
+            .list_webhook_delivery_audits_for_payment(&m_a, &p_ref, 50)
+            .await
+            .unwrap();
+        let dup_audit = audits.iter().find(|a| a.is_duplicate).unwrap();
+
+        // Record evaluation and resolution with durable duplicate delivery audit reference
+        let eval = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    format!("inv_conc_{}", &suffix[..8]),
+                    m_a.clone(),
+                    p_ref.clone(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec![format!("delivery:{}", dup_audit.delivery_id)]),
+            )
+            .await
+            .unwrap();
+
+        let res = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval),
+                ResolutionAuditEvent {
+                    audit_id: format!("raud_conc_init_{}", &suffix[..8]),
+                    resolution_id: format!("res_conc_{}", &suffix[..8]),
+                    evaluation_id: eval.evaluation_id.clone(),
+                    merchant_id: m_a.clone(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 2. Concurrency test: Spawn 5 concurrent tasks verifying the exact same resolution simultaneously
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let wh_ref = PostgresWebhookStore::new(pool.clone());
+            let mem_ref = PostgresPaymentMemoryStore::new(pool.clone());
+            let sc = scope_a.clone();
+            let rid = res.resolution_id.clone();
+            handles.push(tokio::spawn(async move {
+                crate::memory::verify_resolution_from_webhook_store(&wh_ref, &mem_ref, &sc, &rid)
+                    .await
+            }));
+        }
+
+        let mut promoted_memory_ids = Vec::new();
+        for handle in handles {
+            let result = handle.await.unwrap();
+            let (verified_res, _, mem_opt) =
+                result.expect("All concurrent verification attempts must complete safely");
+            assert_eq!(verified_res.status, ResolutionStatus::Verified);
+            assert_eq!(verified_res.accuracy, OutcomeAccuracy::Correct);
+            if let Some(m) = mem_opt {
+                promoted_memory_ids.push(m.memory_id);
+            }
+        }
+
+        // Exactly one memory must be promoted, and all returned the same memory_id
+        assert!(!promoted_memory_ids.is_empty());
+        let first_id = &promoted_memory_ids[0];
+        assert!(promoted_memory_ids.iter().all(|id| id == first_id));
+
+        // In database, exactly one memory record exists for this resolution
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM esa_memory_records WHERE scope = 'merchant' AND merchant_id = $1;",
+        )
+        .bind(&m_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            count.0, 1,
+            "Exactly one promoted memory must exist in database"
+        );
+
+        // 3. Stale snapshot / state divergence test:
+        // Update payment_records to 'refunded'
+        sqlx::query("UPDATE payment_records SET state = 'refunded' WHERE payment_id = $1;")
+            .bind(&p_ref)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create a new evaluation claiming 'Captured'
+        let eval_stale = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    format!("inv_stale_{}", &suffix[..8]),
+                    m_a.clone(),
+                    p_ref.clone(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec![format!("delivery:{}", dup_audit.delivery_id)]),
+            )
+            .await
+            .unwrap();
+
+        // Construct a proof that claims authoritative state is Captured
+        // But the database payment_records has diverged to 'refunded'
+        let stale_proof = crate::memory::types::AuthoritativeOutcomeProof::from_authoritative_records_with_deliveries(
+            &scope_a,
+            &eval_stale,
+            &PaymentAttemptRecord {
+                transaction_id: format!("tx_conc_{}", &suffix[..8]),
+                merchant_id: m_a.clone(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_conc".to_string()),
+                payment_reference: Some(p_ref.clone()),
+                amount_minor: 15000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            std::slice::from_ref(dup_audit),
+            &[],
+        )
+        .unwrap();
+
+        // Verification must fail closed because DB payment state has diverged!
+        let diverge_err = mem_store
+            .verify_and_promote_outcome(&scope_a, stale_proof)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            diverge_err.category,
+            InferenceErrorCategory::InvalidResponse
+        );
+        assert!(diverge_err.message.contains("diverged"));
+
+        let _ = mem_store.delete_evaluations_for_merchant(&scope_a).await;
     }
 }

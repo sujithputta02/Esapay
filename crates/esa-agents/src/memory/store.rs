@@ -1,6 +1,7 @@
 use crate::memory::types::{
-    AuthoritativeOutcomeProof, MemoryQuery, MemoryRecord, MemoryScope, MemoryType, OutcomeAccuracy,
-    OutcomeEvaluationRecord, VerificationStatus,
+    AuthoritativeOutcomeProof, MemoryProvenance, MemoryQuery, MemoryRecord, MemoryScope,
+    MemoryType, OutcomeAccuracy, OutcomeEvaluationRecord, ResolutionAuditEvent, ResolutionStatus,
+    TrustedResolutionRecord, VerificationStatus,
 };
 use crate::provider::{ExecutionScope, InferenceError, InferenceErrorCategory};
 use async_trait::async_trait;
@@ -52,9 +53,38 @@ pub trait PaymentMemoryStore: Send + Sync {
         &self,
         scope: &ExecutionScope,
     ) -> Result<usize, InferenceError>;
+
+    async fn record_resolution(
+        &self,
+        resolution: TrustedResolutionRecord,
+        initial_audit: ResolutionAuditEvent,
+    ) -> Result<TrustedResolutionRecord, InferenceError>;
+
+    async fn get_resolution(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+    ) -> Result<Option<(TrustedResolutionRecord, Vec<ResolutionAuditEvent>)>, InferenceError>;
+
+    async fn list_resolutions(
+        &self,
+        scope: &ExecutionScope,
+        status: Option<ResolutionStatus>,
+        payment_reference: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TrustedResolutionRecord>, InferenceError>;
+
+    async fn record_resolution_pending_or_expired(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+        new_status: ResolutionStatus,
+        reason: &str,
+        missing_evidence: Vec<String>,
+    ) -> Result<TrustedResolutionRecord, InferenceError>;
 }
 
-/// Trusted crate-internal verification boundary: fetches authoritative payment, webhook, and refund
+/// Trusted crate-internal verification boundary: fetches authoritative payment, webhook, delivery, and refund
 /// records from `WebhookStore`, verifies merchant ownership and diagnosis, and promotes only if `Correct`.
 #[allow(dead_code)]
 pub(crate) async fn verify_outcome_from_webhook_store(
@@ -121,6 +151,23 @@ pub(crate) async fn verify_outcome_from_webhook_store(
         Vec::new()
     };
 
+    let delivery_audits = if let Some(ref pref) = attempt.payment_reference {
+        webhook_store
+            .list_webhook_delivery_audits_for_payment(&eval.merchant_id, pref, 100)
+            .await
+            .map_err(|e| {
+                InferenceError::new(
+                    InferenceErrorCategory::UpstreamError,
+                    format!(
+                        "Failed to load authoritative webhook delivery audits: {}",
+                        e
+                    ),
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
     let refunds = if let Some(ref pref) = attempt.payment_reference {
         webhook_store
             .list_refunds_for_payment(&attempt.provider, pref)
@@ -135,22 +182,127 @@ pub(crate) async fn verify_outcome_from_webhook_store(
         Vec::new()
     };
 
-    let proof = AuthoritativeOutcomeProof::from_authoritative_records(
+    let proof = AuthoritativeOutcomeProof::from_authoritative_records_with_deliveries(
         scope,
         &eval,
         &attempt,
         payment_entity.as_ref(),
         &inbox_events,
+        &delivery_audits,
         &refunds,
     )?;
 
     memory_store.verify_and_promote_outcome(scope, proof).await
 }
 
+/// Authorized server-side workflow to deterministically verify a `TrustedResolutionRecord`
+/// against ESAPay's authoritative `WebhookStore`. Never accepts caller-supplied outcomes or proofs.
+pub async fn verify_resolution_from_webhook_store(
+    webhook_store: &dyn WebhookStore,
+    memory_store: &dyn PaymentMemoryStore,
+    scope: &ExecutionScope,
+    resolution_id: &str,
+) -> Result<
+    (
+        TrustedResolutionRecord,
+        Vec<ResolutionAuditEvent>,
+        Option<MemoryRecord>,
+    ),
+    InferenceError,
+> {
+    let (resolution, audits) = memory_store
+        .get_resolution(scope, resolution_id)
+        .await?
+        .ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Trusted resolution record not found",
+            )
+        })?;
+
+    if resolution.status.is_terminal() {
+        let mem = if let Some(ref mid) = resolution.promoted_memory_id {
+            let mems = memory_store
+                .query_memories(&MemoryQuery {
+                    scope: scope.clone(),
+                    memory_types: vec![MemoryType::Episodic],
+                    provider: None,
+                    incident_category: None,
+                    lifecycle_state: None,
+                    since: None,
+                    limit: 50,
+                })
+                .await?;
+            mems.into_iter().find(|m| &m.memory_id == mid)
+        } else {
+            None
+        };
+        return Ok((resolution, audits, mem));
+    }
+
+    if resolution.is_expired(Utc::now()) {
+        let updated = memory_store
+            .record_resolution_pending_or_expired(
+                scope,
+                resolution_id,
+                ResolutionStatus::Expired,
+                "Resolution exceeded its permitted verification period",
+                vec!["verification_period_expired".to_string()],
+            )
+            .await?;
+        let (final_res, final_audits) = memory_store
+            .get_resolution(scope, resolution_id)
+            .await?
+            .unwrap_or((updated, audits));
+        return Ok((final_res, final_audits, None));
+    }
+
+    match verify_outcome_from_webhook_store(
+        webhook_store,
+        memory_store,
+        scope,
+        &resolution.evaluation_id,
+    )
+    .await
+    {
+        Ok((_, promoted_mem)) => {
+            let (final_res, final_audits) = memory_store
+                .get_resolution(scope, resolution_id)
+                .await?
+                .ok_or_else(|| {
+                    InferenceError::new(
+                        InferenceErrorCategory::NotFound,
+                        "Trusted resolution disappeared after verification",
+                    )
+                })?;
+            Ok((final_res, final_audits, promoted_mem))
+        }
+        Err(err) if err.category == InferenceErrorCategory::InvalidResponse => {
+            let updated = memory_store
+                .record_resolution_pending_or_expired(
+                    scope,
+                    resolution_id,
+                    ResolutionStatus::Pending,
+                    &err.message,
+                    vec![err.message.clone()],
+                )
+                .await?;
+            let (final_res, final_audits) = memory_store
+                .get_resolution(scope, resolution_id)
+                .await?
+                .unwrap_or((updated, audits));
+            Ok((final_res, final_audits, None))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Thread-safe in-memory `PaymentMemoryStore` enforcing identical tenant isolation and retention rules.
 pub struct InMemoryPaymentMemoryStore {
     memories: Mutex<HashMap<String, MemoryRecord>>,
     evaluations: Mutex<HashMap<String, OutcomeEvaluationRecord>>,
+    resolutions: Mutex<HashMap<String, TrustedResolutionRecord>>,
+    resolution_audits: Mutex<HashMap<String, Vec<ResolutionAuditEvent>>>,
 }
 
 impl Default for InMemoryPaymentMemoryStore {
@@ -164,7 +316,17 @@ impl InMemoryPaymentMemoryStore {
         Self {
             memories: Mutex::new(HashMap::new()),
             evaluations: Mutex::new(HashMap::new()),
+            resolutions: Mutex::new(HashMap::new()),
+            resolution_audits: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_memory(&self, record: MemoryRecord) {
+        self.memories
+            .lock()
+            .unwrap()
+            .insert(record.memory_id.clone(), record);
     }
 }
 
@@ -172,12 +334,26 @@ impl InMemoryPaymentMemoryStore {
 impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
     async fn store_memory(&self, record: MemoryRecord) -> Result<MemoryRecord, InferenceError> {
         let validated = record.sanitize_and_validate()?;
+        if validated.memory_type == MemoryType::Episodic {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Episodic memories cannot be created or modified directly through generic store_memory(); must be promoted through deterministic verification",
+            ));
+        }
         let mut guard = self.memories.lock().unwrap();
         if let Some(existing) = guard.get(&validated.memory_id) {
             if existing.scope != validated.scope || existing.merchant_id != validated.merchant_id {
                 return Err(InferenceError::new(
                     InferenceErrorCategory::Forbidden,
                     "Cannot overwrite memory record owned by another scope or merchant",
+                ));
+            }
+            if existing.memory_type == MemoryType::Episodic
+                && existing.verification_status == VerificationStatus::Verified
+            {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Promoted verified episodic memories are immutable",
                 ));
             }
         }
@@ -249,6 +425,14 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
         let caller_mid = scope.normalized_merchant_id()?;
         let mut guard = self.memories.lock().unwrap();
         if let Some(existing) = guard.get(memory_id) {
+            if existing.memory_type == MemoryType::Episodic
+                && existing.verification_status == VerificationStatus::Verified
+            {
+                return Err(InferenceError::new(
+                    InferenceErrorCategory::Forbidden,
+                    "Verified episodic memories are immutable and cannot be deleted",
+                ));
+            }
             match (existing.scope, caller_mid) {
                 (MemoryScope::Merchant, Some(mid))
                     if existing.merchant_id.as_deref() == Some(mid) =>
@@ -400,6 +584,14 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
 
         // Only OutcomeAccuracy::Correct may create a verified episodic memory;
         // PartiallyCorrect and Incorrect remain evaluations without episodic promotion.
+        let mut res_guard = self.resolutions.lock().unwrap();
+        let existing_res_id = res_guard
+            .values()
+            .find(|r| r.evaluation_id == eval.evaluation_id)
+            .map(|r| r.resolution_id.clone());
+        let resolution_id =
+            existing_res_id.unwrap_or_else(|| format!("res_{}", Uuid::new_v4().simple()));
+
         let will_promote = accuracy == OutcomeAccuracy::Correct;
         let promoted = if will_promote {
             let mem_id = format!("mem_ep_{}", Uuid::new_v4().simple());
@@ -427,12 +619,25 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
                 source_refs: vec![
                     format!("payment:{}", eval.payment_reference),
                     format!("evaluation:{}", eval.evaluation_id),
+                    format!("resolution:{}", resolution_id),
                 ],
                 verification_status: VerificationStatus::Verified,
                 version: 1,
                 created_at: now,
                 updated_at: now,
                 expires_at: Some(now + chrono::Duration::days(180)),
+                provenance: Some(MemoryProvenance {
+                    evaluation_id: eval.evaluation_id.clone(),
+                    resolution_id: resolution_id.clone(),
+                    merchant_id: eval.merchant_id.clone(),
+                    payment_reference: eval.payment_reference.clone(),
+                    provider: eval.provider.clone(),
+                    verified_at: now,
+                    verification_method: proof.verification_method().to_string(),
+                    supporting_evidence_refs: proof.evidence_refs().to_vec(),
+                    evidence_provenance: proof.evidence_provenance().to_vec(),
+                    promotion_decision: "promoted_verified_correct".to_string(),
+                }),
             }
             .sanitize_and_validate()?;
             Some(record)
@@ -450,6 +655,77 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
         eval.accuracy = accuracy;
         eval.verified_at = Some(now);
         let updated_eval = eval.clone();
+
+        let target_status = if accuracy == OutcomeAccuracy::Incorrect {
+            ResolutionStatus::Rejected
+        } else {
+            ResolutionStatus::Verified
+        };
+        let res_entry =
+            res_guard
+                .entry(resolution_id.clone())
+                .or_insert_with(|| TrustedResolutionRecord {
+                    resolution_id: resolution_id.clone(),
+                    investigation_id: updated_eval.investigation_id.clone(),
+                    evaluation_id: updated_eval.evaluation_id.clone(),
+                    merchant_id: updated_eval.merchant_id.clone(),
+                    payment_reference: updated_eval.payment_reference.clone(),
+                    provider: updated_eval.provider.clone(),
+                    proposed_root_cause: updated_eval.recommended_root_cause.clone(),
+                    status: ResolutionStatus::Pending,
+                    accuracy: OutcomeAccuracy::Pending,
+                    authoritative_state: Some(updated_eval.observed_authoritative_state),
+                    verification_method: None,
+                    evidence_refs: updated_eval.supporting_evidence_refs.clone(),
+                    evidence_provenance: Vec::new(),
+                    missing_evidence: Vec::new(),
+                    verification_summary: None,
+                    rejection_reason: None,
+                    promoted_memory_id: None,
+                    created_at: updated_eval.created_at,
+                    updated_at: now,
+                    verified_at: None,
+                    expires_at: updated_eval.expires_at,
+                });
+        let prev_status = res_entry.status;
+        res_entry.status = target_status;
+        res_entry.accuracy = accuracy;
+        res_entry.authoritative_state = Some(verified_outcome_state);
+        res_entry.verification_method = Some(proof.verification_method().to_string());
+        res_entry.evidence_refs = proof.evidence_refs().to_vec();
+        res_entry.evidence_provenance = proof.evidence_provenance().to_vec();
+        res_entry.missing_evidence.clear();
+        res_entry.verification_summary = Some(proof.verified_resolution().to_string());
+        res_entry.rejection_reason = if target_status == ResolutionStatus::Rejected {
+            Some(proof.verified_resolution().to_string())
+        } else {
+            None
+        };
+        res_entry.promoted_memory_id = updated_eval.promoted_memory_id.clone();
+        res_entry.updated_at = now;
+        res_entry.verified_at = Some(now);
+        drop(res_guard);
+
+        let mut audit_guard = self.resolution_audits.lock().unwrap();
+        audit_guard
+            .entry(resolution_id.clone())
+            .or_default()
+            .push(ResolutionAuditEvent {
+                audit_id: format!("raud_{}", Uuid::new_v4().simple()),
+                resolution_id,
+                evaluation_id: updated_eval.evaluation_id.clone(),
+                merchant_id: updated_eval.merchant_id.clone(),
+                from_status: Some(prev_status),
+                to_status: target_status,
+                actor: "system:deterministic_verifier".to_string(),
+                verification_method: proof.verification_method().to_string(),
+                reason: proof.verified_resolution().to_string(),
+                evidence_refs: proof.evidence_refs().to_vec(),
+                evidence_provenance: proof.evidence_provenance().to_vec(),
+                promoted_memory_id: updated_eval.promoted_memory_id.clone(),
+                created_at: now,
+            });
+        drop(audit_guard);
         drop(eval_guard);
 
         Ok((updated_eval, promoted))
@@ -469,6 +745,154 @@ impl PaymentMemoryStore for InMemoryPaymentMemoryStore {
         let before = guard.len();
         guard.retain(|_, ev| ev.merchant_id != caller_mid);
         Ok(before.saturating_sub(guard.len()))
+    }
+
+    async fn record_resolution(
+        &self,
+        resolution: TrustedResolutionRecord,
+        initial_audit: ResolutionAuditEvent,
+    ) -> Result<TrustedResolutionRecord, InferenceError> {
+        let mut res_guard = self.resolutions.lock().unwrap();
+        res_guard.insert(resolution.resolution_id.clone(), resolution.clone());
+        drop(res_guard);
+        let mut audit_guard = self.resolution_audits.lock().unwrap();
+        audit_guard
+            .entry(resolution.resolution_id.clone())
+            .or_default()
+            .push(initial_audit);
+        Ok(resolution)
+    }
+
+    async fn get_resolution(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+    ) -> Result<Option<(TrustedResolutionRecord, Vec<ResolutionAuditEvent>)>, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot read merchant-scoped resolutions",
+            )
+        })?;
+        let res_guard = self.resolutions.lock().unwrap();
+        let Some(res) = res_guard.get(resolution_id) else {
+            return Ok(None);
+        };
+        if res.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Trusted resolution does not belong to authenticated merchant",
+            ));
+        }
+        let cloned_res = res.clone();
+        drop(res_guard);
+        let audit_guard = self.resolution_audits.lock().unwrap();
+        let audits = audit_guard.get(resolution_id).cloned().unwrap_or_default();
+        Ok(Some((cloned_res, audits)))
+    }
+
+    async fn list_resolutions(
+        &self,
+        scope: &ExecutionScope,
+        status: Option<ResolutionStatus>,
+        payment_reference: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TrustedResolutionRecord>, InferenceError> {
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot list merchant-scoped resolutions",
+            )
+        })?;
+        let lim = limit.clamp(1, 100);
+        let clean_pref = payment_reference.map(str::trim).filter(|s| !s.is_empty());
+        let res_guard = self.resolutions.lock().unwrap();
+        let mut items: Vec<TrustedResolutionRecord> = res_guard
+            .values()
+            .filter(|r| r.merchant_id == caller_mid)
+            .filter(|r| status.is_none_or(|st| r.status == st))
+            .filter(|r| clean_pref.is_none_or(|p| r.payment_reference == p))
+            .cloned()
+            .collect();
+        items.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+        items.truncate(lim);
+        Ok(items)
+    }
+
+    async fn record_resolution_pending_or_expired(
+        &self,
+        scope: &ExecutionScope,
+        resolution_id: &str,
+        new_status: ResolutionStatus,
+        reason: &str,
+        missing_evidence: Vec<String>,
+    ) -> Result<TrustedResolutionRecord, InferenceError> {
+        if !matches!(
+            new_status,
+            ResolutionStatus::Pending | ResolutionStatus::UnderReview | ResolutionStatus::Expired
+        ) {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Non-proof transition cannot mark a resolution as Verified or Rejected",
+            ));
+        }
+        let caller_mid = scope.normalized_merchant_id()?.ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "System scope cannot update merchant-scoped resolutions",
+            )
+        })?;
+        let mut res_guard = self.resolutions.lock().unwrap();
+        let res = res_guard.get_mut(resolution_id).ok_or_else(|| {
+            InferenceError::new(
+                InferenceErrorCategory::NotFound,
+                "Trusted resolution record not found",
+            )
+        })?;
+        if res.merchant_id != caller_mid {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::Forbidden,
+                "Trusted resolution does not belong to authenticated merchant",
+            ));
+        }
+        if res.status.is_terminal() {
+            return Err(InferenceError::new(
+                InferenceErrorCategory::InvalidResponse,
+                format!(
+                    "Cannot transition terminal resolution '{}' from '{}'",
+                    resolution_id,
+                    res.status.as_str()
+                ),
+            ));
+        }
+        let prev_status = res.status;
+        let now = Utc::now();
+        res.status = new_status;
+        res.missing_evidence = missing_evidence;
+        res.updated_at = now;
+        let updated = res.clone();
+        drop(res_guard);
+
+        let mut audit_guard = self.resolution_audits.lock().unwrap();
+        audit_guard
+            .entry(resolution_id.to_string())
+            .or_default()
+            .push(ResolutionAuditEvent {
+                audit_id: format!("raud_{}", Uuid::new_v4().simple()),
+                resolution_id: resolution_id.to_string(),
+                evaluation_id: updated.evaluation_id.clone(),
+                merchant_id: updated.merchant_id.clone(),
+                from_status: Some(prev_status),
+                to_status: new_status,
+                actor: "system:deterministic_verifier".to_string(),
+                verification_method: "deterministic_webhook_store_v1".to_string(),
+                reason: reason.to_string(),
+                evidence_refs: updated.evidence_refs.clone(),
+                evidence_provenance: updated.evidence_provenance.clone(),
+                promoted_memory_id: None,
+                created_at: now,
+            });
+        Ok(updated)
     }
 }
 
@@ -531,6 +955,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             expires_at: Some(now + chrono::Duration::days(30)),
+            provenance: None,
         }
     }
 
@@ -554,9 +979,12 @@ mod tests {
     #[tokio::test]
     async fn test_episodic_persistence_and_unverified_rejected() {
         let store = InMemoryPaymentMemoryStore::new();
+        // 1. Generic store_memory strictly rejects Episodic memory creation even if marked Verified
         let valid = make_episodic("mem_ep_1", "merchant_a", VerificationStatus::Verified);
-        store.store_memory(valid).await.unwrap();
+        let err_valid = store.store_memory(valid).await.unwrap_err();
+        assert_eq!(err_valid.category, InferenceErrorCategory::Forbidden);
 
+        // 2. Unverified episodic memory is rejected by sanitize_and_validate
         let unverified = make_episodic("mem_ep_2", "merchant_a", VerificationStatus::Unverified);
         let err = store.store_memory(unverified).await.unwrap_err();
         assert_eq!(err.category, InferenceErrorCategory::InvalidResponse);
@@ -599,22 +1027,16 @@ mod tests {
     #[tokio::test]
     async fn test_merchant_a_vs_merchant_b_isolation() {
         let store = InMemoryPaymentMemoryStore::new();
-        store
-            .store_memory(make_episodic(
-                "mem_a",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_b",
-                "merchant_b",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_a",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
+        store.insert_test_memory(make_episodic(
+            "mem_b",
+            "merchant_b",
+            VerificationStatus::Verified,
+        ));
 
         let q_a = store
             .query_memories(&MemoryQuery {
@@ -673,7 +1095,7 @@ mod tests {
         let store = InMemoryPaymentMemoryStore::new();
         let mut expired = make_episodic("mem_exp", "merchant_a", VerificationStatus::Verified);
         expired.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
-        store.store_memory(expired).await.unwrap();
+        store.insert_test_memory(expired);
 
         let q = store
             .query_memories(&MemoryQuery {
@@ -696,14 +1118,11 @@ mod tests {
     #[tokio::test]
     async fn test_deletion_and_retention() {
         let store = InMemoryPaymentMemoryStore::new();
-        store
-            .store_memory(make_episodic(
-                "mem_del_1",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_del_1",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
 
         // Merchant B cannot delete Merchant A's memory
         let err_b = store
@@ -712,34 +1131,65 @@ mod tests {
             .unwrap_err();
         assert_eq!(err_b.category, InferenceErrorCategory::Forbidden);
 
-        // Merchant A can delete its own memory
-        let deleted_a = store
+        // Promoted verified episodic memory is immutable and cannot be deleted by Merchant A either
+        let err_a = store
             .delete_memory(&scope_for("merchant_a"), "mem_del_1")
             .await
+            .unwrap_err();
+        assert_eq!(err_a.category, InferenceErrorCategory::Forbidden);
+
+        // System semantic memory can be deleted by system scope, but not by a merchant
+        let sys_mem = MemoryRecord {
+            memory_id: "mem_sys_1".to_string(),
+            memory_type: MemoryType::Semantic,
+            scope: MemoryScope::System,
+            merchant_id: None,
+            provider: None,
+            incident_category: "PAYMENT_FAILURE".to_string(),
+            lifecycle_state: None,
+            title: "System failure guidance".to_string(),
+            summary: "Guidance on handling failures".to_string(),
+            resolution: None,
+            source_refs: vec![],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: None,
+            provenance: None,
+        };
+        store.store_memory(sys_mem).await.unwrap();
+
+        let err_sys_by_merchant = store
+            .delete_memory(&scope_for("merchant_a"), "mem_sys_1")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err_sys_by_merchant.category,
+            InferenceErrorCategory::Forbidden
+        );
+
+        let deleted_sys = store
+            .delete_memory(&ExecutionScope::System, "mem_sys_1")
+            .await
             .unwrap();
-        assert!(deleted_a);
+        assert!(deleted_sys);
     }
 
     #[tokio::test]
     async fn test_retriever_uses_merchant_episodic_and_system_knowledge() {
         let store = Arc::new(InMemoryPaymentMemoryStore::new());
         seed_system_knowledge(store.as_ref()).await.unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_ret_a",
-                "merchant_a",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
-        store
-            .store_memory(make_episodic(
-                "mem_ret_b",
-                "merchant_b",
-                VerificationStatus::Verified,
-            ))
-            .await
-            .unwrap();
+        store.insert_test_memory(make_episodic(
+            "mem_ret_a",
+            "merchant_a",
+            VerificationStatus::Verified,
+        ));
+        store.insert_test_memory(make_episodic(
+            "mem_ret_b",
+            "merchant_b",
+            VerificationStatus::Verified,
+        ));
 
         let retriever = MemoryRetriever::new(store);
         let ctx_a = sample_context("merchant_a");
@@ -756,7 +1206,7 @@ mod tests {
     async fn test_same_id_collision_and_cross_merchant_overwrite_rejected() {
         let store = InMemoryPaymentMemoryStore::new();
         let rec_a = make_episodic("shared_mem_id", "merchant_a", VerificationStatus::Verified);
-        store.store_memory(rec_a).await.unwrap();
+        store.insert_test_memory(rec_a);
 
         // Merchant B trying to overwrite Merchant A's memory_id is rejected
         let rec_b = make_episodic("shared_mem_id", "merchant_b", VerificationStatus::Verified);
@@ -1868,10 +2318,10 @@ mod tests {
             id: 12,
             provider: "razorpay".to_string(),
             provider_event_id: "evt_prov_to".to_string(),
-            event_type: "gateway_timeout".to_string(),
+            event_type: "payment.failed".to_string(),
             payment_id: Some("pay_ent_ts".to_string()),
             refund_id: None,
-            payload: serde_json::json!({"reason": "gateway_timeout"}),
+            payload: serde_json::json!({"error": {"code": "GATEWAY_TIMEOUT"}}),
             status: WebhookStatus::Processed,
             error_message: None,
             received_at: now,
@@ -1899,5 +2349,1214 @@ mod tests {
         )
         .unwrap();
         assert_eq!(proof_to.accuracy(), OutcomeAccuracy::Correct);
+    }
+
+    #[tokio::test]
+    async fn test_phase4_trusted_resolution_lifecycle_duplicate_audit_and_immutability() {
+        let wh_store = esa_state::InMemoryWebhookStore::new();
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+
+        // 1. Seed payment attempt for merchant_a
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_p4_dup".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_p4_dup".to_string()),
+                payment_reference: Some("pay_p4_dup".to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: "created".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let payload = serde_json::json!({ "event": "payment.captured" });
+        let wh_params = esa_state::WebhookEventParams {
+            provider: "razorpay",
+            provider_event_id: "evt_p4_dup_1",
+            event_type: esa_core::PaymentEventType::PaymentCaptured,
+            payment_id: "pay_p4_dup",
+            amount_minor: 50000,
+            currency: "INR",
+            refund_id: None,
+            refund_amount_minor: None,
+            refund_status: None,
+            payload: &payload,
+        };
+        // First delivery only (no duplicate yet!)
+        wh_store.process_webhook_event(&wh_params).await.unwrap();
+
+        let eval = OutcomeEvaluationRecord::new_pending(
+            "inv_p4_dup".to_string(),
+            "merchant_a".to_string(),
+            "pay_p4_dup".to_string(),
+            "razorpay".to_string(),
+            "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Captured,
+        )
+        .with_evidence_refs(vec!["webhook:evt_p4_dup_1".to_string()]);
+        let eval = mem_store.record_evaluation(eval).await.unwrap();
+        let res = TrustedResolutionRecord::from_evaluation(&eval);
+        let init_audit = ResolutionAuditEvent {
+            audit_id: "raud_init_1".to_string(),
+            resolution_id: res.resolution_id.clone(),
+            evaluation_id: eval.evaluation_id.clone(),
+            merchant_id: "merchant_a".to_string(),
+            from_status: None,
+            to_status: ResolutionStatus::Pending,
+            actor: "system:payment_intelligence".to_string(),
+            verification_method: "pending_investigation".to_string(),
+            reason: "Initial pending resolution".to_string(),
+            evidence_refs: eval.supporting_evidence_refs.clone(),
+            evidence_provenance: Vec::new(),
+            promoted_memory_id: None,
+            created_at: now,
+        };
+        let res = mem_store.record_resolution(res, init_audit).await.unwrap();
+
+        // 2. Without duplicate delivery audit evidence, verification MUST fail closed and stay Pending
+        let (pending_res, pending_audits, pending_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &res.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending_res.status, ResolutionStatus::Pending);
+        assert!(pending_mem.is_none());
+        assert!(!pending_res.missing_evidence.is_empty());
+        assert_eq!(pending_audits.len(), 2);
+
+        // 3. Deliver duplicate webhook -> durable webhook_delivery_audit records duplicate suppression
+        wh_store.process_webhook_event(&wh_params).await.unwrap();
+
+        let (verified_res, verified_audits, promoted_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &res.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified_res.status, ResolutionStatus::Verified);
+        assert_eq!(verified_res.accuracy, OutcomeAccuracy::Correct);
+        assert!(verified_res.promoted_memory_id.is_some());
+        assert!(verified_audits.len() >= 3);
+
+        let mem = promoted_mem.expect("Correct verified outcome must promote to episodic memory");
+        let prov = mem
+            .provenance
+            .clone()
+            .expect("Promoted memory must retain provenance");
+        assert_eq!(prov.evaluation_id, eval.evaluation_id);
+        assert_eq!(prov.resolution_id, res.resolution_id);
+        assert_eq!(prov.merchant_id, "merchant_a");
+        assert_eq!(prov.payment_reference, "pay_p4_dup");
+        assert_eq!(prov.provider, "razorpay");
+        assert_eq!(prov.promotion_decision, "promoted_verified_correct");
+        assert!(prov
+            .evidence_provenance
+            .contains(&"webhook_delivery_audit".to_string()));
+
+        // 4. Promoted verified episodic memory is immutable via store_memory
+        let mut tampered = mem.clone();
+        tampered.summary = "Tampered summary".to_string();
+        let immut_err = mem_store.store_memory(tampered).await.unwrap_err();
+        assert_eq!(immut_err.category, InferenceErrorCategory::Forbidden);
+
+        // 5. Cross-merchant resolution access is Forbidden
+        let cross_err = mem_store
+            .get_resolution(&scope_for("merchant_b"), &res.resolution_id)
+            .await
+            .unwrap_err();
+        assert_eq!(cross_err.category, InferenceErrorCategory::Forbidden);
+
+        // 6. Non-proof transition cannot mark a resolution as Verified or Rejected
+        let direct_err = mem_store
+            .record_resolution_pending_or_expired(
+                &scope_for("merchant_a"),
+                &res.resolution_id,
+                ResolutionStatus::Verified,
+                "bypass attempt",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(direct_err.category, InferenceErrorCategory::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn test_phase4_rejected_expired_and_timeout_without_citation() {
+        let wh_store = esa_state::InMemoryWebhookStore::new();
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_p4_rej".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: None,
+                payment_reference: Some("pay_p4_rej".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "timeout".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_p4_fail",
+                event_type: esa_core::PaymentEventType::PaymentFailed,
+                payment_id: "pay_p4_rej",
+                amount_minor: 10000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &serde_json::json!({ "event": "payment.failed" }),
+            })
+            .await
+            .unwrap();
+
+        // 1. Incorrect diagnosis -> Rejected, never promoted
+        let eval_inc = mem_store
+            .record_evaluation(OutcomeEvaluationRecord::new_pending(
+                "inv_p4_rej".to_string(),
+                "merchant_a".to_string(),
+                "pay_p4_rej".to_string(),
+                "razorpay".to_string(),
+                "HEALTHY_COMPLETED".to_string(),
+                crate::provider::ProviderKind::Ollama,
+                "deepseek-r1:1.5b".to_string(),
+                false,
+                CanonicalPaymentState::Created,
+            ))
+            .await
+            .unwrap();
+        let res_inc = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_inc),
+                ResolutionAuditEvent {
+                    audit_id: "raud_rej_1".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_inc.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system:payment_intelligence".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: vec![],
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (rej_res, _, rej_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &res_inc.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rej_res.status, ResolutionStatus::Rejected);
+        assert_eq!(rej_res.accuracy, OutcomeAccuracy::Incorrect);
+        assert!(rej_mem.is_none());
+
+        // 2. Expired resolution -> Expired, never promoted
+        let mut eval_exp = OutcomeEvaluationRecord::new_pending(
+            "inv_p4_exp".to_string(),
+            "merchant_a".to_string(),
+            "pay_p4_rej".to_string(),
+            "razorpay".to_string(),
+            "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        )
+        .with_evidence_refs(vec!["webhook:evt_p4_fail".to_string()]);
+        eval_exp.expires_at = Some(now - chrono::Duration::seconds(5));
+        let eval_exp = mem_store.record_evaluation(eval_exp).await.unwrap();
+        let res_exp = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_exp),
+                ResolutionAuditEvent {
+                    audit_id: "raud_exp_1".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_exp.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system:payment_intelligence".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: vec![],
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (exp_res, _, exp_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &res_exp.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exp_res.status, ResolutionStatus::Expired);
+        assert!(exp_mem.is_none());
+
+        // 3. PROVIDER_DEGRADED_OR_TIMEOUT without citing attempt:<tx_id> or timeout webhook stays Pending
+        let eval_to = mem_store
+            .record_evaluation(OutcomeEvaluationRecord::new_pending(
+                "inv_p4_to".to_string(),
+                "merchant_a".to_string(),
+                "pay_p4_rej".to_string(),
+                "razorpay".to_string(),
+                "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+                crate::provider::ProviderKind::Ollama,
+                "deepseek-r1:1.5b".to_string(),
+                false,
+                CanonicalPaymentState::Failed,
+            ))
+            .await
+            .unwrap();
+        let res_to = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_to),
+                ResolutionAuditEvent {
+                    audit_id: "raud_to_1".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_to.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system:payment_intelligence".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: vec![],
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (to_res, _, to_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_for("merchant_a"),
+            &res_to.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(to_res.status, ResolutionStatus::Pending);
+        assert!(to_mem.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_phase4_provider_timeout_provenance_regressions() {
+        use esa_state::InMemoryWebhookStore;
+        let wh_store = InMemoryWebhookStore::new();
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+        let scope_a = scope_for("merchant_a");
+
+        async fn record_attempt(
+            wh: &InMemoryWebhookStore,
+            tx_id: &str,
+            pay_id: &str,
+            state: &str,
+            now: chrono::DateTime<Utc>,
+        ) {
+            wh.record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: tx_id.to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some(format!("order_{}", pay_id)),
+                payment_reference: Some(pay_id.to_string()),
+                amount_minor: 50000,
+                currency: "INR".to_string(),
+                state: state.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 1. Gateway transport timeout (attempt.state == "timeout") WITHOUT authoritative provider webhook
+        // Must fail closed and stay Pending (never verified as provider failure)
+        record_attempt(&wh_store, "tx_trans_to", "pay_trans_to", "timeout", now).await;
+        let eval_transport = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_trans_to".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_trans_to".to_string(),
+                    "razorpay".to_string(),
+                    "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Failed,
+                )
+                .with_evidence_refs(vec!["attempt:tx_trans_to".to_string()]),
+            )
+            .await
+            .unwrap();
+        let res_transport = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_transport),
+                ResolutionAuditEvent {
+                    audit_id: "raud_trans_to".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_transport.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval_transport.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (res_out, _, mem_out) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res_transport.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_out.status, ResolutionStatus::Pending);
+        assert!(mem_out.is_none());
+
+        // 2. Generic failed payment with timeout-like customer notes
+        // Payload has customer_notes: "Payment failed due to gateway_timeout on checkout page"
+        // But structured error_code is generic "BAD_REQUEST". Must fail closed and stay Pending!
+        record_attempt(&wh_store, "tx_notes_to", "pay_notes_to", "failed", now).await;
+        let notes_payload = serde_json::json!({
+            "event": "payment.failed",
+            "error_code": "BAD_REQUEST",
+            "customer_notes": "Payment failed due to gateway_timeout on checkout page",
+            "created_at": now.timestamp()
+        });
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_notes_to",
+                event_type: esa_core::PaymentEventType::PaymentFailed,
+                payment_id: "pay_notes_to",
+                amount_minor: 50000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &notes_payload,
+            })
+            .await
+            .unwrap();
+        let eval_notes = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_notes_to".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_notes_to".to_string(),
+                    "razorpay".to_string(),
+                    "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Failed,
+                )
+                .with_evidence_refs(vec!["webhook:evt_notes_to".to_string()]),
+            )
+            .await
+            .unwrap();
+        let res_notes = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_notes),
+                ResolutionAuditEvent {
+                    audit_id: "raud_notes_to".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_notes.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval_notes.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (res_notes_out, _, mem_notes_out) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res_notes.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_notes_out.status, ResolutionStatus::Pending);
+        assert!(mem_notes_out.is_none());
+
+        // 3. Incorrect or unrelated attempt citations: citing attempt:tx_other when attempt is tx_actual
+        let eval_unrelated = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_unrelated_to".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_trans_to".to_string(),
+                    "razorpay".to_string(),
+                    "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Failed,
+                )
+                .with_evidence_refs(vec!["attempt:tx_unrelated_random".to_string()]),
+            )
+            .await
+            .unwrap();
+        let res_unrelated = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_unrelated),
+                ResolutionAuditEvent {
+                    audit_id: "raud_unrelated_to".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_unrelated.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval_unrelated.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (res_unrel_out, _, mem_unrel_out) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res_unrelated.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_unrel_out.status, ResolutionStatus::Pending);
+        assert!(mem_unrel_out.is_none());
+
+        // 4. Provider-confirmed timeout: authoritative processed webhook with structured error_code "GATEWAY_TIMEOUT"
+        record_attempt(&wh_store, "tx_auth_to", "pay_auth_to", "failed", now).await;
+        let auth_payload = serde_json::json!({
+            "event": "payment.failed",
+            "error": {
+                "code": "GATEWAY_TIMEOUT",
+                "description": "Provider upstream gateway timed out"
+            },
+            "created_at": now.timestamp()
+        });
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_auth_timeout",
+                event_type: esa_core::PaymentEventType::PaymentFailed,
+                payment_id: "pay_auth_to",
+                amount_minor: 50000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &auth_payload,
+            })
+            .await
+            .unwrap();
+        let eval_auth = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_auth_to".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_auth_to".to_string(),
+                    "razorpay".to_string(),
+                    "PROVIDER_DEGRADED_OR_TIMEOUT".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Failed,
+                )
+                .with_evidence_refs(vec!["webhook:evt_auth_timeout".to_string()]),
+            )
+            .await
+            .unwrap();
+        let res_auth = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_auth),
+                ResolutionAuditEvent {
+                    audit_id: "raud_auth_to".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_auth.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval_auth.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (res_auth_out, _, mem_auth_out) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res_auth.resolution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_auth_out.status, ResolutionStatus::Verified);
+        assert_eq!(res_auth_out.accuracy, OutcomeAccuracy::Correct);
+        let promoted =
+            mem_auth_out.expect("Authoritative provider timeout must promote episodic memory");
+        assert_eq!(promoted.verification_status, VerificationStatus::Verified);
+    }
+
+    #[test]
+    fn test_strict_provider_timeout_error_code_allow_list() {
+        use crate::memory::types::is_strict_provider_timeout_event;
+        use esa_state::{WebhookInboxRecord, WebhookStatus};
+
+        let make_inbox = |provider: &str,
+                          event_type: &str,
+                          payload: serde_json::Value,
+                          status: WebhookStatus| {
+            WebhookInboxRecord {
+                id: 1,
+                provider: provider.to_string(),
+                provider_event_id: "evt_1".to_string(),
+                event_type: event_type.to_string(),
+                payment_id: Some("pay_1".to_string()),
+                refund_id: None,
+                status,
+                error_message: None,
+                received_at: Utc::now(),
+                processed_at: Some(Utc::now()),
+                payload,
+            }
+        };
+
+        let failed_ev_type = esa_core::PaymentEventType::PaymentFailed;
+
+        // 1. Razorpay allow-list
+        for code in [
+            "BAD_GATEWAY",
+            "GATEWAY_ERROR",
+            "GATEWAY_TIMEOUT",
+            "SERVER_ERROR",
+        ] {
+            let ev = make_inbox(
+                "razorpay",
+                "payment.failed",
+                serde_json::json!({ "error": { "code": code } }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "razorpay", false, Some(&failed_ev_type)),
+                "Razorpay code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 2. Cashfree allow-list
+        for code in [
+            "GATEWAY_ERROR",
+            "GATEWAY_TIMEOUT",
+            "BANK_COMMUNICATION_ERROR",
+            "SYSTEM_ERROR",
+        ] {
+            let ev = make_inbox(
+                "cashfree",
+                "payment.failed",
+                serde_json::json!({ "data": { "payment": { "error_code": code } } }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "cashfree", false, Some(&failed_ev_type)),
+                "Cashfree code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 3. PayU allow-list
+        for code in ["E1601", "E1602", "E205", "GATEWAY_TIMEOUT", "BANK_TIMEOUT"] {
+            let ev = make_inbox(
+                "payu",
+                "payment_failed",
+                serde_json::json!({ "error_code": code }),
+                WebhookStatus::Processed,
+            );
+            assert!(
+                is_strict_provider_timeout_event(&ev, "payu", false, Some(&failed_ev_type)),
+                "PayU code {} must be recognized as provider timeout",
+                code
+            );
+        }
+
+        // 4. Free-text descriptions and /error/reason are strictly rejected
+        let ev_reason = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "error": { "reason": "gateway_timeout occurred" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_reason,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+
+        // 5. Customer notes with timeout text are rejected
+        let ev_notes = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "notes": { "desc": "gateway_timeout" }, "error": { "code": "BAD_REQUEST" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_notes,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+
+        // 6. Non-timeout error codes are rejected
+        for bad_code in [
+            "BAD_REQUEST",
+            "AUTHENTICATION_FAILED",
+            "PAYMENT_CANCELLED",
+            "NOT_A_TIMEOUT",
+            "timeout_not_supported",
+        ] {
+            let ev_bad = make_inbox(
+                "razorpay",
+                "payment.failed",
+                serde_json::json!({ "error": { "code": bad_code } }),
+                WebhookStatus::Processed,
+            );
+            assert!(!is_strict_provider_timeout_event(
+                &ev_bad,
+                "razorpay",
+                false,
+                Some(&failed_ev_type)
+            ));
+        }
+
+        // 7. Refund event with timeout-like error code is rejected
+        let refund_failed_type = esa_core::PaymentEventType::RefundFailed;
+        let ev_refund = make_inbox(
+            "razorpay",
+            "refund.failed",
+            serde_json::json!({ "error": { "code": "GATEWAY_TIMEOUT" } }),
+            WebhookStatus::Processed,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_refund,
+            "razorpay",
+            true,
+            Some(&refund_failed_type)
+        ));
+
+        // 8. Unprocessed webhook status is rejected
+        let ev_unproc = make_inbox(
+            "razorpay",
+            "payment.failed",
+            serde_json::json!({ "error": { "code": "GATEWAY_TIMEOUT" } }),
+            WebhookStatus::Pending,
+        );
+        assert!(!is_strict_provider_timeout_event(
+            &ev_unproc,
+            "razorpay",
+            false,
+            Some(&failed_ev_type)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_generic_store_memory_rejects_fabricated_provenance_and_episodic_creation() {
+        let store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+
+        // 1. Caller supplies episodic memory with Verified status, fabricated provenance claiming verification
+        let fabricated = MemoryRecord {
+            memory_id: "mem_fabricated_1".to_string(),
+            memory_type: MemoryType::Episodic,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some("merchant_a".to_string()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "PAYMENT_FAILED_AT_PROVIDER".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Failed),
+            title: "Fabricated incident".to_string(),
+            summary: "Fabricated summary".to_string(),
+            resolution: Some("Fabricated resolution".to_string()),
+            source_refs: vec!["payment:pay_fake".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+            provenance: Some(MemoryProvenance {
+                evaluation_id: "eval_fake_999".to_string(),
+                resolution_id: "res_fake_999".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                payment_reference: "pay_fake".to_string(),
+                provider: "razorpay".to_string(),
+                verified_at: now,
+                verification_method: "fabricated_bypass".to_string(),
+                supporting_evidence_refs: vec!["arbitrary_ref".to_string()],
+                evidence_provenance: vec!["fake_source".to_string()],
+                promotion_decision: "promoted_verified_correct".to_string(),
+            }),
+        };
+
+        let err = store.store_memory(fabricated).await.unwrap_err();
+        assert_eq!(err.category, InferenceErrorCategory::Forbidden);
+        assert!(err
+            .message
+            .contains("Episodic memories cannot be created or modified directly"));
+
+        // 2. Working, Semantic, and Procedural memory can legitimately be stored
+        let working = MemoryRecord {
+            memory_id: "mem_wm_1".to_string(),
+            memory_type: MemoryType::Working,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some("merchant_a".to_string()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "PAYMENT_ANALYSIS".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Authorized),
+            title: "Working memory title".to_string(),
+            summary: "Working notes".to_string(),
+            resolution: None,
+            source_refs: vec!["payment:pay_wm".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::hours(2)),
+            provenance: None,
+        };
+        let stored_wm = store.store_memory(working).await.unwrap();
+        assert_eq!(stored_wm.memory_id, "mem_wm_1");
+    }
+
+    #[tokio::test]
+    async fn test_phase4_untrusted_webhook_audit_regressions() {
+        use esa_state::{InMemoryWebhookStore, WebhookDeliveryAuditRecord};
+        let wh_store = InMemoryWebhookStore::new();
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let now = Utc::now();
+        let scope_a = scope_for("merchant_a");
+
+        // 1. Unverified delivery audit with rejected signature
+        // Ingress rejects untrusted payload attribution: merchant_id and payment_id are None
+        let unverified = WebhookDeliveryAuditRecord {
+            delivery_id: "dlv_forged_1".to_string(),
+            merchant_id: None,
+            provider: "razorpay".to_string(),
+            provider_event_id: "evt_forged_spoof".to_string(),
+            payment_id: None,
+            inbox_id: None,
+            original_delivery_id: None,
+            attempt_number: 1,
+            first_received_at: now,
+            received_at: now,
+            signature_verified: false,
+            processing_result: "signature_failed".to_string(),
+            deduplication_result: "not_applicable".to_string(),
+            is_duplicate: false,
+            final_disposition: "rejected_signature".to_string(),
+            error_message: Some("Invalid signature".to_string()),
+        };
+        wh_store
+            .record_webhook_delivery_attempt(&unverified)
+            .await
+            .unwrap();
+
+        // Querying delivery audits for merchant_a and pay_secret_123 MUST return 0 records
+        let audits = wh_store
+            .list_webhook_delivery_audits_for_payment("merchant_a", "pay_secret_123", 50)
+            .await
+            .unwrap();
+        assert!(
+            audits.is_empty(),
+            "Unverified delivery records must never attribute merchant or payment identities"
+        );
+
+        // 2. Legitimate webhook arrival: must NOT be front-run by unverified delivery
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_legit_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_legit".to_string()),
+                payment_reference: Some("pay_legit".to_string()),
+                amount_minor: 10000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let legit_payload = serde_json::json!({
+            "event": "payment.captured",
+            "created_at": now.timestamp()
+        });
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_forged_spoof", // same event ID that an attacker previously probed with invalid signature
+                event_type: esa_core::PaymentEventType::PaymentCaptured,
+                payment_id: "pay_legit",
+                amount_minor: 10000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &legit_payload,
+            })
+            .await
+            .unwrap();
+
+        // The first verified delivery must have attempt_number == 1 and original_delivery_id == None
+        let legit_audits = wh_store
+            .list_webhook_delivery_audits_for_payment("merchant_a", "pay_legit", 50)
+            .await
+            .unwrap();
+        assert_eq!(legit_audits.len(), 1);
+        assert_eq!(legit_audits[0].attempt_number, 1);
+        assert!(legit_audits[0].original_delivery_id.is_none());
+        assert!(!legit_audits[0].is_duplicate);
+
+        // 3. Untrusted duplicate claims cannot verify DUPLICATE_WEBHOOK_SUPPRESSED
+        let eval_dup = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_untrusted_dup".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_legit".to_string(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec!["webhook:evt_forged_spoof".to_string()]),
+            )
+            .await
+            .unwrap();
+        let res_dup = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval_dup),
+                ResolutionAuditEvent {
+                    audit_id: "raud_dup".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval_dup.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval_dup.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let (dup_out, _, dup_mem) = verify_resolution_from_webhook_store(
+            &wh_store,
+            &mem_store,
+            &scope_a,
+            &res_dup.resolution_id,
+        )
+        .await
+        .unwrap();
+        // Since only 1 verified delivery exists (the other was unverified), it must stay Pending!
+        assert_eq!(dup_out.status, ResolutionStatus::Pending);
+        assert!(dup_mem.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_phase4_episodic_memory_immutability_and_purge() {
+        let mem_store = InMemoryPaymentMemoryStore::new();
+        let scope_a = scope_for("merchant_a");
+        let now = Utc::now();
+
+        // 1. Create a promoted verified episodic memory
+        let verified_memory = MemoryRecord {
+            memory_id: "mem_ep_immutable_1".to_string(),
+            memory_type: MemoryType::Episodic,
+            scope: MemoryScope::Merchant,
+            merchant_id: Some("merchant_a".to_string()),
+            provider: Some("razorpay".to_string()),
+            incident_category: "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+            lifecycle_state: Some(CanonicalPaymentState::Captured),
+            title: "Verified duplicate webhook incident".to_string(),
+            summary: "Verified duplicate webhook was suppressed cleanly".to_string(),
+            resolution: Some("deduplicated_noop".to_string()),
+            source_refs: vec!["payment:pay_immut_1".to_string()],
+            verification_status: VerificationStatus::Verified,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + chrono::Duration::days(90)),
+            provenance: Some(MemoryProvenance {
+                evaluation_id: "eval_immut_1".to_string(),
+                resolution_id: "res_immut_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                payment_reference: "pay_immut_1".to_string(),
+                provider: "razorpay".to_string(),
+                verified_at: now,
+                verification_method: "deterministic_evidence".to_string(),
+                supporting_evidence_refs: vec!["delivery:dlv_1".to_string()],
+                evidence_provenance: vec![],
+                promotion_decision: "promoted_verified_correct".to_string(),
+            }),
+        };
+        // 1. Direct store_memory with verified episodic memory must return Forbidden (Finding 1)
+        let create_err = mem_store
+            .store_memory(verified_memory.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(create_err.category, InferenceErrorCategory::Forbidden);
+
+        // Insert legitimate record directly via test helper for immutability testing
+        mem_store.insert_test_memory(verified_memory.clone());
+
+        // 2. Modifying via store_memory must return Forbidden
+        let mut tampered = verified_memory.clone();
+        tampered.summary = "Tampered summary attempt".to_string();
+        let update_err = mem_store.store_memory(tampered).await.unwrap_err();
+        assert_eq!(update_err.category, InferenceErrorCategory::Forbidden);
+
+        // 3. Deleting verified episodic memory via delete_memory must return Forbidden
+        let del_err = mem_store
+            .delete_memory(&scope_a, "mem_ep_immutable_1")
+            .await
+            .unwrap_err();
+        assert_eq!(del_err.category, InferenceErrorCategory::Forbidden);
+
+        // 4. Memory must still exist intact
+        let retrieved = mem_store
+            .query_memories(&MemoryQuery {
+                scope: scope_a.clone(),
+                memory_types: vec![MemoryType::Episodic],
+                provider: None,
+                incident_category: None,
+                lifecycle_state: None,
+                since: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].memory_id, "mem_ep_immutable_1");
+
+        // 5. Expired memory purge: unexpired memory is NOT purged
+        let purged = mem_store.purge_expired().await.unwrap();
+        assert_eq!(purged, 0);
+
+        // Expired evaluation is purged correctly without touching active memories
+        let mut exp_eval = OutcomeEvaluationRecord::new_pending(
+            "inv_exp_purge".to_string(),
+            "merchant_a".to_string(),
+            "pay_exp_purge".to_string(),
+            "razorpay".to_string(),
+            "PROVIDER_STATE_DISCREPANCY".to_string(),
+            crate::provider::ProviderKind::Ollama,
+            "deepseek-r1:1.5b".to_string(),
+            false,
+            CanonicalPaymentState::Failed,
+        );
+        exp_eval.expires_at = Some(now - chrono::Duration::hours(1));
+        mem_store.record_evaluation(exp_eval).await.unwrap();
+        let purged_count = mem_store.purge_expired().await.unwrap();
+        assert_eq!(purged_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_phase4_concurrent_verification_atomicity() {
+        use esa_state::InMemoryWebhookStore;
+        let wh_store = Arc::new(InMemoryWebhookStore::new());
+        let mem_store = Arc::new(InMemoryPaymentMemoryStore::new());
+        let now = Utc::now();
+        let scope_a = scope_for("merchant_a");
+
+        wh_store
+            .record_payment_attempt(&PaymentAttemptRecord {
+                transaction_id: "tx_conc_1".to_string(),
+                merchant_id: "merchant_a".to_string(),
+                provider: "razorpay".to_string(),
+                provider_order_id: Some("order_conc".to_string()),
+                payment_reference: Some("pay_conc".to_string()),
+                amount_minor: 25000,
+                currency: "INR".to_string(),
+                state: "captured".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let captured_payload = serde_json::json!({
+            "event": "payment.captured",
+            "created_at": now.timestamp()
+        });
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_conc_dup",
+                event_type: esa_core::PaymentEventType::PaymentCaptured,
+                payment_id: "pay_conc",
+                amount_minor: 25000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &captured_payload,
+            })
+            .await
+            .unwrap();
+        wh_store
+            .process_webhook_event(&esa_state::WebhookEventParams {
+                provider: "razorpay",
+                provider_event_id: "evt_conc_dup",
+                event_type: esa_core::PaymentEventType::PaymentCaptured,
+                payment_id: "pay_conc",
+                amount_minor: 25000,
+                currency: "INR",
+                refund_id: None,
+                refund_amount_minor: None,
+                refund_status: None,
+                payload: &captured_payload,
+            })
+            .await
+            .unwrap();
+
+        let eval = mem_store
+            .record_evaluation(
+                OutcomeEvaluationRecord::new_pending(
+                    "inv_conc".to_string(),
+                    "merchant_a".to_string(),
+                    "pay_conc".to_string(),
+                    "razorpay".to_string(),
+                    "DUPLICATE_WEBHOOK_SUPPRESSED".to_string(),
+                    crate::provider::ProviderKind::Ollama,
+                    "deepseek-r1:1.5b".to_string(),
+                    false,
+                    CanonicalPaymentState::Captured,
+                )
+                .with_evidence_refs(vec!["webhook:evt_conc_dup".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let res = mem_store
+            .record_resolution(
+                TrustedResolutionRecord::from_evaluation(&eval),
+                ResolutionAuditEvent {
+                    audit_id: "raud_conc".to_string(),
+                    resolution_id: format!("res_{}", Uuid::new_v4().simple()),
+                    evaluation_id: eval.evaluation_id.clone(),
+                    merchant_id: "merchant_a".to_string(),
+                    from_status: None,
+                    to_status: ResolutionStatus::Pending,
+                    actor: "system".to_string(),
+                    verification_method: "pending_investigation".to_string(),
+                    reason: "init".to_string(),
+                    evidence_refs: eval.supporting_evidence_refs.clone(),
+                    evidence_provenance: vec![],
+                    promoted_memory_id: None,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+
+        let res_id = res.resolution_id.clone();
+        let (r1, r2) = tokio::join!(
+            verify_resolution_from_webhook_store(&*wh_store, &*mem_store, &scope_a, &res_id),
+            verify_resolution_from_webhook_store(&*wh_store, &*mem_store, &scope_a, &res_id),
+        );
+
+        let (res1, audits1, mem1) = r1.unwrap();
+        let (res2, audits2, mem2) = r2.unwrap();
+
+        assert_eq!(res1.status, ResolutionStatus::Verified);
+        assert_eq!(res2.status, ResolutionStatus::Verified);
+        assert_eq!(res1.promoted_memory_id, res2.promoted_memory_id);
+        assert_eq!(mem1.unwrap().memory_id, mem2.unwrap().memory_id);
+        assert_eq!(audits1.len(), audits2.len());
+
+        // Ensure only one episodic memory was created in the store
+        let all_mem = mem_store
+            .query_memories(&MemoryQuery {
+                scope: scope_a,
+                memory_types: vec![MemoryType::Episodic],
+                provider: None,
+                incident_category: None,
+                lifecycle_state: None,
+                since: None,
+                limit: 50,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            all_mem.len(),
+            1,
+            "Concurrent verification must not produce duplicate episodic memories"
+        );
     }
 }

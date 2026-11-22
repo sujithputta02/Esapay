@@ -1,4 +1,7 @@
-use crate::memory::{MemoryRecord, MemoryRetriever, OutcomeEvaluationRecord, WorkingMemory};
+use crate::memory::{
+    MemoryRecord, MemoryRetriever, OutcomeEvaluationRecord, ResolutionAuditEvent, ResolutionStatus,
+    TrustedResolutionRecord, WorkingMemory,
+};
 use crate::payment_context::{CanonicalPaymentState, PaymentIntelligenceContext};
 use crate::privacy;
 use crate::provider::{
@@ -95,6 +98,8 @@ pub struct PaymentInvestigationReport {
     pub model_id: String,
     pub deterministic_fallback_used: bool,
     pub evaluation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -412,13 +417,36 @@ impl PaymentIntelligenceAgent {
             context.authoritative_state,
         )
         .with_evidence_refs(diag.supporting_evidence_refs.clone());
-        let eval_id = self
-            .retriever
-            .store()
-            .record_evaluation(eval)
-            .await
-            .ok()
-            .map(|e| e.evaluation_id);
+        let recorded_eval = self.retriever.store().record_evaluation(eval).await.ok();
+        let eval_id = recorded_eval.as_ref().map(|e| e.evaluation_id.clone());
+        let resolution_id = if let Some(ref ev) = recorded_eval {
+            let mut res = TrustedResolutionRecord::from_evaluation(ev);
+            res.missing_evidence = context.missing_data.clone();
+            let audit = ResolutionAuditEvent {
+                audit_id: format!("raud_{}", uuid::Uuid::new_v4().simple()),
+                resolution_id: res.resolution_id.clone(),
+                evaluation_id: ev.evaluation_id.clone(),
+                merchant_id: ev.merchant_id.clone(),
+                from_status: None,
+                to_status: ResolutionStatus::Pending,
+                actor: "system:payment_intelligence".to_string(),
+                verification_method: "pending_investigation".to_string(),
+                reason: "Investigation recorded pending independent authoritative verification"
+                    .to_string(),
+                evidence_refs: ev.supporting_evidence_refs.clone(),
+                evidence_provenance: Vec::new(),
+                promoted_memory_id: None,
+                created_at: ev.created_at,
+            };
+            self.retriever
+                .store()
+                .record_resolution(res, audit)
+                .await
+                .ok()
+                .map(|r| r.resolution_id)
+        } else {
+            None
+        };
 
         working_mem.clear();
 
@@ -439,6 +467,7 @@ impl PaymentIntelligenceAgent {
             model_id,
             deterministic_fallback_used: fallback_used,
             evaluation_id: eval_id,
+            resolution_id,
         })
     }
 }
@@ -540,6 +569,10 @@ pub fn deterministic_payment_diagnosis(
                     vec!["Inspect payment_refunds status and provider refund timeline (read-only).".to_string()],
                 )
             } else if ctx.provider_observation.discrepancy_detected {
+                let attempt_state_ref = format!("attempt_state:{}", ctx.attempt_state);
+                if ctx.allowed_evidence_refs.iter().any(|r| r == &attempt_state_ref) {
+                    evidence.push(attempt_state_ref);
+                }
                 (
                     PaymentIncidentRootCause::ProviderStateDiscrepancy,
                     "Authoritative payment record differs from attempt or observed provider status."
