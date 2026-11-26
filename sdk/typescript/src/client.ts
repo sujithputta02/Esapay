@@ -137,7 +137,11 @@ export class ESAClient {
       ws.onmessage = (event: any) => {
         try {
           const data = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
-          if (data.type === 'VitalsUpdate' || data.total_tps !== undefined) {
+          if (
+            data.type === 'vitals_update' ||
+            data.type === 'VitalsUpdate' ||
+            data.total_tps !== undefined
+          ) {
             callback(data);
           }
         } catch {
@@ -247,20 +251,34 @@ export class ESAClient {
     },
 
     createOrder: async (params: PaymentOrderParams): Promise<PaymentOrderResponse> => {
+      const amount_cents = params.amount_cents ?? params.amount;
       return this.request<PaymentOrderResponse>('/api/razorpay/orders', {
         method: 'POST',
-        body: JSON.stringify(params),
+        body: JSON.stringify({
+          amount_cents,
+          currency: params.currency,
+          receipt: params.receipt,
+          region: params.region,
+          payment_method: params.payment_method,
+          notes: params.notes,
+        }),
       });
     },
 
-    confirm: async (params: {
-      razorpay_payment_id: string;
-      razorpay_order_id: string;
-      razorpay_signature: string;
-    }): Promise<{ success: boolean; order_id: string }> => {
-      return this.request<{ success: boolean; order_id: string }>('/api/razorpay/confirm', {
+    confirm: async (
+      params:
+        | { payment_id: string }
+        | {
+            razorpay_payment_id: string;
+            razorpay_order_id?: string;
+            razorpay_signature?: string;
+          }
+    ): Promise<Record<string, unknown>> => {
+      const payment_id =
+        'payment_id' in params ? params.payment_id : params.razorpay_payment_id;
+      return this.request<Record<string, unknown>>('/api/razorpay/confirm', {
         method: 'POST',
-        body: JSON.stringify(params),
+        body: JSON.stringify({ payment_id }),
       });
     },
   };

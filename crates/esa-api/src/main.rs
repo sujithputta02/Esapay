@@ -5996,7 +5996,7 @@ async fn universal_checkout(
                     true,
                     "⚠️ Requested Cashfree is unavailable/degraded -> Autonomous failover executed to PayU India".to_string(),
                 )
-            } else if cf_configured {
+            } else if cf_configured && cf_env_ok {
                 (
                     PaymentGateway::Cashfree,
                     false,
@@ -6037,7 +6037,7 @@ async fn universal_checkout(
                     true,
                     "⚠️ Requested PayU is unavailable/degraded -> Autonomous failover executed to Cashfree Payments".to_string(),
                 )
-            } else if payu_configured {
+            } else if payu_configured && payu_env_ok {
                 (
                     PaymentGateway::PayU,
                     false,
