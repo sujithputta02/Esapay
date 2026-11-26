@@ -6932,7 +6932,9 @@ mod integration_tests {
             gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             webhook_store: Arc::new(InMemoryWebhookStore::new()),
             order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            checkout_idempotency: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            checkout_idempotency: Arc::new(
+                std::sync::RwLock::new(std::collections::HashMap::new()),
+            ),
             benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox_keys,
             memory_store,
