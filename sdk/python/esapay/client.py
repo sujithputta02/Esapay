@@ -51,14 +51,18 @@ class AuditSubsystem:
 
     def get_blocks(self) -> List[AuditBlock]:
         """Retrieve the immutable SHA-256 decision audit chain."""
-        raw = self._client._request("/api/audit/blocks")
+        raw = self._client._request("/api/audit/trail")
+        if isinstance(raw, dict):
+            records = raw.get("audit_records", [])
+            if isinstance(records, list):
+                return [AuditBlock.from_dict(item) for item in records]
         if isinstance(raw, list):
             return [AuditBlock.from_dict(item) for item in raw]
         return []
 
     def verify_chain(self) -> Dict[str, Any]:
         """Verify mathematical integrity of the SHA-256 audit ledger."""
-        return self._client._request("/api/audit/verify")
+        return self._client._request("/api/audit/verify-chain")
 
 class EsaGateway:
     """

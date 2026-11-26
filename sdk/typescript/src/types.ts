@@ -102,19 +102,23 @@ export interface AuditVerificationResult {
 }
 
 export interface PaymentOrderParams {
-  amount: number;
-  currency: string;
+  amount_cents?: number;
+  amount?: number;
+  currency?: string;
   receipt?: string;
+  region?: string;
+  payment_method?: string;
   notes?: Record<string, string>;
 }
 
 export interface PaymentOrderResponse {
-  id: string;
+  order_id: string;
   amount: number;
   currency: string;
+  key_id: string;
   receipt?: string;
-  status: string;
-  created_at: number;
+  region?: string;
+  payment_method?: string;
 }
 
 export type PaymentGatewayType =
@@ -123,6 +127,7 @@ export type PaymentGatewayType =
   | 'stripe'
   | 'phonepe'
   | 'cashfree'
+  | 'payu'
   | 'paytm'
   | 'adyen';
 

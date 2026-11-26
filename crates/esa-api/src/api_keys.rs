@@ -1445,6 +1445,17 @@ pub async fn generate_sandbox_key_handler(
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if crate::is_production_mode() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Sandbox key generation is disabled in production mode"
+            })),
+        )
+            .into_response();
+    }
+
     let source_id = crate::rate_limiter::extract_client_source_identifier(
         connect_info.map(|ci| ci.0),
         &headers,
