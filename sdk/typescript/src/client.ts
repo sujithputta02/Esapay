@@ -11,6 +11,7 @@ import type {
   GatewayHealth,
   CheckoutParams,
   CheckoutDecision,
+  PaymentTransactionStatus,
 } from './types.js';
 
 import * as fs from 'node:fs';
@@ -242,8 +243,17 @@ export class ESAClient {
     checkout: async (params: CheckoutParams): Promise<CheckoutDecision> => {
       return this.request<CheckoutDecision>('/api/payments/checkout', {
         method: 'POST',
+        headers: params.idempotency_key
+          ? { 'Idempotency-Key': params.idempotency_key }
+          : undefined,
         body: JSON.stringify(params),
       });
+    },
+
+    getStatus: async (transactionId: string): Promise<PaymentTransactionStatus> => {
+      return this.request<PaymentTransactionStatus>(
+        `/api/payments/transactions/${encodeURIComponent(transactionId)}`
+      );
     },
 
     createOrder: async (params: PaymentOrderParams): Promise<PaymentOrderResponse> => {
@@ -305,6 +315,13 @@ export class ESAClient {
    */
   async checkout(params: CheckoutParams): Promise<CheckoutDecision> {
     return this.payments.checkout(params);
+  }
+
+  /**
+   * Look up the current durable state of a payment attempt by transaction_id
+   */
+  async getPaymentStatus(transactionId: string): Promise<PaymentTransactionStatus> {
+    return this.payments.getStatus(transactionId);
   }
 }
 

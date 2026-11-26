@@ -4,7 +4,13 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from typing import Optional, Dict, Any, List, Union
-from .types import GatewayHealth, CheckoutDecision, WorkloadEntity, AuditBlock
+from .types import (
+    GatewayHealth,
+    CheckoutDecision,
+    PaymentTransactionStatus,
+    WorkloadEntity,
+    AuditBlock,
+)
 
 class EsaClientError(Exception):
     """Base exception for ESA Client errors."""
@@ -108,6 +114,7 @@ class EsaGateway:
         path: str,
         method: str = "GET",
         data: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> Any:
         url = f"{self.api_url}{path}"
         headers = {
@@ -117,6 +124,8 @@ class EsaGateway:
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if extra_headers:
+            headers.update(extra_headers)
 
         body = json.dumps(data).encode("utf-8") if data is not None else None
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -146,20 +155,38 @@ class EsaGateway:
         currency: str = "INR",
         gateway: str = "auto",
         method: str = "UPI",
+        idempotency_key: Optional[str] = None,
     ) -> CheckoutDecision:
         """
         Execute an autonomous payment routing decision.
         If a bank rail or gateway is degraded, ESA safely executes sub-second
         failover to an optimal healthy rail.
+        Pass `idempotency_key` so retries after a client timeout safely return
+        the original routing decision without creating a duplicate attempt.
         """
-        payload = {
+        payload: Dict[str, Any] = {
             "amount": amount,
             "currency": currency,
             "gateway": gateway,
             "method": method,
         }
-        raw = self._request("/api/payments/checkout", method="POST", data=payload)
+        extra_headers = None
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+            extra_headers = {"Idempotency-Key": idempotency_key}
+        raw = self._request(
+            "/api/payments/checkout",
+            method="POST",
+            data=payload,
+            extra_headers=extra_headers,
+        )
         return CheckoutDecision.from_dict(raw)
+
+    def get_payment_status(self, transaction_id: str) -> PaymentTransactionStatus:
+        """Look up the durable state of a payment attempt by transaction_id."""
+        path = f"/api/payments/transactions/{urllib.parse.quote(transaction_id, safe='')}"
+        raw = self._request(path)
+        return PaymentTransactionStatus.from_dict(raw)
 
 # Alias for backwards compatibility
 ESAClient = EsaGateway

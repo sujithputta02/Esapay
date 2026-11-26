@@ -418,6 +418,8 @@ def verify_esa_webhook(raw_payload: bytes, signature_header: str, secret: str) -
 
 ## 🛡️ Error Handling
 
+See the [checkout timeout & idempotency guide](../../docs/api.md#handling-a-checkout-timeout-safely) for safe retry and status-lookup patterns (`idempotency_key` and `get_payment_status`).
+
 The client raises `EsaClientError` with HTTP status codes and upstream diagnostic context:
 
 ```python
