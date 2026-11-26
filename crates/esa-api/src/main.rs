@@ -975,6 +975,7 @@ async fn main() -> anyhow::Result<()> {
         gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         webhook_store,
         order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        checkout_idempotency: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sandbox_keys,
         memory_store,
@@ -1016,6 +1017,14 @@ fn build_app(app_state: AppState) -> Router {
         .route("/api/v1/gateways/:name/toggle", post(toggle_gateway))
         .route("/api/payments/checkout", post(universal_checkout))
         .route("/api/v1/payments/checkout", post(universal_checkout))
+        .route(
+            "/api/payments/transactions/:transaction_id",
+            get(get_payment_transaction_status),
+        )
+        .route(
+            "/api/v1/payments/transactions/:transaction_id",
+            get(get_payment_transaction_status),
+        )
         .route("/api/workloads", get(list_workloads).post(create_workload))
         .route(
             "/api/v1/workloads",
@@ -1383,6 +1392,9 @@ pub(crate) struct AppState {
     /// The authoritative source of merchant ownership is always the server-created order.notes.esa_merchant_id
     /// returned directly by the upstream Razorpay API. Client-supplied payment notes are never trusted.
     pub(crate) order_merchants: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Process-local in-memory idempotency cache for `POST /api/payments/checkout`, keyed by `<merchant_id>:<idempotency_key>`.
+    pub(crate) checkout_idempotency:
+        Arc<std::sync::RwLock<std::collections::HashMap<String, CachedCheckoutDecision>>>,
     /// Concurrency control for benchmark execution to prevent duplicate concurrent runs.
     pub(crate) benchmark_running: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sandbox_keys: Arc<api_keys::SandboxKeyStore>,
@@ -5319,6 +5331,22 @@ struct UniversalCheckoutRequest {
     customer_phone: Option<String>,
     #[serde(default)]
     return_url: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CheckoutFingerprint {
+    amount_minor: u64,
+    currency: String,
+    gateway: String,
+    method: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedCheckoutDecision {
+    fingerprint: CheckoutFingerprint,
+    decision: GatewayRouteDecision,
 }
 
 fn default_currency() -> String {
@@ -5730,6 +5758,42 @@ async fn universal_checkout(
         };
 
     let method_str = normalized_method?;
+    let header_idem_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_idem_key = req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let resolved_idempotency_key: Option<String> = match (header_idem_key, body_idem_key) {
+        (Some(h), Some(b)) if h != b => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "idempotency_key_mismatch",
+                    "message": "Idempotency-Key header does not match body idempotency_key"
+                })),
+            ));
+        }
+        (Some(h), _) => Some(h.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
+    };
+    if let Some(ref key) = resolved_idempotency_key {
+        if key.len() > 255 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_idempotency_key",
+                    "message": "Idempotency key must be 255 characters or fewer"
+                })),
+            ));
+        }
+    }
+
     let payment_class = match method_str.as_str() {
         "card" | "credit" | "debit" => Some(PaymentMethodClass::Card),
         "netbanking" | "nb" => Some(PaymentMethodClass::NetBanking),
@@ -5825,6 +5889,34 @@ async fn universal_checkout(
             ));
         }
     };
+
+    let checkout_fingerprint = CheckoutFingerprint {
+        amount_minor: resolved_amount.amount_minor,
+        currency: resolved_amount.currency.clone(),
+        gateway: gw_cleaned.clone(),
+        method: method_str.clone(),
+    };
+    let scoped_idem_key = resolved_idempotency_key
+        .as_ref()
+        .map(|k| format!("{}:{}", caller.merchant_id, k));
+    if let Some(ref cache_key) = scoped_idem_key {
+        let cache = state
+            .checkout_idempotency
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = cache.get(cache_key) {
+            if cached.fingerprint == checkout_fingerprint {
+                return Ok(Json(cached.decision.clone()));
+            }
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "idempotency_key_conflict",
+                    "message": "Idempotency key was already used with different checkout parameters"
+                })),
+            ));
+        }
+    }
 
     let (rzp_override, cashfree_override, payu_override) = {
         let overrides = state
@@ -6328,7 +6420,7 @@ async fn universal_checkout(
         map.insert(tx_id.clone(), caller.merchant_id.clone());
     }
 
-    Ok(Json(GatewayRouteDecision {
+    let decision = GatewayRouteDecision {
         transaction_id: tx_id,
         amount: resolved_amount.amount_minor,
         amount_minor: resolved_amount.amount_minor,
@@ -6342,7 +6434,96 @@ async fn universal_checkout(
         timestamp: chrono::Utc::now(),
         session: checkout_session,
         provider_order_id,
-    }))
+    };
+
+    if let Some(cache_key) = scoped_idem_key {
+        let mut cache = state
+            .checkout_idempotency
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.insert(
+            cache_key,
+            CachedCheckoutDecision {
+                fingerprint: checkout_fingerprint,
+                decision: decision.clone(),
+            },
+        );
+    }
+
+    Ok(Json(decision))
+}
+
+async fn get_payment_transaction_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(transaction_id): Path<String>,
+) -> Result<Json<esa_core::provider::PaymentAttemptRecord>, (StatusCode, Json<serde_json::Value>)> {
+    let caller = match api_keys::authenticate_caller(&headers).await {
+        Ok(c) => c,
+        Err(err) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized",
+                    "message": format!("Authentication required for transaction lookup: {}", err)
+                })),
+            ));
+        }
+    };
+
+    if !caller
+        .scopes
+        .iter()
+        .any(|s| s == "payments:read" || s == "payments:write" || s == "admin" || s == "*")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Caller lacks required 'payments:read' or 'payments:write' scope"
+            })),
+        ));
+    }
+
+    let trimmed_id = transaction_id.trim();
+    if trimmed_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_transaction_id",
+                "message": "transaction_id must not be empty"
+            })),
+        ));
+    }
+
+    match state.webhook_store.get_payment_attempt(trimmed_id).await {
+        Ok(Some(attempt)) => {
+            if attempt.merchant_id != caller.merchant_id && !caller.is_admin() {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "forbidden",
+                        "message": "Cross-merchant transaction lookup is restricted to administrators"
+                    })),
+                ));
+            }
+            Ok(Json(attempt))
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "transaction_not_found",
+                "message": format!("No payment attempt found for '{}'", trimmed_id)
+            })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "lookup_failure",
+                "message": format!("Failed to query payment attempt: {}", e)
+            })),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6751,6 +6932,9 @@ mod integration_tests {
             gateway_overrides: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             webhook_store: Arc::new(InMemoryWebhookStore::new()),
             order_merchants: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            checkout_idempotency: Arc::new(
+                std::sync::RwLock::new(std::collections::HashMap::new()),
+            ),
             benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox_keys,
             memory_store,
@@ -6871,6 +7055,123 @@ mod integration_tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_checkout_idempotency_key_replay_and_conflict() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-checkout-idem-key");
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        let body_a = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-checkout-idem-key")
+            .header("idempotency-key", "idem-checkout-001")
+            .body(axum::body::Body::from(body_a.clone()))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let bytes1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json1: serde_json::Value = serde_json::from_slice(&bytes1).unwrap();
+        let tx_id_1 = json1["transaction_id"].as_str().unwrap().to_string();
+
+        // Replay with same key and parameters returns the exact same transaction_id
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-checkout-idem-key")
+            .header("idempotency-key", "idem-checkout-001")
+            .body(axum::body::Body::from(body_a))
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let bytes2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+        assert_eq!(json2["transaction_id"].as_str().unwrap(), tx_id_1);
+
+        // Reusing the same key with a different amount returns 409 Conflict
+        let body_b = serde_json::to_string(&serde_json::json!({
+            "amount": 9000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-checkout-idem-key")
+            .header("idempotency-key", "idem-checkout-001")
+            .body(axum::body::Body::from(body_b))
+            .unwrap();
+        let resp3 = app.oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_payment_transaction_status_lookup_and_not_found() {
+        let _guard = ScopedSimulatedCheckoutGuard::new("test-checkout-status-key");
+        let state = create_test_state();
+        let app = build_app(state.clone());
+
+        let body = serde_json::to_string(&serde_json::json!({
+            "amount": 5000,
+            "currency": "INR",
+            "gateway": "auto"
+        }))
+        .unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/payments/checkout")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-checkout-status-key")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let decision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let tx_id = decision["transaction_id"].as_str().unwrap().to_string();
+
+        let status_req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/payments/transactions/{}", tx_id))
+            .header("authorization", "Bearer test-checkout-status-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let status_resp = app.clone().oneshot(status_req).await.unwrap();
+        assert_eq!(status_resp.status(), StatusCode::OK);
+        let status_bytes = axum::body::to_bytes(status_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
+        assert_eq!(status_json["transaction_id"].as_str().unwrap(), tx_id);
+        assert_eq!(status_json["state"].as_str().unwrap(), "created");
+
+        let missing_req = Request::builder()
+            .method("GET")
+            .uri("/api/payments/transactions/tx_missing_999")
+            .header("authorization", "Bearer test-checkout-status-key")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let missing_resp = app.oneshot(missing_req).await.unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -142,6 +142,20 @@ export interface CheckoutParams {
   gateway?: PaymentGatewayType;
   method?: string;
   customer_id?: string;
+  idempotency_key?: string;
+}
+
+export interface PaymentTransactionStatus {
+  transaction_id: string;
+  merchant_id: string;
+  provider: string;
+  provider_order_id?: string | null;
+  payment_reference?: string | null;
+  amount_minor: number;
+  currency: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CheckoutDecision {

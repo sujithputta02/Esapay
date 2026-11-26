@@ -50,6 +50,35 @@ class CheckoutDecision:
             timestamp=data.get("timestamp"),
         )
 
+
+@dataclass
+class PaymentTransactionStatus:
+    transaction_id: str
+    merchant_id: str
+    provider: str
+    amount_minor: int
+    currency: str
+    state: str
+    provider_order_id: Optional[str] = None
+    payment_reference: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PaymentTransactionStatus":
+        return cls(
+            transaction_id=data.get("transaction_id", ""),
+            merchant_id=data.get("merchant_id", ""),
+            provider=data.get("provider", ""),
+            amount_minor=int(data.get("amount_minor", 0)),
+            currency=data.get("currency", "INR"),
+            state=data.get("state", ""),
+            provider_order_id=data.get("provider_order_id"),
+            payment_reference=data.get("payment_reference"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
 @dataclass
 class WorkloadEntity:
     id: str

@@ -462,6 +462,8 @@ export function verifyEsaWebhook(
 
 ## 🛡️ Error Handling
 
+See the [checkout timeout & idempotency guide](../../docs/api.md#handling-a-checkout-timeout-safely) for safe retry and status-lookup patterns (`idempotency_key` and `getPaymentStatus`).
+
 The SDK throws descriptive errors with status codes and upstream gateway diagnostic context:
 
 ```typescript

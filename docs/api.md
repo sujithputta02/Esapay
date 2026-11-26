@@ -84,6 +84,41 @@ If an expired or revoked key is provided, the API returns:
 
 ## Payment & Razorpay
 
+### `POST /api/payments/checkout`
+
+**Purpose:** Route a payment across healthy gateways with automatic failover. Supports an optional `Idempotency-Key` header (or `idempotency_key` body field) so retrying after a client timeout returns the original routing decision without creating a duplicate payment attempt. Reusing an idempotency key with different checkout parameters returns `409 Conflict`.
+
+### `GET /api/payments/transactions/:transaction_id`
+
+**Purpose:** Look up the durable state (`created`, `captured`, `failed`, etc.) of a payment attempt by `transaction_id` (or provider order ID) for post-timeout reconciliation.
+
+### Handling a checkout timeout safely
+
+If `POST /api/payments/checkout` times out on the client, do not start a fresh unkeyed checkout:
+
+1. If you passed an `idempotency_key`, retry `checkout` with the **same** `idempotency_key` and identical parameters to safely retrieve the original `transaction_id`.
+2. If you already have a `transaction_id`, call `GET /api/payments/transactions/:transaction_id` (`getPaymentStatus` in TypeScript, `get_payment_status` in Python) to check whether the attempt is still `created` (unknown/pending) or has reached a terminal state such as `failed` or `captured`.
+3. `GET /api/razorpay/status` only reports whether the Razorpay adapter is active; it cannot confirm the outcome of an individual attempt.
+
+```python
+from esapay import EsaGateway, EsaClientError
+
+esa = EsaGateway(api_url="http://localhost:8080")
+idem_key = "order_local_12345"
+
+try:
+    decision = esa.checkout(amount=1000, currency="INR", idempotency_key=idem_key)
+except EsaClientError:
+    # Safe to retry with the exact same idempotency_key & parameters
+    decision = esa.checkout(amount=1000, currency="INR", idempotency_key=idem_key)
+
+status = esa.get_payment_status(decision.transaction_id)
+if status.state == "failed":
+    print("Confirmed failure:", status.transaction_id)
+else:
+    print("Current state (do not double-charge):", status.state)
+```
+
 ### `POST /api/events/payment`
 
 **Purpose:** Ingest synthetic payment event → workload metrics update.
